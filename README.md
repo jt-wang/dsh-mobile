@@ -188,6 +188,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ../tools/android-build
 - [Подпись и выпуск Android APK](<docs/ANDROID_RELEASE.md>)
 - [Участие в проекте](<CONTRIBUTING.md>)
 
+## Нужно похожее решение?
+
+Проект сделал [Павел Логачев](https://github.com/pavel-logachev) — вайб-кодер с 20 годами в ИТ. С ИИ-агентами собираю сайты, веб-сервисы, Telegram-ботов, приложения и автоматизацию и сам довожу их до запуска. Опишите задачу своими словами [на почту](mailto:pavel@logachev.net) или [в Telegram](https://t.me/pavel_logachev) — начну с бесплатного разбора. Другие проекты — [в профиле](https://github.com/pavel-logachev) и на [logachev.net](https://logachev.net/).
+
 ## English
 
 DSH Mobile is an unofficial Android client for DeepSeek Harness, developed independently of DeepSeek. Your agent runs on your computer; your phone lets you browse chats across projects, send text tasks, follow live Markdown replies, add a message while the agent is working and stop a run. Optional notifications tell you when an answer is ready. Models, tools, subscriptions and canonical history stay on the computer.
@@ -195,6 +199,8 @@ DSH Mobile is an unofficial Android client for DeepSeek Harness, developed indep
 Pair with a one-use QR code and connect over Wi‑Fi, Tailscale or your own optional relay. DSH Mobile provides no hosted cloud server or shared relay. A companion plugin exposes a narrow HTTPS API, not the DSH web UI. The phone verifies the computer's pinned certificate, and each device has revocable permissions. Project filtering is not a sandbox: agents retain their desktop tool permissions.
 
 Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.5.0) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The computer must remain on. Notifications use an opt-in foreground connection without Google services; physical-phone notification delivery has not yet been verified. Attachments, answers to agent questions and approvals still require the desktop.
+
+Built by [Pavel Logachev](https://github.com/pavel-logachev), a vibe coder with 20 years in IT who ships websites, web services, Telegram bots, apps and automation with AI agents. Have a similar task? [pavel@logachev.net](mailto:pavel@logachev.net) · [logachev.net](https://logachev.net/)
 
 ## Лицензия
 
