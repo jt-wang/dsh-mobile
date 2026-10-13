@@ -190,7 +190,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ../tools/android-build
 
 ## Нужно похожее решение?
 
-Проект сделал [Павел Логачев](https://github.com/pavel-logachev) — вайб-кодер с 20 годами в ИТ. С ИИ-агентами собираю сайты, веб-сервисы, Telegram-ботов, приложения и автоматизацию и сам довожу их до запуска. Опишите задачу своими словами [на почту](mailto:pavel@logachev.net) или [в Telegram](https://t.me/pavel_logachev) — начну с бесплатного разбора. Другие проекты — [в профиле](https://github.com/pavel-logachev) и на [logachev.net](https://logachev.net/).
+Проект сделал [Павел Логачев](https://github.com/pavel-logachev). Делаю сайты, веб-сервисы, Telegram-ботов, приложения и автоматизацию под задачу: сам разбираю, делаю и запускаю. 20 лет в ИТ: инженер, затем руководитель проектов. Расскажите о задаче [на почту](mailto:pavel@logachev.net) или [в Telegram](https://t.me/pavel_logachev) — разбор на 20–30 минут бесплатный, готовое ТЗ не нужно. Цены и другие проекты — на [logachev.net](https://logachev.net/) и [в профиле](https://github.com/pavel-logachev).
 
 ## English
 
@@ -200,7 +200,7 @@ Pair with a one-use QR code and connect over Wi‑Fi, Tailscale or your own opti
 
 Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.5.0) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The computer must remain on. Notifications use an opt-in foreground connection without Google services; physical-phone notification delivery has not yet been verified. Attachments, answers to agent questions and approvals still require the desktop.
 
-Built by [Pavel Logachev](https://github.com/pavel-logachev), a vibe coder with 20 years in IT who ships websites, web services, Telegram bots, apps and automation with AI agents. Have a similar task? [pavel@logachev.net](mailto:pavel@logachev.net) · [logachev.net](https://logachev.net/)
+Built by [Pavel Logachev](https://github.com/pavel-logachev): 20 years in IT, first as an engineer, then as a project manager. I build websites, web services, Telegram bots, apps and automation for your task. Have a similar one? [pavel@logachev.net](mailto:pavel@logachev.net) · [logachev.net](https://logachev.net/)
 
 ## Лицензия
 
