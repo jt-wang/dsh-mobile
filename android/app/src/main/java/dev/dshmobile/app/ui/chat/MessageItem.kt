@@ -21,6 +21,7 @@ import dev.dshmobile.app.model.ChatMessage
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.components.shortTime
 import dev.dshmobile.app.ui.markdown.MarkdownContent
+import dev.dshmobile.app.ui.theme.tabular
 
 @Composable
 internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQuery: String = "", selectedMatch: SearchMatch? = null) {
@@ -44,36 +45,30 @@ internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQ
     Column(Modifier.fillMaxWidth().testTag("message:${message.id}")
         .combinedClickable(onClick = {}, onLongClickLabel = menuLabel, onLongClick = { menu = true }, hapticFeedbackEnabled = false)
         .semantics { customActions = messageActions.map { action -> CustomAccessibilityAction(labels.getValue(action)) { perform(action); true } } },
-        horizontalAlignment = if (user) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        horizontalAlignment = if (user) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         val content: @Composable () -> Unit = {
             if (searchQuery.isNotBlank()) SearchableMessageText(message, searchQuery, selectedMatch)
             else if (user) Text(message.text, style = MaterialTheme.typography.bodyLarge)
             else MarkdownContent(message.text, onCopy, selectable = false)
         }
         if (user) Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.large,
-            modifier = Modifier.fillMaxWidth(0.9f)) {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                content()
-                Text(shortTime(message.createdAt), Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            modifier = Modifier.fillMaxWidth(0.86f).wrapContentWidth(Alignment.End)) {
+            Box(Modifier.padding(horizontal = 16.dp, vertical = 11.dp)) { content() }
         } else {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Icon(MobileIcons.Mark, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
-                Text(stringResource(if (message.role == "assistant") R.string.mobile_role_assistant else R.string.mobile_role_system),
-                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            // System notices keep a label; assistant output reads as plain document text.
+            if (message.role != "assistant") Text(stringResource(R.string.mobile_role_system),
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             content()
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (!user) Text(shortTime(message.createdAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Box {
-                IconButton(onClick = { onCopy(message.text) }, modifier = Modifier.size(48.dp).testTag("copy:${message.id}")) {
-                    Icon(MobileIcons.Copy, labels.getValue(MessageAction.Copy), Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    messageActions.forEach { action -> DropdownMenuItem(text = { Text(labels.getValue(action)) }, onClick = { perform(action) }) }
-                }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.offset(x = if (user) 12.dp else (-12).dp)) {
+            if (!user) Box {
+                CopyButton(message, labels.getValue(MessageAction.Copy), onCopy)
+                MessageMenu(menu, { menu = false }, labels, ::perform)
+            }
+            Text(shortTime(message.createdAt), style = MaterialTheme.typography.labelSmall.tabular(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (user) Box {
+                CopyButton(message, labels.getValue(MessageAction.Copy), onCopy)
+                MessageMenu(menu, { menu = false }, labels, ::perform)
             }
         }
         if (message.provisional) Text(stringResource(R.string.mobile_provisional), style = MaterialTheme.typography.bodySmall,
@@ -96,6 +91,20 @@ internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQ
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CopyButton(message: ChatMessage, label: String, onCopy: (String) -> Unit) {
+    IconButton(onClick = { onCopy(message.text) }, modifier = Modifier.size(48.dp).testTag("copy:${message.id}")) {
+        Icon(MobileIcons.Copy, label, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun MessageMenu(expanded: Boolean, onDismiss: () -> Unit, labels: Map<MessageAction, String>, perform: (MessageAction) -> Unit) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        messageActions.forEach { action -> DropdownMenuItem(text = { Text(labels.getValue(action)) }, onClick = { perform(action) }) }
     }
 }
 

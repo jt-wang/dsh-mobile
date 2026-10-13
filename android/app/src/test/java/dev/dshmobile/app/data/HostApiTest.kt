@@ -49,7 +49,7 @@ class HostApiTest {
                 val api = api(server)
                 val failure = CompletableDeferred<String>()
                 val source = api.observe("chat", { fail("Oversized event must not publish a snapshot") }, { failure.complete(it.key) })
-                try { assertEquals("invalid_response", withTimeout(5_000) { failure.await() }) }
+                try { assertEquals("chat_unavailable", withTimeout(5_000) { failure.await() }) }
                 finally { source.cancel(); api.close() }
             }
         }
@@ -116,9 +116,71 @@ class HostApiTest {
                 server.enqueue(json("""{"requestId":"$id","status":"future-status","updatedAt":10}"""))
                 assertEquals("uncertain", api.receipt(id)!!.status)
                 server.enqueue(json("""{"session":${session("chat")},"cursor":1,"hasMore":false,"activity":"idle"}"""))
-                try { api.snapshot("chat"); fail("Missing messages") } catch (failure: MobileFailure) { assertEquals("invalid_response", failure.key) }
+                try { api.snapshot("chat"); fail("Missing messages") } catch (failure: MobileFailure) { assertEquals("chat_unavailable", failure.key) }
                 server.enqueue(json("""{"error":{"code":"unauthorized","message":"SYNTHETIC SECRET MUST NOT SURFACE","retryable":false}}""", 401))
                 try { api.capabilities(); fail("Unauthorized") } catch (failure: MobileFailure) { assertEquals("unauthorized", failure.key) }
+            } finally { api.close() }
+        }
+    }
+    @Test fun `malformed SSE history fails once and suppresses later snapshots and transport close`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val valid = snapshot("late", "Synthetic late snapshot", false, 1)
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody("event: snapshot\ndata: {}\n\nevent: snapshot\ndata: $valid\n\n"))
+            val api = api(server)
+            val errors = LinkedBlockingQueue<String>()
+            val snapshots = LinkedBlockingQueue<SessionSnapshot>()
+            val source = api.observe("chat", { snapshots.offer(it) }, { errors.offer(it.key) })
+            try {
+                assertEquals("chat_unavailable", errors.poll(5, TimeUnit.SECONDS))
+                assertNull("Cancellation or EOF must not replace the scoped failure", errors.poll(1, TimeUnit.SECONDS))
+                assertTrue("No later frame after terminal decode failure", snapshots.isEmpty())
+            } finally { source.cancel(); api.close() }
+        }
+    }
+    @Test fun `snapshot HTTP service failure is chat scoped and not a transport outage`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val api = api(server)
+            try {
+                server.enqueue(json("""{"error":{"code":"unavailable","message":"Synthetic","retryable":true}}""", 503))
+                try { api.snapshot("chat"); fail("Unavailable history must fail") }
+                catch (failure: MobileFailure) { assertEquals("chat_unavailable", failure.key) }
+            } finally { api.close() }
+        }
+    }
+    @Test fun `oversize snapshot HTTP response is chat scoped without weakening byte limit`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val api = api(server)
+            try {
+                server.enqueue(json("""{"error":{"code":"payload_too_large","message":"Synthetic","retryable":false}}""", 413))
+                try { api.snapshot("chat"); fail("Oversize host error must fail") }
+                catch (failure: MobileFailure) { assertEquals("chat_unavailable", failure.key) }
+                server.enqueue(json("x".repeat(2 * 1024 * 1024 + 1)))
+                try { api.snapshot("chat"); fail("Oversize body must not decode") }
+                catch (failure: MobileFailure) { assertEquals("chat_unavailable", failure.key) }
+            } finally { api.close() }
+        }
+    }
+    @Test fun `SSE HTTP service failures remain chat scoped but revoked access is terminal`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val api = api(server)
+            try {
+                for (status in listOf(413, 503, 500)) {
+                    server.enqueue(json("""{"error":{"code":"unavailable","message":"Synthetic","retryable":true}}""", status))
+                    val result = CompletableDeferred<String>()
+                    val source = api.observe("chat", {}, { result.complete(it.key) })
+                    try { assertEquals("chat_unavailable", withTimeout(5_000) { result.await() }) }
+                    finally { source.cancel() }
+                }
+                server.enqueue(json("""{"error":{"code":"revoked","message":"Synthetic","retryable":false}}""", 401))
+                val result = CompletableDeferred<String>()
+                val source = api.observe("chat", {}, { result.complete(it.key) })
+                try { assertEquals("unauthorized", withTimeout(5_000) { result.await() }) }
+                finally { source.cancel() }
             } finally { api.close() }
         }
     }

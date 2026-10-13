@@ -80,7 +80,6 @@
     <string name="mobile_keep_running">Keep running</string>
     <string name="mobile_new_messages">New messages · Go to bottom</string>
     <string name="mobile_history_limit">Showing the latest messages. Open your computer for earlier history.</string>
-    <string name="mobile_role_assistant">Assistant</string>
     <string name="mobile_role_system">Session notice</string>
     <string name="mobile_provisional">Live response — not yet saved by the computer</string>
     <string name="mobile_host_default">Computer default</string>
@@ -179,13 +178,11 @@
     <string name="mobile_agent_days">Agent is working · ≈%1$d d</string>
     <string name="mobile_agent_seconds">Agent is working · less than a minute</string>
     <string name="mobile_waiting_desktop">Waiting for an answer on the computer</string>
-    <string name="mobile_appearance">Appearance</string>
     <string name="mobile_theme">Theme</string>
     <string name="mobile_theme_dark">Dark</string>
     <string name="mobile_theme_light">Light</string>
     <string name="mobile_theme_system">System default</string>
     <string name="mobile_device_section">Device</string>
-    <string name="mobile_computer_section">Computer</string>
     <string name="mobile_connection_section">Connection</string>
     <string name="mobile_pair_step_one">Create an invitation in DSH on your computer.</string>
     <string name="mobile_pair_step_two">Scan the QR or import the file.</string>
@@ -207,4 +204,10 @@
     <string name="mobile_select_message">Select text</string>
     <string name="mobile_message_actions">Message actions</string>
     <string name="mobile_selection_hint">Touch and hold the text to select a passage.</string>
+    <string name="mobile_new_task_hint">New task for your computer…</string>
+    <string name="mobile_task_hint">What should it do?</string>
+    <string name="mobile_send_task">Send</string>
+    <string name="mobile_task_not_sent">The chat was created, but the task was not sent. The text is still in the message field — review it and send it yourself.</string>
+    <string name="mobile_more_actions">More actions</string>
+    <string name="mobile_loading">Loading</string>
 </resources>

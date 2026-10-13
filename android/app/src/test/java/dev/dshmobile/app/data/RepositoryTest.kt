@@ -47,29 +47,330 @@ class RepositoryTest {
         var index = """{"items":[${session()}],"nextCursor":null}"""
         var capabilities = """{"protocolVersion":1,"hostName":"Synthetic host","upstreamVersion":"fixture","capabilities":{"sessions":true,"textPrompt":true,"cancel":true,"liveSnapshots":false,"attachments":false,"questions":false,"approvals":false,"push":false}}"""
         var otherSnapshot: (() -> MockResponse)? = null
+        var chatSnapshot: (() -> MockResponse)? = null
         var create: ((RecordedRequest) -> MockResponse)? = null
         var failIndex = false
+        var metadataDelayMs = 0L
+        var metadataGate: (() -> Unit)? = null
         var events = { MockResponse().setHeader("Content-Type", "text/event-stream").setBody("event: snapshot\ndata: ${snapshot()}\n\n") }
         var snapshotText = snapshot()
         var message: (RecordedRequest) -> MockResponse = { json("""{"requestId":"${requestId(it)}","status":"uncertain","updatedAt":20}""", 202) }
         var receipt: (String) -> MockResponse = { json("""{"error":{"code":"not_found","message":"Synthetic","retryable":false}}""", 404) }
         override fun dispatch(request: RecordedRequest): MockResponse {
             requests += request
+            if (request.requestUrl?.encodedPath in setOf("/v1/capabilities", "/v1/workspaces", "/v1/presets")) metadataGate?.invoke()
             return when (request.requestUrl?.encodedPath) {
             "/v1/pairings" -> json("""{"deviceId":"device-synthetic","deviceToken":"synthetic-device-token-for-tests","hostName":"Synthetic host","protocolVersion":1}""", 201)
-            "/v1/capabilities" -> json(capabilities)
-            "/v1/workspaces" -> json("""{"items":[{"id":"workspace","name":"Synthetic workspace","canExecute":true}]}""")
-            "/v1/presets" -> json("""{"items":[]}""")
+            "/v1/capabilities" -> json(capabilities).setBodyDelay(metadataDelayMs, TimeUnit.MILLISECONDS)
+            "/v1/workspaces" -> json("""{"items":[{"id":"workspace","name":"Synthetic workspace","canExecute":true}]}""").setBodyDelay(metadataDelayMs, TimeUnit.MILLISECONDS)
+            "/v1/presets" -> json("""{"items":[]}""").setBodyDelay(metadataDelayMs, TimeUnit.MILLISECONDS)
             "/v1/sessions" -> if (request.method == "POST") { mutations += request; create?.invoke(request) ?: json("{}", 400) }
                 else if (failIndex) MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else json(index)
             "/v1/sessions/other" -> otherSnapshot?.invoke() ?: json(snapshot().replace("\"id\":\"chat\"", "\"id\":\"other\""))
-            "/v1/sessions/chat" -> json(snapshotText)
+            "/v1/sessions/chat" -> chatSnapshot?.invoke() ?: json(snapshotText)
             "/v1/sessions/chat/events" -> events()
             "/v1/sessions/chat/messages", "/v1/sessions/other/messages" -> { mutations += request; message(request) }
             "/v1/sessions/chat/cancellations" -> { mutations += request; message(request) }
             else -> if (request.requestUrl?.encodedPath?.startsWith("/v1/commands/") == true)
                 receipt(request.requestUrl!!.pathSegments.last()) else json("{}", 404)
             }
+        }
+    }
+    @Test fun `unavailable history refresh keeps authorized host online and disables stale host actions`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.chatSnapshot = { json("""{"error":{"code":"unavailable","message":"Synthetic","retryable":true}}""", 503) }
+            repo.refresh()
+            assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+            assertEquals("chat_unavailable", repo.state.value.error)
+            assertTrue(repo.state.value.snapshotStale)
+            assertFalse(repo.state.value.busy)
+            assertFalse(dev.dshmobile.app.ui.components.canCancel(repo.state.value))
+            assertFalse(dev.dshmobile.app.model.MobileReducer.canSend(repo.state.value, "Synthetic draft"))
+            repo.leaveSession()
+            assertNull("Scoped history error must not follow Home", repo.state.value.error)
+            assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+
+    @Test fun `failed target remains chat scoped and explicit retry reads that target not the old selection`() = runBlocking {
+        withRepository { repo, store, fixture, _ ->
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            repo.refresh(); repo.leaveSession()
+            val before = fixture.requests.count { it.path == "/v1/sessions/chat" }
+            fixture.otherSnapshot = { json("""{"error":{"code":"payload_too_large","message":"Synthetic","retryable":false}}""", 413) }
+            repo.selectSession("other")
+            assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+            assertEquals("chat_unavailable", repo.state.value.error)
+            assertEquals("chat", store.value.selectedSessionId)
+            assertTrue(repo.state.value.snapshotStale)
+            fixture.otherSnapshot = null
+            repo.selectSession("other")
+            assertEquals("other", repo.state.value.snapshot?.session?.id)
+            assertEquals("other", store.value.selectedSessionId)
+            assertFalse(repo.state.value.snapshotStale)
+            assertNull(repo.state.value.error)
+            assertEquals(before, fixture.requests.count { it.path == "/v1/sessions/chat" })
+            assertEquals(2, fixture.requests.count { it.path == "/v1/sessions/other" })
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+
+    @Test fun `SSE projection failure marks history stale without making paired host offline`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"liveSnapshots\":false", "\"liveSnapshots\":true")
+            fixture.events = { json("""{"error":{"code":"unavailable","message":"Synthetic","retryable":true}}""", 503) }
+            repo.refresh()
+            val failed = withTimeout(5_000) { repo.state.first { it.error == "chat_unavailable" } }
+            assertEquals(ConnectionState.ONLINE, failed.connection)
+            assertTrue(failed.snapshotStale)
+            assertFalse(failed.busy)
+            assertFalse(dev.dshmobile.app.model.MobileReducer.canSend(failed, "Synthetic draft"))
+            repo.leaveSession()
+            assertNull(repo.state.value.error)
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+
+    @Test fun `list refresh does not serialize independent metadata round trips`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.metadataDelayMs = 500
+            val started = System.nanoTime()
+            repo.refresh()
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            println("Synthetic refresh: ${elapsedMs}ms, three independent 500ms metadata bodies")
+            assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+            assertTrue("Independent metadata should overlap, observed ${elapsedMs}ms", elapsedMs < 1_350)
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+    @Test fun `reopening chat displays last history before a delayed authoritative replacement`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            fixture.snapshotText = snapshot("""[{"id":"old","role":"assistant","text":"Last known answer","createdAt":10}]""")
+            repo.refresh()
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            repo.refresh()
+            repo.selectSession("other")
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = {
+                requested.complete(Unit)
+                release.await(5, TimeUnit.SECONDS)
+                json(snapshot("""[{"id":"new","role":"assistant","text":"Replaced answer","createdAt":20}]""", cursor = 2))
+            }
+            val navigation = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.selectSession("chat") }
+            try {
+                requested.await()
+                assertEquals("chat", repo.state.value.snapshot?.session?.id)
+                assertEquals(listOf("old"), repo.state.value.snapshot?.messages?.map { it.id })
+                assertTrue("Cached history must not authorize commands", repo.state.value.busy)
+                release.countDown()
+                navigation.await()
+                assertEquals(listOf("new"), repo.state.value.snapshot?.messages?.map { it.id })
+                assertFalse(repo.state.value.busy)
+                assertTrue(fixture.mutations.isEmpty())
+            } finally { release.countDown(); navigation.cancel() }
+        }
+    }
+    @Test fun `leaving a loading chat cancels observation without waiting or touching host work`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            repo.refresh()
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.otherSnapshot = {
+                requested.complete(Unit)
+                release.await(5, TimeUnit.SECONDS)
+                json(snapshot().replace("\"id\":\"chat\"", "\"id\":\"other\""))
+            }
+            val navigation = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.selectSession("other") }
+            try {
+                requested.await()
+                withTimeout(750) { repo.leaveSession() }
+                withTimeout(750) { navigation.await() }
+                assertFalse(repo.state.value.busy)
+                assertEquals("chat", repo.state.value.snapshot?.session?.id)
+                assertTrue(fixture.mutations.isEmpty())
+                release.countDown()
+                fixture.otherSnapshot = null
+                repo.selectSession("other")
+                assertEquals("other", repo.state.value.snapshot?.session?.id)
+            } finally { release.countDown(); navigation.cancel() }
+        }
+    }
+    @Test fun `cached reopen cannot count as fresh receipt evidence and authoritative empty erases old history`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            fixture.snapshotText = snapshot(running = true)
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            repo.refresh()
+            fixture.message = { request -> json("""{"requestId":"${requestId(request)}","status":"accepted","updatedAt":20}""") }
+            repo.sendMessage("Synthetic queued inbox")
+            fixture.snapshotText = snapshot("""[{"id":"old","role":"assistant","text":"Old cut","createdAt":10}]""")
+            repo.refresh() // Only one real idle observation so far.
+            repo.selectSession("other")
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = {
+                requested.complete(Unit); release.await(5, TimeUnit.SECONDS)
+                json(snapshot(cursor = 0))
+            }
+            val navigation = scope.async { repo.selectSession("chat") }
+            try {
+                requested.await()
+                assertEquals(listOf("old"), repo.state.value.snapshot?.messages?.map { it.id })
+                assertTrue(repo.state.value.snapshotStale)
+                assertEquals("queued", repo.state.value.acceptedPrompts.single().status)
+                assertEquals(1, store.value.acceptedPrompts.single().idleSnapshots)
+                release.countDown(); navigation.await()
+                assertTrue(repo.state.value.snapshot!!.messages.isEmpty())
+                assertEquals(0L, repo.state.value.snapshot?.cursor)
+                assertFalse(repo.state.value.snapshotStale)
+                assertEquals("unconfirmed", repo.state.value.acceptedPrompts.single().status)
+                assertEquals(1, fixture.mutations.size) // Only the explicit synthetic send; no cached replay.
+            } finally { release.countDown(); navigation.cancel() }
+        }
+    }
+    @Test fun `cached display is replaced by the first SSE cut even when its cursor goes backwards`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.snapshotText = snapshot("""[{"id":"discarded","role":"assistant","text":"Previous cut","createdAt":10}]""", cursor = 90)
+            repo.refresh()
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            repo.refresh(); repo.selectSession("other")
+            fixture.capabilities = fixture.capabilities.replace("\"liveSnapshots\":false", "\"liveSnapshots\":true")
+            fixture.otherSnapshot = { json(snapshot().replace("\"id\":\"chat\"", "\"id\":\"other\"")) }
+            val replacement = snapshot("""[{"id":"canonical","role":"assistant","text":"Authoritative new cut","createdAt":20}]""", cursor = 2)
+            val initial = "event: snapshot\ndata: $replacement\n\n"
+            fixture.events = { MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody(initial + ": heartbeat\n\n").throttleBody(initial.toByteArray().size.toLong(), 1, TimeUnit.SECONDS) }
+            // Refresh capabilities while observing no chat, then open the cached target.
+            repo.leaveSession(); repo.refresh(); repo.selectSession("chat")
+            withTimeout(5_000) { repo.state.first { it.snapshot?.cursor == 2L } }
+            assertEquals(listOf("canonical"), repo.state.value.snapshot!!.messages.map { it.id })
+            assertFalse(repo.state.value.snapshotStale)
+            repo.leaveSession()
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+    @Test fun `back during refresh cancels only history projection and releases list admission`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = {
+                requested.complete(Unit); release.await(5, TimeUnit.SECONDS)
+                json(snapshot(cursor = 90))
+            }
+            val refresh = scope.async { repo.refresh() }
+            try {
+                requested.await()
+                withTimeout(750) { repo.leaveSession(); refresh.await() }
+                assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+                assertFalse(repo.state.value.busy)
+                assertTrue(repo.state.value.snapshotStale)
+                assertEquals(1L, repo.state.value.snapshot?.cursor)
+                assertEquals(listOf("chat"), repo.state.value.sessions.map { it.id })
+                assertTrue(fixture.mutations.isEmpty())
+            } finally { release.countDown(); refresh.cancel() }
+        }
+    }
+    @Test fun `back during offline chat metadata refresh cannot strand Home in syncing`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            repo.setForeground(false)
+            fixture.failIndex = true
+            repo.setForeground(true)
+            assertEquals(ConnectionState.OFFLINE, repo.state.value.connection)
+            fixture.failIndex = false
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.metadataGate = { requested.complete(Unit); release.await(5, TimeUnit.SECONDS) }
+            val navigation = scope.async { repo.selectSession("chat") }
+            try {
+                withTimeout(5_000) { requested.await() }
+                assertEquals(ConnectionState.SYNCING, repo.state.value.connection)
+                withTimeout(750) { repo.leaveSession(); navigation.await() }
+                assertEquals(ConnectionState.OFFLINE, repo.state.value.connection)
+                assertFalse(repo.state.value.busy)
+                release.countDown(); fixture.metadataGate = null
+                repo.refresh()
+                assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+                assertFalse(repo.state.value.busy)
+                assertTrue(dev.dshmobile.app.ui.components.canCreate(repo.state.value))
+                repo.selectSession("chat")
+                assertFalse(repo.state.value.snapshotStale)
+                assertTrue(fixture.mutations.isEmpty())
+            } finally { release.countDown(); navigation.cancel() }
+        }
+    }
+    @Test fun `cold home restore publishes list without waiting for last selected chat history`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            repo.close()
+            fixture.chatSnapshot = { error("Cold home must not read last selected history") }
+            val restoredHome = NetworkMobileRepository(store, scope, true, observeRestoredSession = false)
+            try {
+                restoredHome.setForeground(true)
+                assertEquals(ConnectionState.ONLINE, restoredHome.state.value.connection)
+                assertEquals(listOf("chat"), restoredHome.state.value.sessions.map { it.id })
+                assertNull(restoredHome.state.value.snapshot)
+                assertTrue(fixture.mutations.isEmpty())
+            } finally { restoredHome.close() }
+        }
+    }
+    @Test fun `home refresh avoids an unobserved history read and does not reconcile stale receipts`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            repo.leaveSession()
+            fixture.chatSnapshot = { error("Home must not project chat history") }
+            repo.refresh()
+            assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+            assertTrue(repo.state.value.snapshotStale)
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+    @Test fun `expired cached history is not shown and revocation hides last known text`() = runBlocking {
+        var clock = 1_000L
+        withRepository(now = { clock }) { repo, _, fixture, scope ->
+            fixture.snapshotText = snapshot("""[{"id":"private-old","role":"assistant","text":"Synthetic old history","createdAt":10}]""")
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            repo.refresh(); repo.selectSession("other")
+            clock += 10 * 60 * 1_000L + 1
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = {
+                requested.complete(Unit); release.await(5, TimeUnit.SECONDS)
+                json("""{"error":{"code":"revoked","message":"Synthetic","retryable":false}}""", 401)
+            }
+            val navigation = scope.async { repo.selectSession("chat") }
+            try {
+                requested.await()
+                assertNotEquals("chat", repo.state.value.snapshot?.session?.id)
+                release.countDown(); navigation.await()
+                assertEquals(ConnectionState.REVOKED, repo.state.value.connection)
+                assertNull(repo.state.value.snapshot)
+                assertTrue(fixture.mutations.isEmpty())
+            } finally { release.countDown(); navigation.cancel() }
+        }
+    }
+    @Test fun `notification for last chat after Home resumes GET and SSE without commands`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            repo.leaveSession()
+            fixture.capabilities = fixture.capabilities.replace("\"liveSnapshots\":false", "\"liveSnapshots\":true")
+            repo.refresh()
+            assertTrue(repo.state.value.snapshotStale)
+            assertFalse(repo.state.value.observingSession)
+            assertTrue(dev.dshmobile.app.ui.chatNeedsSelection("chat", repo.state.value, false))
+            val getCount = fixture.requests.count { it.path == "/v1/sessions/chat" }
+            val eventsCount = fixture.requests.count { it.path == "/v1/sessions/chat/events" }
+            val replacement = snapshot("""[{"id":"notification-fresh","role":"assistant","text":"New cut","createdAt":20}]""", cursor = 2)
+            fixture.events = { MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody("event: snapshot\ndata: $replacement\n\n") }
+            repo.selectSession("chat")
+            withTimeout(5_000) { repo.state.first { it.snapshot?.cursor == 2L } }
+            assertEquals(getCount + 1, fixture.requests.count { it.path == "/v1/sessions/chat" })
+            assertTrue(fixture.requests.count { it.path == "/v1/sessions/chat/events" } > eventsCount)
+            assertTrue(repo.state.value.observingSession)
+            assertFalse(repo.state.value.snapshotStale)
+            assertTrue(dev.dshmobile.app.ui.notificationTargetSelected("chat", repo.state.value))
+            assertTrue(dev.dshmobile.app.model.MobileReducer.canSend(repo.state.value, "Synthetic draft"))
+            repo.leaveSession()
+            assertTrue(fixture.mutations.isEmpty())
         }
     }
     @Test fun `notification navigation refreshes newly authorized chat and cold state without mutations`() = runBlocking {
@@ -80,6 +381,24 @@ class RepositoryTest {
             assertEquals("other", repo.state.value.snapshot?.session?.id)
             assertEquals("other", store.value.selectedSessionId)
             assertTrue(fixture.requests.any { it.requestUrl?.encodedPath == "/v1/sessions" }); assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+    @Test fun `navigation metadata refresh reads only the target history once`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.failIndex = true; repo.refresh()
+            assertEquals(ConnectionState.OFFLINE, repo.state.value.connection)
+            fixture.failIndex = false
+            val beforeSame = fixture.requests.count { it.path == "/v1/sessions/chat" }
+            repo.selectSession("chat")
+            assertEquals("Offline entry must not GET the last chat in refresh then GET it again", beforeSame + 1,
+                fixture.requests.count { it.path == "/v1/sessions/chat" })
+            val beforeOther = fixture.requests.count { it.path == "/v1/sessions/chat" }
+            repo.selectSession("other") // Target is not in the previous bounded catalogue.
+            assertEquals("A catalogue miss must not project the previous selected chat", beforeOther,
+                fixture.requests.count { it.path == "/v1/sessions/chat" })
+            assertEquals(1, fixture.requests.count { it.path == "/v1/sessions/other" })
+            assertEquals("other", repo.state.value.snapshot?.session?.id)
+            assertTrue(fixture.mutations.isEmpty())
         }
     }
     @Test fun `notification navigation retries cold offline failure without a command or losing drafts`() = runBlocking {
@@ -569,6 +888,24 @@ class RepositoryTest {
             assertEquals(listOf("replacement"), repo.state.value.snapshot!!.messages.map { it.id })
             assertTrue(fixture.mutations.isEmpty())
             assertTrue(fixture.requests.none { it.path == "/v1/device" })
+        }
+    }
+    @Test fun `offline stale chat draft stays editable and durable without host dispatch`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            fixture.failIndex = true
+            repo.refresh()
+            assertEquals(ConnectionState.OFFLINE, repo.state.value.connection)
+            assertTrue(repo.state.value.snapshotStale)
+            assertTrue(dev.dshmobile.app.ui.components.canEditDraft(repo.state.value))
+            repo.updateDraft("Offline local draft")
+            assertEquals("Offline local draft", repo.state.value.draft)
+            assertEquals("Offline local draft", store.value.drafts["chat"])
+            assertFalse(dev.dshmobile.app.model.MobileReducer.canSend(repo.state.value, repo.state.value.draft))
+            repo.close()
+            val restored = NetworkMobileRepository(store, scope, true)
+            try { restored.restore(); assertEquals("Offline local draft", restored.state.value.draft) }
+            finally { restored.close() }
+            assertTrue(fixture.mutations.isEmpty())
         }
     }
     @Test fun `drafts stay isolated across navigation and repository restart`() = runBlocking {

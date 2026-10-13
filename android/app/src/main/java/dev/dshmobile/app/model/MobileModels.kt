@@ -53,6 +53,10 @@ data class MobileState(
     val sessions: List<SessionSummary> = emptyList(),
     val sessionsTruncated: Boolean = false,
     val snapshot: SessionSnapshot? = null,
+    /** Last-known history is readable during resync, but never authorizes a mutation. */
+    val snapshotStale: Boolean = false,
+    /** Chat-route ownership, not transport liveness; a retained snapshot alone is not observation. */
+    val observingSession: Boolean = false,
     val draft: String = "",
     val pending: PendingCommand? = null,
     /** Host-admitted prompts awaiting a canonical USER record; these are not unresolved mutations. */

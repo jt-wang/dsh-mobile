@@ -17,6 +17,7 @@ class ActionGatesTest {
         assertFalse(canCancel(state(running = false)))
         assertFalse(canCancel(state(activity = "waiting")))
         assertFalse(canCancel(state(activity = "unknown")))
+        assertFalse(canCancel(state().copy(snapshotStale = true)))
     }
 
     @Test fun `mutation gates remain closed offline busy and unresolved`() {
@@ -27,6 +28,18 @@ class ActionGatesTest {
         assertTrue(canCreate(state()))
     }
 
+    @Test fun `stale and offline history allow draft editing but never send`() {
+        for (editable in listOf(state().copy(snapshotStale = true),
+            state().copy(connection = ConnectionState.OFFLINE, snapshotStale = true))) {
+            assertTrue(canEditDraft(editable))
+            assertFalse(MobileReducer.canSend(editable, "Local draft"))
+            assertFalse(canEditDraft(editable, interactionBlocked = true))
+            assertFalse(canEditDraft(editable.copy(busy = true)))
+            assertFalse(canEditDraft(editable.copy(pending = PendingCommand("request", "send", "chat", "text", "uncertain"))))
+        }
+        assertFalse(canEditDraft(state().copy(workspaces = listOf(Workspace("project", "Synthetic", false)))))
+        assertFalse(canEditDraft(state().copy(capabilities = state().capabilities!!.copy(textPrompt = false))))
+    }
     @Test fun `read only project or host capability blocks execution`() {
         val readOnly = state().copy(workspaces = listOf(Workspace("project", "Synthetic project", false)))
         assertFalse(executable(readOnly)); assertFalse(canCreate(readOnly)); assertFalse(canCancel(readOnly))

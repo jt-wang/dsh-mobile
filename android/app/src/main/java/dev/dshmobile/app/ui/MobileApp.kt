@@ -60,14 +60,23 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
     var backProgress by remember { mutableFloatStateOf(0f) }
     val motion = LocalMotionEnabled.current
     val savedScreens = rememberSaveableStateHolder()
-    fun goBack() { route = if (route == "settings") previousRoute else "home" }
-    LaunchedEffect(model.notificationChat, state.connection, state.lastSyncedAt, state.busy, model.interactionBlocked, state.error) {
-        val target = model.notificationChat
-        if (target != null && !state.busy && !model.interactionBlocked && state.error == null && state.snapshot?.session?.id != target && state.connection == dev.dshmobile.app.model.ConnectionState.ONLINE) model.selectNotificationChat(target)
+    // Home owns no chat stream/history projection; a restored chat resumes its read explicitly.
+    LaunchedEffect(route) { if (route == "home") model.leaveSession() }
+    LaunchedEffect(route, sessionId, state.connection, state.busy, state.observingSession, model.interactionBlocked, state.error) {
+        if (route == "chat" && sessionId != null && chatNeedsSelection(sessionId!!, state, model.interactionBlocked))
+            model.selectSession(sessionId!!)
     }
-    LaunchedEffect(model.notificationChat, state.snapshot?.session?.id, state.busy, state.error) {
+    fun goBack() {
+        if (route == "chat") model.leaveSession()
+        route = if (route == "settings") previousRoute else "home"
+    }
+    LaunchedEffect(model.notificationChat, state.connection, state.lastSyncedAt, state.busy, state.observingSession, model.interactionBlocked, state.error) {
         val target = model.notificationChat
-        if (target != null && notificationTargetSelected(target, state.snapshot?.session?.id, state.busy, state.error)) {
+        if (target != null && chatNeedsSelection(target, state, model.interactionBlocked)) model.selectNotificationChat(target)
+    }
+    LaunchedEffect(model.notificationChat, state.snapshot?.session?.id, state.busy, state.observingSession, state.snapshotStale, model.interactionBlocked, state.error) {
+        val target = model.notificationChat
+        if (target != null && !model.interactionBlocked && notificationTargetSelected(target, state)) {
             sessionId = target; route = "chat"; model.consumeNotificationChat(target)
         }
     }
@@ -89,13 +98,13 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
         when (route) {
             "settings" -> SettingsScreen(state, model, onBack = ::goBack)
             "chat" -> savedScreens.SaveableStateProvider("chat:${sessionId}") {
-                ChatScreen(state, model, sessionId, onBack = { route = "home" }, onConnection = { connection = true })
+                ChatScreen(state, model, sessionId, onBack = ::goBack, onConnection = { connection = true })
             }
             else -> savedScreens.SaveableStateProvider("home") {
                 ChatListScreen(state, search, { search = it }, project, { project = it },
                     onSelect = { id ->
                         sessionId = id
-                        if (state.snapshot?.session?.id != id) model.selectSession(id)
+                        model.selectSession(id) // Resume observation even for an instant cached reopen.
                         route = "chat"
                     },
                     onNewChat = { if (canCreate(state) && !model.interactionBlocked) newChat = true },
@@ -105,9 +114,9 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
             }
         }
     }
-    if (newChat) NewChatSheet(state, preferredProject = project,
+    if (newChat) NewChatSheet(state, preferredProject = project, task = model.newTaskText, onTask = model::editNewTask,
         onDismiss = { newChat = false }, onCreate = { workspace, preset ->
-            newChat = false; beforeCreate = state.snapshot?.session?.id; creating = true; model.createSession(workspace, preset)
+            newChat = false; beforeCreate = state.snapshot?.session?.id; creating = true; model.createSession(workspace, preset, model.newTaskText)
         })
     if (connection) ConnectionDetails(state, onDismiss = { connection = false }, onRefresh = model::refresh)
 }
@@ -133,6 +142,7 @@ internal fun safeErrorResource(key: String): Int = when (key) {
     "tls_failed" -> R.string.mobile_error_tls_failed
     "rate_limited" -> R.string.mobile_error_rate_limited
     "host_error" -> R.string.mobile_error_host_error
+    "chat_unavailable" -> R.string.mobile_chat_unavailable_title
     "storage_failed" -> R.string.mobile_error_storage_failed
     "not_paired" -> R.string.mobile_error_not_paired
     "offline_no_send" -> R.string.mobile_error_offline_no_send

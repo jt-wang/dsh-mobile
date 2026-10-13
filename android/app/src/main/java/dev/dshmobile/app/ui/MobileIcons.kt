@@ -67,6 +67,29 @@ object MobileIcons {
         curveTo(9f, 21f, 5f, 18f, 4f, 14f); lineTo(3f, 6f); close()
         moveTo(8f, 12f); lineTo(11f, 15f); lineTo(17f, 9f)
     }
+    val More = ImageVector.Builder("More", 24.dp, 24.dp, 24f, 24f).apply {
+        listOf(5f, 12f, 19f).forEach { x ->
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(x - 1.6f, 12f); curveTo(x - 1.6f, 11.1f, x - 0.9f, 10.4f, x, 10.4f); curveTo(x + 0.9f, 10.4f, x + 1.6f, 11.1f, x + 1.6f, 12f)
+                curveTo(x + 1.6f, 12.9f, x + 0.9f, 13.6f, x, 13.6f); curveTo(x - 0.9f, 13.6f, x - 1.6f, 12.9f, x - 1.6f, 12f); close()
+            }
+        }
+    }.build()
+    val Plus = outline("Plus") { moveTo(12f, 5f); lineTo(12f, 19f); moveTo(5f, 12f); lineTo(19f, 12f) }
+    val ChevronDown = outline("ChevronDown") { moveTo(6f, 9f); lineTo(12f, 15f); lineTo(18f, 9f) }
+    val ChevronRight = outline("ChevronRight", true) { moveTo(9f, 6f); lineTo(15f, 12f); lineTo(9f, 18f) }
+    val ChevronLeft = outline("ChevronLeft", true) { moveTo(15f, 6f); lineTo(9f, 12f); lineTo(15f, 18f) }
+    val Terminal = outline("Terminal") {
+        moveTo(4f, 7f); lineTo(9f, 12f); lineTo(4f, 17f)
+        moveTo(12f, 18f); lineTo(20f, 18f)
+    }
+    val StopFilled = ImageVector.Builder("StopFilled", 24.dp, 24.dp, 24f, 24f).apply {
+        path(fill = SolidColor(Color.Black)) {
+            moveTo(8f, 7f); lineTo(16f, 7f); curveTo(16.6f, 7f, 17f, 7.4f, 17f, 8f); lineTo(17f, 16f)
+            curveTo(17f, 16.6f, 16.6f, 17f, 16f, 17f); lineTo(8f, 17f); curveTo(7.4f, 17f, 7f, 16.6f, 7f, 16f)
+            lineTo(7f, 8f); curveTo(7f, 7.4f, 7.4f, 7f, 8f, 7f); close()
+        }
+    }.build()
     val Mark = outline("DSH") {
         moveTo(9f, 4f); lineTo(3f, 10f); lineTo(9f, 16f); moveTo(15f, 8f); lineTo(21f, 14f); lineTo(15f, 20f)
         moveTo(14f, 3f); lineTo(10f, 21f)

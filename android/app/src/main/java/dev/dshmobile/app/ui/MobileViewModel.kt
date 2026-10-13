@@ -40,6 +40,12 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             state.collect {
                 if (it.paired) pairingInput.edit("")
+                // A first task whose delivery was uncertain is settled by its receipt: only a trustworthy
+                // rejection proves "not sent"; acceptance or explicit local abandonment just ends tracking.
+                awaitingTaskIn?.let { (created, task) -> if (it.pending == null) {
+                    awaitingTaskIn = null
+                    if (it.error == "command_rejected") taskNotSent = taskNotSent + (created to task)
+                } }
                 val sessionId = it.snapshot?.session?.id
                 if (sessionId != editorSessionId || it.pending != null || pendingDraftWrites == 0) {
                     editorSessionId = sessionId
@@ -87,12 +93,54 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             } finally { interactionBlocked = false }
         }
     }
-    fun createSession(workspaceId: String, presetId: String?) {
+    fun leaveSession() {
+        viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { repository.leaveSession() }
+    }
+    /** Task text typed in the New task sheet; in memory only, kept until it reaches a created chat's draft. */
+    var newTaskText by mutableStateOf("")
+        private set
+    /**
+     * Chats whose first task is known not to have been sent, with that exact text. The notice shows only while
+     * the chat's draft still holds this text, so any later confirmed send (immediate or settled by receipt)
+     * clears the draft and the notice with it; another chat's failure never hides this one.
+     */
+    private var taskNotSent by mutableStateOf<Map<String, String>>(emptyMap())
+    fun taskNotSentIn(sessionId: String, draft: String): Boolean = taskNotSent[sessionId]?.let { it.isNotBlank() && it == draft } == true
+    /** Session (and exact text) whose first task send is still uncertain; never resent, only observed. */
+    private var awaitingTaskIn: Pair<String, String>? = null
+    fun editNewTask(text: String) { newTaskText = text }
+
+    /**
+     * Create, then (only if creation was accepted) place the task into the new chat's draft and send it once.
+     * Uncertain creation keeps the text in the sheet; a failed or uncertain send leaves it in the new chat's
+     * draft. Nothing is ever re-sent automatically.
+     */
+    fun createSession(workspaceId: String, presetId: String?, task: String = "") {
         if (interactionBlocked || state.value.busy) return
         interactionBlocked = true
         viewModelScope.launch {
-            try { editorActions.withLock { repository.createSession(workspaceId, presetId) } }
-            finally { interactionBlocked = false }
+            try {
+                editorActions.withLock {
+                    val before = state.value.snapshot?.session?.id
+                    repository.createSession(workspaceId, presetId)
+                    val created = state.value.snapshot?.session?.id
+                    if (created == null || created == before || state.value.pending != null) return@withLock
+                    if (task.isBlank()) return@withLock
+                    newTaskText = ""
+                    repository.updateDraft(task)
+                    editorSessionId = created
+                    editorDraft = task
+                    val ready = state.value.snapshot?.session?.id == created && dev.dshmobile.app.model.MobileReducer.canSend(state.value, task)
+                    val previous = state.value
+                    if (ready) repository.sendMessage(task)
+                    // An uncertain send is already shown by PendingDelivery; claim "not sent" only when that is known.
+                    when {
+                        dev.dshmobile.app.ui.chat.sendWasAccepted(previous, state.value, task) -> Unit
+                        state.value.pending != null -> awaitingTaskIn = created to task // Shown by PendingDelivery until its receipt settles.
+                        else -> taskNotSent = taskNotSent + (created to task)
+                    }
+                }
+            } finally { interactionBlocked = false }
         }
     }
     fun updateDraft(text: String) {
@@ -121,7 +169,9 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
                     if (state.value.snapshot?.session?.id == origin) {
                         val before = state.value
                         repository.sendMessage(text)
-                        if (dev.dshmobile.app.ui.chat.sendWasAccepted(before, state.value, text)) onAccepted()
+                        if (dev.dshmobile.app.ui.chat.sendWasAccepted(before, state.value, text)) {
+                            onAccepted()
+                        }
                     }
                 }
             } finally { interactionBlocked = false }
@@ -165,7 +215,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     fun consumeNotificationChat(target: String) {
-        if (notificationChat == target && notificationTargetSelected(target, state.value.snapshot?.session?.id, state.value.busy, state.value.error)) notificationChat = null
+        if (notificationChat == target && !interactionBlocked && notificationTargetSelected(target, state.value)) notificationChat = null
     }
     private val notificationResume = NotificationResume(viewModelScope, allowed = {
         val context = getApplication<Application>()

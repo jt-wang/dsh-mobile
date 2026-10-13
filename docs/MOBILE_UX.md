@@ -1,12 +1,12 @@
 # Mobile surface brief
 
-Mode: **Operate**. Owner-approved native Android control surface: dark graphite and restrained lime by default, with light and system-theme options. ChatGPT and Claude are usability references, not a demand to copy their branding or layout pixels.
+Mode: **Operate**. Owner-approved native Android control surface: monochrome direction D (2026-10-08, see DESIGN.md), following the phone's system theme by default with light and dark options. ChatGPT and Claude are usability references, not a demand to copy their branding or layout pixels.
 
 ## Direction contract
 
 **THESIS:** Continue a desktop task from a phone without losing its state, across all permitted projects. A searchable home chat list makes navigation explicit; the conversation stays primary once opened.
 
-**OWN-WORLD:** Material 3 native controls and semantic colors. Dark graphite surfaces, one restrained lime accent; warm off-white/olive light variant and a system option. System sans with Cyrillic; monospace for project/time/status/code. One 4/8dp rhythm, 48dp targets, no gradient/glass/metric tiles.
+**OWN-WORLD:** Material 3 native controls and semantic colors. Near-black or white ground, no accent hue; the primary action is the inverse of the ground and colour marks status only. Bundled Geist with Cyrillic; Geist Mono only for code and data. One 4/8dp rhythm, 48dp targets, no gradient/glass/metric tiles.
 
 **STORY:** Know which PC/project/chat is active, send a task once, understand whether the PC accepted it, leave freely, then return to authoritative progress and output.
 

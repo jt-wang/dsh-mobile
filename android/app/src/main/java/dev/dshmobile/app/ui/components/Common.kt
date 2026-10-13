@@ -9,6 +9,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.dshmobile.app.R
 import dev.dshmobile.app.model.*
@@ -19,7 +20,9 @@ import java.util.Date
 
 internal fun canCreate(state: MobileState) = state.connection == ConnectionState.ONLINE && state.capabilities?.sessions == true && !state.busy && state.pending == null && state.workspaces.any { it.canExecute }
 internal fun executable(state: MobileState) = state.snapshot?.let { snapshot -> snapshot.session.canExecute && state.workspaces.any { it.id == snapshot.session.workspaceId && it.canExecute } } == true
-internal fun canCancel(state: MobileState) = state.connection == ConnectionState.ONLINE && state.capabilities?.cancel == true && executable(state) && !state.busy && state.pending == null && state.snapshot?.activity == "running" && state.snapshot.session.running
+// Staleness gates host actions, not local drafting; navigation/admission still pins the editor's chat.
+internal fun canEditDraft(state: MobileState, interactionBlocked: Boolean = false) = executable(state) && state.capabilities?.textPrompt == true && !state.busy && !interactionBlocked && state.pending == null
+internal fun canCancel(state: MobileState) = state.connection == ConnectionState.ONLINE && state.capabilities?.cancel == true && executable(state) && !state.busy && !state.snapshotStale && state.pending == null && state.snapshot?.activity == "running" && state.snapshot.session.running
 internal fun formattedTime(time: Long): String = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(time))
 internal fun shortTime(time: Long): String = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time))
 
@@ -42,9 +45,9 @@ internal fun Notice(text: String, modifier: Modifier = Modifier) {
 internal fun EmptyState(title: String, body: String, modifier: Modifier = Modifier, action: @Composable (() -> Unit)? = null) {
     Column(modifier.widthIn(max = 440.dp).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Icon(MobileIcons.Chat, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(title, style = MaterialTheme.typography.headlineSmall)
-        Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Icon(MobileIcons.Chat, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(title, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+        Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
         action?.invoke()
     }
 }

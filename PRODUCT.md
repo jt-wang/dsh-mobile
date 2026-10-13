@@ -10,7 +10,7 @@ A trusted DSH user accesses desktop tasks from a phone, often away from the desk
 
 ## Approved direction
 
-Use a familiar, chat-first native interface comparable in usability to common chat clients. Projects, task activity and technical details should be reachable without crowding the conversation. This is an Operate surface, not a decorative dashboard. Use the approved dark graphite/lime default with light and system-theme options, accessible native controls and Russian-first copy with English fallback.
+Use a familiar, chat-first native interface comparable in usability to common chat clients. Projects, task activity and technical details should be reachable without crowding the conversation. This is an Operate surface, not a decorative dashboard. Use the approved monochrome direction D (see docs/DESIGN.md): ink on a white or near-black ground, one inverse primary action, colour only for status, Geist type, the phone's system theme by default with explicit light and dark options, accessible native controls and Russian-first copy with English fallback.
 
 ## First acceptance slice
 

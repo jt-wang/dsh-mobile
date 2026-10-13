@@ -1,6 +1,7 @@
 package dev.dshmobile.app.data
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import okhttp3.CertificatePinner
 import okhttp3.Protocol
 import okhttp3.mockwebserver.MockResponse
@@ -30,6 +31,46 @@ class RelayIdleReadTest {
     private val capabilities = """{"protocolVersion":1,"hostName":"Synthetic","upstreamVersion":"fixture","capabilities":{"sessions":true,"textPrompt":true,"cancel":false,"liveSnapshots":true,"attachments":false,"questions":false,"approvals":false,"push":false}}"""
     private fun json(body: String) = MockResponse().setHeader("Content-Type", "application/json").setBody(body)
 
+    @Test fun `sequential HTTP1 GETs reuse the same inner TLS and outer relay tunnel`(): Unit = runBlocking {
+        withFixture { host, bridge, endpoint ->
+            val api = HostApi(endpoint, "synthetic-only-device-bearer")
+            try {
+                host.enqueue(json(capabilities)); host.enqueue(json(snapshot)); host.enqueue(json(snapshot))
+                val started = System.nanoTime()
+                runBlocking { api.capabilities(); api.snapshot("synthetic-session"); api.snapshot("synthetic-session") }
+                val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                assertEquals(3, host.requestCount)
+                assertEquals("No new WSS/CONNECT/TLS per reusable HTTP1 request", 1, bridge.opened.get())
+                assertEquals(listOf(0, 1, 2), (0..2).map { host.takeRequest(2, TimeUnit.SECONDS)!!.sequenceNumber })
+                assertEquals(0, observedRetries!!.get())
+                println("Synthetic relay HTTP1: 3 GETs, 1 inner TLS/relay tunnel, ${elapsed}ms")
+            } finally { runBlocking { api.closeAndAwait() } }
+        }
+    }
+    @Test fun `HTTP1 opening SSE uses the GET pool and does not wait for a heartbeat`(): Unit = runBlocking {
+        withFixture { host, bridge, endpoint ->
+            val api = HostApi(endpoint, "synthetic-only-device-bearer")
+            try {
+                host.enqueue(json(snapshot))
+                // Delay only a synthetic trailing heartbeat; the opening snapshot is complete.
+                val opening = "event: snapshot\ndata: $snapshot\n\n"
+                host.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                    .setBody(opening + ": heartbeat\n\n").throttleBody(opening.toByteArray().size.toLong(), 1, TimeUnit.SECONDS))
+                runBlocking { api.snapshot("synthetic-session") }
+                val received = CountDownLatch(1)
+                val failure = java.util.concurrent.atomic.AtomicReference<MobileFailure>()
+                val started = System.nanoTime()
+                val events = api.observe("synthetic-session", onSnapshot = { received.countDown() }, onFailure = { failure.set(it) })
+                try {
+                    assertTrue("Opening frame is delivered before the delayed heartbeat", received.await(750, TimeUnit.MILLISECONDS))
+                    assertNull(failure.get())
+                    assertEquals("GET and its SSE client share the H1 pool", 1, bridge.opened.get())
+                    assertEquals(listOf(0, 1), (0..1).map { host.takeRequest(2, TimeUnit.SECONDS)!!.sequenceNumber })
+                    println("Synthetic relay HTTP1: opening SSE snapshot ${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)}ms, no extra tunnel")
+                } finally { events.cancel() }
+            } finally { runBlocking { api.closeAndAwait() } }
+        }
+    }
     @Test fun `first history read after backend idle EOF recovers without requiring a mutation`(): Unit = runBlocking {
         withFixture { host, bridge, endpoint ->
             val retries = requireNotNull(observedRetries)
@@ -46,6 +87,38 @@ class RelayIdleReadTest {
                 assertEquals("Only one catalogue and one canonical snapshot reach the host", 2, host.requestCount)
                 assertEquals("Recovery opens a fresh relay stream", 2, bridge.opened.get())
                 assertEquals("The first snapshot really entered the one-shot GET recovery branch", 1, retries.get())
+            } finally { runBlocking { api.closeAndAwait() } }
+        }
+    }
+
+    @Test fun `read recovery bypasses every stale connection in a parallel metadata pool`(): Unit = runBlocking {
+        withFixture { host, bridge, endpoint ->
+            val api = HostApi(endpoint, "synthetic-only-device-bearer")
+            try {
+                val allRequested = CountDownLatch(3)
+                val release = CountDownLatch(1)
+                host.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                    override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                        if (request.path == "/v1/capabilities") {
+                            allRequested.countDown()
+                            release.await(5, TimeUnit.SECONDS)
+                            return json(capabilities).setSocketPolicy(SocketPolicy.DISCONNECT_AT_END)
+                        }
+                        return json(snapshot)
+                    }
+                }
+                runBlocking {
+                    val reads = List(3) { async(kotlinx.coroutines.Dispatchers.Default) { api.capabilities() } }
+                    try { assertTrue(allRequested.await(3, TimeUnit.SECONDS)) }
+                    finally { release.countDown() }
+                    reads.forEach { it.await() }
+                }
+                assertTrue("All three stale relay streams reached peer EOF", bridge.allPeersClosed.await(3, TimeUnit.SECONDS))
+                assertEquals(3, bridge.opened.get())
+                assertEquals("synthetic-session", runBlocking { api.snapshot("synthetic-session") }.session.id)
+                assertEquals("Three metadata reads and one authoritative history GET reach host", 4, host.requestCount)
+                assertEquals("One-shot recovery must open a fresh fourth stream, not take another stale idle stream", 4, bridge.opened.get())
+                assertEquals(1, observedRetries!!.get())
             } finally { runBlocking { api.closeAndAwait() } }
         }
     }
@@ -146,6 +219,7 @@ class RelayIdleReadTest {
         val started = CountDownLatch(1)
         val backendEof = CountDownLatch(1)
         val peerClosed = CountDownLatch(1)
+        val allPeersClosed = CountDownLatch(3)
         val opened = AtomicInteger()
         private val pipes = ConcurrentHashMap<WebSocket, Socket>()
         override fun onStart() { started.countDown() }
@@ -179,6 +253,7 @@ class RelayIdleReadTest {
         override fun onClose(connection: WebSocket, code: Int, reason: String, remote: Boolean) {
             pipes.remove(connection)?.close()
             peerClosed.countDown() // Close handshake completed, not merely queued behind response TLS bytes.
+            allPeersClosed.countDown()
         }
         override fun onError(connection: WebSocket?, exception: Exception) { connection?.closeConnection(1006, "fixture error") }
     }

@@ -1,15 +1,17 @@
 package dev.dshmobile.app.ui.chat
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.content.ClipData
@@ -18,6 +20,7 @@ import dev.dshmobile.app.model.*
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.MobileViewModel
 import dev.dshmobile.app.ui.components.*
+import dev.dshmobile.app.ui.theme.LocalMobileColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -29,6 +32,10 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
     val scope = rememberCoroutineScope()
     val copied = stringResource(R.string.mobile_copied)
     val haptic = rememberActionHaptic()
+    val refreshChat = {
+        if (requestedSession != null) model.selectSession(requestedSession)
+        else model.refresh()
+    }
     val onCopy: (String) -> Unit = { text -> scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("DSH", text))); haptic(); snackbars.showSnackbar(copied) } }
     var cancel by remember { mutableStateOf(false) }
     var searching by androidx.compose.runtime.saveable.rememberSaveable(requestedSession) { mutableStateOf(false) }
@@ -38,23 +45,44 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
     val selectedMatch = matches.getOrNull(matchIndex.coerceAtMost(matches.lastIndex))
     val snapshot = state.snapshot?.takeIf { requestedSession == null || it.session.id == requestedSession }
     val visibleState = if (snapshot == null) state.copy(snapshot = null) else state
+    val header = snapshot?.session ?: state.sessions.firstOrNull { it.id == requestedSession }
     Scaffold(containerColor = MaterialTheme.colorScheme.background, snackbarHost = { SnackbarHost(snackbars) },
-        topBar = { TopAppBar(navigationIcon = {
-            IconButton(onClick = onBack, modifier = Modifier.testTag("chat_drawer")) { Icon(MobileIcons.Back, stringResource(R.string.mobile_chats)) }
+        topBar = { CenterAlignedTopAppBar(navigationIcon = {
+            IconButton(onClick = onBack, modifier = Modifier.testTag("chat_drawer")) { Icon(MobileIcons.ChevronLeft, stringResource(R.string.mobile_chats)) }
         }, title = {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(snapshot?.session?.title?.ifBlank { stringResource(R.string.mobile_untitled) } ?: stringResource(R.string.mobile_chats),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                Text(snapshot?.let { workspaceName(state, it.session.workspaceId) } ?: state.hostName, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary)
+            // The title block doubles as the connection affordance; acceptance waits on its state on every screen.
+            // One tap target opens connection details; the title stays its own heading node and the
+            // subtitle row carries connection_state (enum stateDescription + polite live region).
+            Column(Modifier.clip(MaterialTheme.shapes.small).clickable(onClickLabel = stringResource(R.string.mobile_connection_details), onClick = onConnection)
+                .heightIn(min = 48.dp).padding(horizontal = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text(header?.title?.ifBlank { stringResource(R.string.mobile_untitled) } ?: stringResource(R.string.mobile_chats),
+                    Modifier.semantics { heading() }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                Row(Modifier.testTag("connection_state").semantics(mergeDescendants = true) {
+                    stateDescription = state.connection.name
+                    liveRegion = LiveRegionMode.Polite
+                }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (state.connection != ConnectionState.ONLINE) StatusDot(connectionColor(state.connection))
+                    Text(if (state.connection != ConnectionState.ONLINE) connectionLabel(state.connection)
+                        else header?.let { workspaceName(state, it.workspaceId) } ?: state.hostName, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }, actions = {
-            IconButton(onClick = { searching = !searching; if (!searching) query = "" }, enabled = snapshot != null, modifier = Modifier.testTag("search_history")) {
-                Icon(MobileIcons.Search, stringResource(R.string.mobile_search_history))
+            Box {
+                var more by remember { mutableStateOf(false) }
+                IconButton(onClick = { more = true }, modifier = Modifier.testTag("chat_more")) { Icon(MobileIcons.More, stringResource(R.string.mobile_more_actions)) }
+                DropdownMenu(expanded = more, onDismissRequest = { more = false }, containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.mobile_search_history)) }, leadingIcon = { Icon(MobileIcons.Search, null, Modifier.size(20.dp)) },
+                        enabled = snapshot != null, modifier = Modifier.testTag("search_history"),
+                        onClick = { more = false; searching = !searching; if (!searching) query = "" })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.mobile_refresh)) }, leadingIcon = { Icon(MobileIcons.Refresh, null, Modifier.size(20.dp)) },
+                        enabled = !state.busy, modifier = Modifier.testTag("refresh_chat"), onClick = { more = false; refreshChat() })
+
+                }
             }
-            ConnectionPill(state, onConnection, compact = true)
-            IconButton(onClick = model::refresh, enabled = !state.busy, modifier = Modifier.testTag("refresh_chat")) { Icon(MobileIcons.Refresh, stringResource(R.string.mobile_refresh)) }
-        }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)) },
+        }, colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.background,
+            scrolledContainerColor = MaterialTheme.colorScheme.background)) },
         bottomBar = {
             Column {
                 snapshot?.takeIf { it.activity in listOf("running", "waiting") }?.let { ActivityRow(it) }
@@ -66,11 +94,16 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
                 onPrevious = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, -1) },
                 onNext = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, 1) },
                 onClose = { searching = false; query = "" })
-            ConnectionIssueStrip(state, model::refresh)
+            ConnectionIssueStrip(state, refreshChat)
             if (state.connection == ConnectionState.ONLINE) state.error?.let { ErrorText(it, Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
             if (state.demo) Text(stringResource(R.string.mobile_demo_tag), Modifier.padding(horizontal = 20.dp, vertical = 4.dp).testTag("demo_label"),
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (snapshot != null && state.snapshotStale) Text(stringResource(if (state.busy || model.interactionBlocked) R.string.mobile_short_syncing else R.string.mobile_stale_state),
+                Modifier.padding(horizontal = 20.dp, vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             snapshot?.let {
+                if (model.taskNotSentIn(it.session.id, model.editorDraft)) Text(stringResource(R.string.mobile_task_not_sent), Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                    .testTag("task_not_sent").semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodyMedium, color = LocalMobileColors.current.warning)
                 if (!executable(state)) Notice(stringResource(R.string.mobile_read_only_notice))
                 if (it.activity == "waiting") Notice(stringResource(R.string.mobile_desktop_notice))
                 else if (it.notice != null) Notice(stringResource(R.string.mobile_partial_information))
@@ -101,10 +134,10 @@ private fun ActivityRow(snapshot: SessionSnapshot) {
         while (snapshot.activity == "running") { delay(30_000); now = System.currentTimeMillis() }
     }
     val elapsed = activityElapsed(started, now)
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("activity_row")) {
-        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            StatusDot(if (snapshot.activity == "running") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary, pulse = snapshot.activity == "running")
+    Row(Modifier.fillMaxWidth().heightIn(min = 36.dp).padding(horizontal = 24.dp).testTag("activity_row").semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        run {
+            if (snapshot.activity == "running") Spinner(size = 14.dp) else StatusDot(LocalMobileColors.current.warning)
             Text(when {
                 snapshot.activity == "waiting" -> stringResource(R.string.mobile_waiting_desktop)
                 snapshot.activityDetail == null -> when (elapsed) {
@@ -125,7 +158,7 @@ private fun ActivityRow(snapshot: SessionSnapshot) {
                     }
                     listOfNotNull(base, snapshot.activityDetail?.tool, duration).joinToString(" · ")
                 }
-            }, style = MaterialTheme.typography.labelMedium)
+            }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }

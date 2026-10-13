@@ -11,6 +11,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -73,12 +76,17 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
     }
     Box(modifier.fillMaxWidth()) {
         LazyColumn(state = list, modifier = Modifier.align(Alignment.TopCenter).widthIn(max = 840.dp).fillMaxSize().testTag("chat_timeline"),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             if (snapshot.hasMore) item(key = LazyItemKeys.HISTORY_LIMIT) {
                 Text(stringResource(R.string.mobile_history_limit), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (loading) item(key = "classification-loading") {
-                CircularProgressIndicator(Modifier.size(24.dp).testTag("chat_classification_loading"))
+                val loadingLabel = stringResource(R.string.mobile_loading)
+                // The spinner is drawn; expose it to TalkBack as indeterminate progress, as the old Material indicator did.
+                dev.dshmobile.app.ui.components.Spinner(Modifier.testTag("chat_classification_loading").then(Modifier.semantics {
+                    progressBarRangeInfo = androidx.compose.ui.semantics.ProgressBarRangeInfo.Indeterminate
+                    contentDescription = loadingLabel
+                }), size = 20.dp)
             }
             if (!loading && timeline.isEmpty() && unconfirmed == null) item(key = LazyItemKeys.EMPTY_CONVERSATION) {
                 Text(stringResource(R.string.mobile_empty_conversation), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -98,7 +106,7 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
                 }
             } }
         }
-        if (unread && !following && searchQuery.isBlank()) FilledTonalButton(onClick = {
+        if (unread && !following && searchQuery.isBlank()) Button(shape = androidx.compose.foundation.shape.CircleShape, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.inverseSurface, contentColor = MaterialTheme.colorScheme.inverseOnSurface), onClick = {
             following = true; unread = false
             scope.launch { if (list.layoutInfo.totalItemsCount > 0) { list.scrollToItem(list.layoutInfo.totalItemsCount - 1); list.scrollBy(Float.MAX_VALUE) } }
         }, modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp).testTag("new_messages")) { Text(stringResource(R.string.mobile_new_messages)) }

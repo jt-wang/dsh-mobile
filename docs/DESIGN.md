@@ -1,62 +1,108 @@
 # Implemented Android design
 
-Native Kotlin / Jetpack Compose / Material 3 **Operate** surface. The owner-approved dark graphite/lime direction (see the [native screenshots](screenshots/)) supersedes the old slate/teal drawer design. This is an Android companion for desktop tasks, not a dashboard or WebView. No gradients, glow, glass, attachment controls or nonfunctional menus.
+Native Kotlin / Jetpack Compose / Material 3. Direction **D, "Codex mobile, monochrome"**, approved by the owner on 2026-10-08. It replaces the graphite/lime direction. References are the Codex tab of the ChatGPT app and Telegram's list density. The app is a quiet instrument for sending tasks to a desktop agent. It is not a dashboard, not a WebView and has no brand colour. It has no gradients, glow, glass, cards in lists, avatars, attachment controls, typed tool icons or invented durations.
 
-## Tokens and typography
+## Principles
 
-| Role | Dark (default) | Light |
+1. **Ink on paper.** The ground is near-black in dark and white in light. Text is the only "decoration".
+2. **One filled control.** The primary action (new task, send, connect, create) is the inverse of the ground: a white circle with a black glyph in dark, a black one with a white glyph in light. Everything else is outline, text or hairline.
+3. **Colour is a status, never a style.** Colour appears only in small glyphs: the green dot for online, amber for offline/warning or "waiting", red for revoked/incompatible/errors. A running task uses a neutral spinner.
+4. **System theme by default.** Both themes are designed, not derived.
+
+## Tokens
+
+| Role | Dark | Light |
 | --- | --- | --- |
-| background | `#0F1214` | `#F6F7F2` |
-| surface / container / high | `#161A1D` / `#1B2024` / `#22282C` | `#F6F7F2` / `#ECEFE5` / `#E5E9DE` |
-| onSurface / variant | `#E6E9E4` / `#9AA39E` | `#1A201B` / `#566054` |
-| primary text/icons | `#C5F04A` | `#4E6A00` |
-| primaryContainer / onPrimaryContainer | `#2E3A12` / `#DDF59A` | `#E4EFC6` / `#293600` |
-| outlineVariant | `#2C3338` | `#C6CEBE` |
-| error | `#FF8A80` | `#A9322A` |
-| delivery warning / container | `#E6BC70` / `#382E1B` | `#79530E` / `#F7E7C5` |
+| background / surface | `#0B0B0C` | `#FFFFFF` |
+| surfaceContainer low / · / high / highest | `#131315` / `#18181B` / `#202023` / `#2A2A2E` | `#F7F7F8` / `#F2F2F4` / `#ECECEF` / `#E4E4E8` |
+| onSurface / onSurfaceVariant | `#F2F2F3` / `#9C9CA3` | `#0D0D0F` / `#65656C` |
+| outlineVariant (hairlines) | `#26262A` | see Color.kt |
+| action / onAction | `#F2F2F3` / `#0B0B0C` | `#0D0D0F` / `#FFFFFF` |
+| success (online dot) | `#4CC38A` | `#1F8A55` |
+| warning / container | `#E3B566` / `#2A2417` | `#8A5A00` / `#FBF0DA` |
+| error | `#FF7B72` | `#C0362C` |
 
-Primary FAB, send/stop, create/import and selected project filters use lime `#C5F04A` fills with `#14180A` text in both themes. All other light-theme lime accents become accessible olive. Color roles are centralized in [Color.kt](../android/app/src/main/java/dev/dshmobile/app/ui/theme/Color.kt); there is no wallpaper dynamic color.
+All roles live in [Color.kt](../android/app/src/main/java/dev/dshmobile/app/ui/theme/Color.kt). `primary` equals `onSurface`, so Material defaults stay monochrome. Surface tint is transparent and there is no dynamic wallpaper colour. Text pairs meet WCAG AA (≥4.5:1). onSurfaceVariant on the ground is about 7:1 in dark and 5.9:1 in light.
 
-[Type.kt](../android/app/src/main/java/dev/dshmobile/app/ui/theme/Type.kt) deliberately maps Material roles: headlines 30/26/22sp, titles 20/16/14sp, body 16/14/12sp, labels 14/12/11sp. Body uses system sans/Roboto and native Cyrillic; project names, timestamps, status and code use **FontFamily.Monospace**. No bundled JetBrains Mono: platform mono avoids a font payload and licensing/download dependency while preserving scalable native text. Line heights are explicit, all sizes follow system font scale. Spacing uses 4/8dp rhythm, 16–24dp gutters; touch controls are at least 48dp. Shapes are 6/10/16/24/28dp with pills for search, filter chips and composer action.
+## Typography
 
-[ThemePreference.kt](../android/app/src/main/java/dev/dshmobile/app/ui/theme/ThemePreference.kt) stores DARK / LIGHT / SYSTEM in ordinary `mobile_appearance` SharedPreferences, separate from encrypted pairing/drafts. Dark is the absent/invalid preference default. Settings changes apply immediately including system-bar icon contrast. Native authored outline vectors in [MobileIcons.kt](../android/app/src/main/java/dev/dshmobile/app/ui/MobileIcons.kt) share a 24dp viewport, 2-unit stroke, rounded caps/joins; no new icon dependency or raster assets.
+[Type.kt](../android/app/src/main/java/dev/dshmobile/app/ui/theme/Type.kt) uses bundled **Geist** (Regular/Medium/SemiBold, Cyrillic included) and **Geist Mono** under SIL OFL 1.1 ([licence](../android/app/src/main/res/raw/geist_license.txt)). The scale is headlines 28/24/22sp, titles 20/16/14sp, body 16/14/13sp and labels 14/13/12sp, with slight negative tracking on headlines. All sizes follow the system font scale. Mono is used only for data: code, Markdown tables, addresses, fingerprints and the agent's raw activity text. Times use tabular figures (`tnum`).
 
-## Information architecture
+Spacing follows a 4/8dp rhythm with 20dp gutters. Touch targets are at least 48dp. Shapes are 6/10/14/20/26dp, and fields and primary buttons are pills.
 
-[MobileApp.kt](../android/app/src/main/java/dev/dshmobile/app/ui/MobileApp.kt) only owns lifecycle and minimal saveable Home/Chat/Settings navigation. Opening the app starts at **Home**, not a drawer. System/predictive Back returns to the list, closes sheets/dialogs natively, and canceled predictive gestures do not navigate. Filters, search, route and scroll positions survive Activity recreation; pairing secrets never enter saveable state. Repository/ViewModel contracts and secure persistence are unchanged.
+## Icons and motion
 
-- **Home:** DSH mark, compact connection pill and Settings; local title search; horizontal All/project/count chips ordered by activity; date sections Today / Yesterday / This week / Earlier using local dates, timezone and locale week start. Rows have two-line titles, mono project/time, text-labelled running dots and read-only state. Counts describe the received bounded session window, not a fabricated total. Pull-to-refresh reads canonical state. A scroll-collapsing New chat FAB and empty-state CTA respect online/permission/pending gates; truncated-list copy stays at the end.
-- **Chat:** native Back, single visible title, accented project label, compact status affordance and a real Refresh action. No permanent online banners. One issue strip appears only while not online; synthetic demo copy is a slim truthful tag. User text is a right-aligned tonal bubble with timestamp; assistant output is unboxed native Markdown with a small DSH mark. Copy message/code uses the native clipboard plus “Copied” snackbar. Provisional text stays labelled; new-message jump appears only when the reader is away from the bottom. Activity is labelled running/waiting; the displayed duration is an estimate from the last task message, because the protocol has no run-start timestamp.
-- **Composer:** up to six visible lines, native IME/navigation insets, circular lime send that becomes confirmed stop while running. Online/capability/executable scope/known activity/32 KB/busy/unresolved-delivery gates remain. Pending receipt lookup and confirmed local abandonment are available on both Home and Chat, so an uncertain create is recoverable without a chat. Never silently resend or infer cancellation completion.
-- **New chat:** Material modal bottom sheet, folder/count/radio project rows (read-only projects visible but disabled), default = current filter or most recently active executable project, optional horizontally scrolling preset chips and full-width Create. Project search appears above eight projects; the actual project list is lazy and tagged for scrolling up to 100 projects. No arbitrary filesystem path control.
-- **Settings:** grouped Computer, Connection, Appearance, Device sections; truthful remote route and last sync, three theme choices, supported/unsupported capabilities, confirmed local forget distinct from host revocation/task cancellation.
-- **Pairing:** one “Connect your computer” hero, numbered three-step scan/verify flow, primary offline QR scan through CameraX + ZXing, secondary file import and masked JSON, device label and existing trusted-preview confirmation. CAMERA is optional and requested only after a scan tap/rationale; denial, permanent denial or missing camera offers file import/manual paste and app settings where relevant. The scanner has native Back, a viewfinder and an available-camera torch toggle, processes frames on a worker without saving/logging/network/telemetry, and releases the camera before trust review; scanning never connects automatically. Address/host identity/fingerprint are selectable mono blocks. The invitation has no display name, so the dialog explicitly says it is available only after secure pairing instead of inventing one. Strict canonical invitation validation, certificate checks, debug loopback restriction, memory-only secrets and relay-origin-only preview are unchanged.
+[MobileIcons.kt](../android/app/src/main/java/dev/dshmobile/app/ui/MobileIcons.kt) holds authored 24dp outline vectors with a 2-unit stroke and round caps. Filled exceptions are the stop square and the "more" dots. There is no icon dependency.
+
+Motion:
+- The only continuous motion is the running spinner ([StatusDot.kt](../android/app/src/main/java/dev/dshmobile/app/ui/components/StatusDot.kt)).
+- The activity chevron rotates.
+- Predictive Back uses a small scale/fade.
+- With system animations disabled, the spinner is static.
+
+## Screens
+
+- **Home.**
+  - The top bar has Settings on the left and "DSH · ● state" in the centre. The whole title block is the connection affordance (`connection_state`). Search is a toggle on the right.
+  - Projects are text tabs with a 2dp underline, not chips.
+  - Sessions sit in plain date sections. Each row has a spinner (running) or a hairline ring (idle), a two-line title, a tabular time and a grey "project · status" line.
+  - A bottom pill reads "Новая задача для компьютера…" and ends in a round action button. It opens the New task sheet.
+- **Chat.**
+  - A centred title and a grey project line. When the connection is not online, the project line becomes the coloured connection state, and tapping the title opens the connection details.
+  - Search and Refresh are in the "more" menu.
+  - User messages are right-aligned `surfaceContainerHigh` bubbles. Assistant output is unboxed native Markdown with no mark or role header; system notices keep a small label. Copy and time sit under each message.
+  - Agent service messages collapse into "Действия агента · N ›". When expanded, they show a hairline rail, one line per item with its time, and the full mono text in a dialog.
+  - While a run is active, a status line shows a spinner and "Работает · N мин". This is an estimate from the last task message, because the protocol has no run-start time.
+- **Composer.** A pill field (up to six lines) with the actions inside it: the outlined stop while running (confirmed by a dialog) and the round send. Existing gates are unchanged: online, capability, executable scope, known activity, 32 KB, busy and unresolved delivery.
+- **New task sheet.**
+  - Project rows show a folder, name, grey count and a check on the selected row. Read-only projects are visible but disabled.
+  - Optional preset pills. The selected preset is filled with ink.
+  - A multiline "Что сделать?" field and a full-width pill button.
+  - Empty text keeps the old "Создать" behaviour. With text, the button reads "Отправить": the app creates the chat and, only after a confirmed creation, puts the text into the new chat's draft and sends it once.
+  - If the send fails or is not possible, the text stays in the draft and the chat shows "Чат создан, но задача не отправлена…". An uncertain send appears in the existing delivery panel. Nothing is resent automatically, and an uncertain creation never sends.
+- **Settings.**
+  - Flat sections separated by hairlines, with no cards.
+  - The computer identity comes first, with its connection state, followed by Connection, Theme, Device and the forget action.
+  - Theme is a three-way segmented control: System / Light / Dark.
+- **Pairing.**
+  - A centred "DSH" bar, a round computer glyph, a heading and outlined step numbers.
+  - The primary scan button uses the action colour; import and preview are outlined pills.
+  - Trust review shows identity blocks in Geist Mono.
+  - The scanner viewfinder uses white corners with a dark halo, legible over any camera image.
+
+Behaviour, copy, IA, gates, secure storage and tags are unchanged from the previous design, except for the New task text field and the chat "more" menu (`chat_more`). The test tags `search_history` and `refresh_chat` are now menu items.
 
 ## Native Markdown and safety
 
-[MarkdownParser.kt](../android/app/src/main/java/dev/dshmobile/app/ui/markdown/MarkdownParser.kt) parses ATX headings 1–3, paragraphs, bold/italic, inline code, backtick/tilde fenced code with language and partial-input state, bullets/numbers with one nested indent, blockquotes, rules and simple GFM tables. The [renderer](../android/app/src/main/java/dev/dshmobile/app/ui/markdown/MarkdownRenderer.kt) uses selectable Compose text only. HTML stays literal; links are styled inert text, not intents/URL callbacks; nothing executes or loads remote content. Code and tables scroll horizontally. The parser is regex-free and linear (hostile 131,072-character inputs are covered by time-bounded JVM tests). Messages up to 8,192 characters parse synchronously so the first frame is never empty; longer ones parse on `Dispatchers.Default`, showing plain selectable text on first composition and the last completed document during streaming updates. Parsing is bounded to 131,072 characters, 512 blocks, 8,192-character text chunks, 12 table columns/64 rows, with bounded inline nesting and delimiter indexes. Split code previews copy the whole received bounded fence; overflow/truncated headings and table cells are flagged, and ordinary Windows path backslashes are preserved. Longer messages show a preview notice; message copy retains original text. This is a small supported subset, not a CommonMark compliance claim.
+[MarkdownParser.kt](../android/app/src/main/java/dev/dshmobile/app/ui/markdown/MarkdownParser.kt) parses:
+- ATX headings 1–3, paragraphs, bold/italic and inline code;
+- fenced code with partial-input state;
+- bullets/numbers with one nested indent;
+- blockquotes, rules and simple GFM tables.
 
-## Opt-in screenshot stages (parent/operator only)
+The [renderer](../android/app/src/main/java/dev/dshmobile/app/ui/markdown/MarkdownRenderer.kt) uses selectable Compose text only:
+- HTML stays literal. Links are inert underlined text, with no intents.
+- Code and tables scroll horizontally.
+- Parsing is linear and bounded: 131,072 characters, 512 blocks and 12×64 table cells. Messages up to 8,192 characters parse synchronously; longer ones parse on `Dispatchers.Default`.
 
-The existing [acceptance test](../android/app/src/androidTest/java/dev/dshmobile/app/acceptance/MobileAcceptanceTest.kt) remains the real-Activity ordered lifecycle suite; no existing script is modified. Its additional `redesignCapture` stage is intentionally opt-in and is **not** part of the current acceptance helper’s default matrix. Start the parent-owned synthetic fixture with `--multi-project`. The private version-1 envelope keeps all existing required expectation fields; optionally copy its `demoFixture` object to the envelope (`markdownSessionId`, `markdownAnchor`, `filterWorkspaceId`). If left nested inside `invitation`, the test reads it then removes it before importing into the unchanged strict production parser. Defaults are `demo-fund-plan`, `План портала фонда`, `demo-fund`. This opt-in mode is refused for isolated real-DSH canaries.
+This is a small supported subset, not a CommonMark compliance claim.
 
-On an authorized **disposable** emulator only: install app and test APKs, provide the envelope through the existing private stdin/run-as transfer, and use non-secret arguments:
+## Screenshot stages
 
-```text
-adb -s emulator-5580 shell am instrument -w -r
-  -e class dev.dshmobile.app.acceptance.MobileAcceptanceTest#fixtureJourney
-  -e acceptanceStage redesignCapture -e acceptanceCapture home-dark
-  dev.dshmobile.app.test/androidx.test.runner.AndroidJUnitRunner
-```
+The opt-in `redesignCapture` stage of [MobileAcceptanceTest](../android/app/src/androidTest/java/dev/dshmobile/app/acceptance/MobileAcceptanceTest.kt) and [tools/android-redesign-capture.ps1](../tools/android-redesign-capture.ps1) capture these names against the synthetic multi-project fixture only, on a disposable emulator:
+- `pairing-dark`
+- `home-dark`, `home-dark-en`, `home-project`, `home-light`, `home-font130`
+- `chat-markdown-running`
+- `new-chat-sheet`
+- `settings-dark`
 
-Run `pairing-dark` before pairing, with an empty disposable app, font scale 1.0. Then run the unchanged `pairLifecycle` fresh-pair stage. Each subsequent capture invocation needs a new private envelope **without** its one-use invitation, a cold Home launch and font scale 1.0 except `home-font130` = 1.3. Names: `home-dark`, `home-project`, `chat-markdown-running`, `new-chat-sheet`, `settings-dark`, `home-light`, `home-font130`. The running fixture session must expose the Markdown anchor and cancel capability; capture asserts the stop control but never clicks it. Check `OK (1 test)` as well as no failure/crash markers: adb exit 0 alone is insufficient. Pull PNG + matching JSON from the existing app external `acceptance` directory into an ignored artifact directory. The JSON names native compositor source, dimensions, locale/font/uiMode, persisted theme preference and fixture-only/false-production provenance. APK/PNG hashing and restoring operator-owned font/night/locales/forwarding remain the parent’s responsibility. These are command instructions, **not a performed run**.
+The stage never sends, creates, cancels or forgets. Synthetic screenshots illustrate the interface; they are not physical-device acceptance.
 
-## Accessibility, motion and verification boundary
+## Accessibility
 
-Connection status preserves `connection_state`, enum `stateDescription` and polite live region. Existing mutation/recovery/pairing tags remain; `chat_drawer` now labels the equivalent Back-to-list control, and acceptance explicitly opens a restored chat from Home. New tags cover search, filters, theme choices and screen boundaries. Titles/headings/selected radio semantics, meaningful icon descriptions, text-labelled states, selectable message content and disabled mutation controls remain native. No per-token live announcement or notification permission is introduced. Pairing's optional CAMERA permission is requested on demand only for offline QR scanning.
-
-Running dots pulse subtly with Material standard easing. FAB/sheets use Material motion; native predictive Back uses a small scale/fade. Animator duration scale is observed, with a static dot/Back fallback when system animations are disabled. Theme and screens have no decorative entrance motion.
-
-JVM parser/presentation tests and the documented Android build/lint/test APK/release gates are the code checks. The opt-in `redesignCapture` instrumentation stage records eight native screenshot targets using the existing private fixture envelope and compositor/provenance conventions: dark Home, filtered Home, Markdown/running Chat, create sheet, Settings, empty Pairing, light Home, 1.3 font Home. It runs only against the explicitly synthetic multi-project fixture, never a live host, and does not send/create/cancel/forget tasks. Empty Pairing capture must precede pairing on a disposable app. Theme preference is restored after each stage; font/night/locale changes remain operator-owned. Home rows open a retained current snapshot while offline; other uncached chats stay disabled until an online sync.
-
-Public [synthetic native screenshots](screenshots/README.md) illustrate the interface, not physical-device readiness. Visual comparison, clipping/IME/font scale, TalkBack/predictive gestures, large-session performance and physical-phone/mobile-network acceptance are separate operator gates. Native code does not use HTML/CSS; the app ships vector controls, not screenshot rasters.
+- `connection_state` keeps its enum `stateDescription` and polite live region on Home and Chat.
+- Headings, radio and tab semantics, meaningful icon descriptions and text-labelled states are preserved; colour is never the only signal.
+- The new task button is a single labelled button that is disabled when creation is impossible.
+- The "not sent" notice is a polite live region.
+- Font scale up to 2.0, IME insets and predictive Back are part of the design.
+- TalkBack, physical devices and mobile networks remain separate operator gates.

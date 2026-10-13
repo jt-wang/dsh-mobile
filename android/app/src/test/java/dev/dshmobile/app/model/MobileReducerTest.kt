@@ -19,6 +19,7 @@ class MobileReducerTest {
         assertFalse(MobileReducer.canSend(online.copy(pending = queued.copy(status = "uncertain")), "Next prompt"))
         assertFalse(MobileReducer.canSend(online.copy(connection = ConnectionState.OFFLINE), "Next prompt"))
         assertFalse(MobileReducer.canSend(online.copy(busy = true), "Next prompt"))
+        assertFalse(MobileReducer.canSend(online.copy(snapshotStale = true), "Next prompt"))
         assertFalse(MobileReducer.canSend(online, " "))
         assertFalse(MobileReducer.canSend(online, "я".repeat(16_385)))
     }
@@ -41,6 +42,17 @@ class MobileReducerTest {
         assertEquals(listOf("final"), replacement.snapshot!!.messages.map { it.id })
         assertEquals(2, replacement.snapshot!!.cursor)
         assertEquals(30L, replacement.lastSyncedAt)
+    }
+    @Test fun `identical authoritative replacement revalidates without discarding immutable history identity`() {
+        val canonical = snapshot(listOf(ChatMessage("answer", "assistant", "Unchanged", 1)))
+        val state = MobileState(snapshot = canonical, snapshotStale = true)
+        val replacement = MobileReducer.replaceSnapshot(state, canonical.copy(messages = canonical.messages.toList()), 40)
+        assertSame(canonical, replacement.snapshot)
+        assertFalse(replacement.snapshotStale)
+        assertEquals(40L, replacement.lastSyncedAt)
+        val empty = MobileReducer.replaceSnapshot(replacement, snapshot(emptyList(), 0), 50)
+        assertTrue(empty.snapshot!!.messages.isEmpty())
+        assertEquals(0L, empty.snapshot.cursor)
     }
     @Test fun `only canonical user message in the command session reconciles its request ID`() {
         val id = "61ea5a55-682f-4ab4-af97-8dad7a606a4d"

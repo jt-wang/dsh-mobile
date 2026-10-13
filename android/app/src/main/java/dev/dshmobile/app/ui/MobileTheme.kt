@@ -10,7 +10,6 @@ import androidx.compose.material3.Shapes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
@@ -39,10 +38,10 @@ fun MobileTheme(content: @Composable () -> Unit) {
     } }
     CompositionLocalProvider(LocalThemeSetting provides setting, LocalDarkTheme provides dark,
         LocalMotionEnabled provides rememberMotionEnabled(),
-        LocalMobileColors provides if (dark) MobileColors() else MobileColors(warning = Color(0xFF79530E), warningContainer = Color(0xFFF7E7C5))) {
+        LocalMobileColors provides if (dark) MobileColors() else LightMobileColors) {
         MaterialTheme(colorScheme = if (dark) DarkColors else LightColors,
             typography = MobileTypography,
-            shapes = Shapes(extraSmall = RoundedCornerShape(6.dp), small = RoundedCornerShape(10.dp), medium = RoundedCornerShape(16.dp), large = RoundedCornerShape(24.dp), extraLarge = RoundedCornerShape(28.dp)),
+            shapes = Shapes(extraSmall = RoundedCornerShape(6.dp), small = RoundedCornerShape(10.dp), medium = RoundedCornerShape(14.dp), large = RoundedCornerShape(20.dp), extraLarge = RoundedCornerShape(26.dp)),
             content = content)
     }
 }

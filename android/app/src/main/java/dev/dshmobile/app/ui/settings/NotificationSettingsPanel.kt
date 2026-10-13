@@ -72,22 +72,26 @@ import kotlinx.coroutines.launch
     onEnabled: (Boolean) -> Unit, onProject: (String, Boolean) -> Unit, onChat: (String, Boolean) -> Unit,
     onBattery: () -> Unit, onSystem: () -> Unit, busy: Boolean) {
     ToggleLine(stringResource(R.string.notif_title), local.enabled, onEnabled, !busy && (local.enabled || state.capabilities?.notifications == true))
-    Text(stringResource(R.string.notif_rationale), style = MaterialTheme.typography.bodyMedium)
-    Text(stringResource(R.string.notif_restart), style = MaterialTheme.typography.bodySmall)
-    if (state.capabilities?.notifications != true) Text(stringResource(R.string.notif_unsupported))
+    Text(stringResource(R.string.notif_rationale), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(stringResource(R.string.notif_restart), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (state.capabilities?.notifications != true) Text(stringResource(R.string.notif_unsupported), style = MaterialTheme.typography.bodyMedium)
     when (local.monitoringStatus) {
         "degraded" -> Text(stringResource(R.string.notif_degraded), color = MaterialTheme.colorScheme.error)
-        "initializing" -> if (local.enabled) Text(stringResource(R.string.notif_initializing))
-        "offline" -> Text(stringResource(R.string.notif_offline))
+        "initializing" -> if (local.enabled) Text(stringResource(R.string.notif_initializing), style = MaterialTheme.typography.bodyMedium)
+        "offline" -> Text(stringResource(R.string.notif_offline), style = MaterialTheme.typography.bodyMedium)
         "blocked" -> Text(stringResource(R.string.notif_blocked), color = MaterialTheme.colorScheme.error)
     }
     if (failed) Text(stringResource(R.string.notif_blocked), color = MaterialTheme.colorScheme.error)
     if (local.dirty) Text(stringResource(R.string.notif_unsynced), style = MaterialTheme.typography.bodySmall)
-    TextButton(onClick = onSystem) { Text(stringResource(R.string.notif_system)) }
-    OutlinedButton(onClick = onBattery) { Text(stringResource(R.string.notif_battery)) }
-    Text(stringResource(R.string.notif_oneplus), style = MaterialTheme.typography.bodySmall)
+    // Stacked so long Russian labels and 2.0 font scale never squeeze two pills side by side.
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlineAction(stringResource(R.string.notif_system), true, onSystem)
+        OutlineAction(stringResource(R.string.notif_battery), true, onBattery)
+    }
+    Text(stringResource(R.string.notif_oneplus), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     var filters by remember { mutableStateOf(false) }
-    TextButton(onClick = { filters = !filters }) { Text(stringResource(R.string.notif_filters)) }
+    TextButton(onClick = { filters = !filters }, modifier = Modifier.offset(x = (-12).dp),
+        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text(stringResource(R.string.notif_filters)) }
     if (filters) {
         Text(stringResource(R.string.notif_projects), style = MaterialTheme.typography.titleSmall)
         state.workspaces.forEach { workspace ->
@@ -105,7 +109,8 @@ import kotlinx.coroutines.launch
 @Composable private fun ToggleLine(label: String, checked: Boolean, change: (Boolean) -> Unit, enabled: Boolean) {
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-        Switch(checked, change, enabled = enabled, modifier = Modifier.padding(start = 8.dp)
+        Switch(checked, change, enabled = enabled, colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.onSurface,
+            checkedThumbColor = MaterialTheme.colorScheme.surface, uncheckedBorderColor = MaterialTheme.colorScheme.outline), modifier = Modifier.padding(start = 8.dp)
             .then(Modifier.semanticsLabel(label)))
     }
 }

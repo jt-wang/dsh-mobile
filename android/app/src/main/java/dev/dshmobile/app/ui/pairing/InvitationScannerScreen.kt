@@ -57,7 +57,7 @@ internal fun ScannerSurface(ready: Boolean, flash: Boolean, torch: Boolean, onBa
     Scaffold(containerColor = MaterialTheme.colorScheme.background, modifier = Modifier.testTag("pairing_scanner"), topBar = {
         TopAppBar(title = { Text(stringResource(R.string.mobile_scan_title), style = MaterialTheme.typography.titleMedium) },
             navigationIcon = { IconButton(onClick = onBack, modifier = Modifier.testTag("pairing_scan_back")) {
-                Icon(MobileIcons.Back, stringResource(R.string.mobile_back))
+                Icon(MobileIcons.ChevronLeft, stringResource(R.string.mobile_back))
             } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
     }) { padding ->
         ScannerContent(ready, flash, torch, onTorch, preview,
@@ -69,7 +69,6 @@ internal fun ScannerSurface(ready: Boolean, flash: Boolean, torch: Boolean, onBa
 @Composable
 internal fun ScannerContent(ready: Boolean, flash: Boolean, torch: Boolean, onTorch: () -> Unit,
     preview: @Composable () -> Unit, modifier: Modifier = Modifier) {
-    val accents = dev.dshmobile.app.ui.theme.LocalMobileColors.current
     BoxWithConstraints(modifier.padding(20.dp)) {
         val landscape = maxWidth > maxHeight
         val side = if (landscape) minOf(maxWidth * 0.45f, maxHeight) else minOf(maxWidth, 320.dp)
@@ -87,7 +86,8 @@ internal fun ScannerContent(ready: Boolean, flash: Boolean, torch: Boolean, onTo
                         listOf(left, top, corner, corner), listOf(left + side, top, -corner, corner),
                         listOf(left, top + side, corner, -corner), listOf(left + side, top + side, -corner, -corner),
                     )) {
-                        for ((color, width) in listOf(accents.onAction to 7.dp.toPx(), accents.action to 3.dp.toPx())) {
+                        // Over a camera image, white corners with a dark halo read in both themes.
+                        for ((color, width) in listOf(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f) to 7.dp.toPx(), androidx.compose.ui.graphics.Color.White to 3.dp.toPx())) {
                             drawLine(color, Offset(x, y + dy), Offset(x, y), width, StrokeCap.Round)
                             drawLine(color, Offset(x, y), Offset(x + dx, y), width, StrokeCap.Round)
                         }
@@ -99,10 +99,11 @@ internal fun ScannerContent(ready: Boolean, flash: Boolean, torch: Boolean, onTo
             Text(stringResource(R.string.mobile_scan_instructions), style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (!ready) {
-                CircularProgressIndicator(Modifier.size(24.dp))
+                dev.dshmobile.app.ui.components.Spinner(size = 20.dp)
                 Text(stringResource(R.string.mobile_scan_loading), style = MaterialTheme.typography.bodyMedium)
             }
-            if (flash) OutlinedButton(onClick = onTorch, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("pairing_scan_torch")) {
+            if (flash) OutlinedButton(onClick = onTorch, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("pairing_scan_torch"),
+                shape = androidx.compose.foundation.shape.CircleShape, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                 Text(stringResource(if (torch) R.string.mobile_scan_torch_off else R.string.mobile_scan_torch_on))
             }
             Text(stringResource(R.string.mobile_scan_hint), Modifier.testTag("pairing_scan_hint"),

@@ -4,6 +4,8 @@ import dev.dshmobile.app.model.SessionSnapshot
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import okhttp3.Call
@@ -52,6 +54,10 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
             try { executeOnce(request, limit, recoverClosedRead = true) }
             catch (failure: ReadConnectionClosed) {
                 currentCoroutineContext().ensureActive()
+                // Parallel metadata can leave several expired H1 relay tunnels in the pool.
+                // A second pooled call must not spend the only recovery on another known-stale
+                // idle candidate. evictAll leaves allocated GET/SSE connections untouched.
+                withContext(Dispatchers.IO) { client.connectionPool.evictAll() }
                 executeOnce(request, limit, retryOf = failure.call)
             }
         } ?: throw MobileFailure("network_unavailable")
@@ -100,18 +106,18 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
         }
     }
 
-    private fun HttpResult.checked(): String {
+    private fun HttpResult.checked(history: Boolean = false): String {
         if (status in 200..299) return text
-        throw errorFailure()
+        throw errorFailure(history)
     }
-    private fun HttpResult.errorFailure(): MobileFailure {
+    private fun HttpResult.errorFailure(history: Boolean = false): MobileFailure {
         val error = decodeWire<ErrorEnvelope>(text).error
         return MobileFailure(when (status) {
             401 -> if (error.code == "revoked") "revoked" else "unauthorized"
             403 -> "forbidden"
             409 -> "request_conflict"
             429 -> "rate_limited"
-            else -> hostErrorKey(error.code)
+            else -> if (status in 400..599 && history) "chat_unavailable" else hostErrorKey(error.code)
         })
     }
 
@@ -156,8 +162,15 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
         }
         return SessionIndex(items, true)
     }
-    suspend fun snapshot(sessionId: String): SessionSnapshot = decodeWire<SessionSnapshot>(
-        execute(request("sessions", sessionId).build(), SNAPSHOT_LIMIT).checked()).checked(sessionId)
+    suspend fun snapshot(sessionId: String): SessionSnapshot = try {
+        val result = execute(request("sessions", sessionId).build(), SNAPSHOT_LIMIT)
+        // Up to 2 MiB: decoding/validation must not resume on the UI dispatcher.
+        withContext(Dispatchers.Default) { decodeWire<SessionSnapshot>(result.checked(history = true)).checked(sessionId) }
+    } catch (failure: MobileFailure) {
+        // Receiving a bad/oversized history does not prove the paired host is offline.
+        if (failure.key == "invalid_response") throw MobileFailure("chat_unavailable")
+        throw failure
+    }
 
     suspend fun command(value: StoredCommand): CommandReceipt {
         val builder: Request.Builder
@@ -195,7 +208,14 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                 try {
                     if (data.toByteArray().size > SNAPSHOT_LIMIT) throw MobileFailure("invalid_response")
                     onSnapshot(decodeWire<SessionSnapshot>(data).checked(sessionId))
-                } catch (failure: MobileFailure) { cancelOnIo { eventSource.cancel() }; onFailure(failure) }
+                } catch (failure: MobileFailure) {
+                    // Terminal decode failure owns cancellation synchronously: later buffered
+                    // frames or the physical close must not reclassify it as a host outage.
+                    if (cancelled.compareAndSet(false, true)) {
+                        cancelOnIo { eventSource.cancel() }
+                        onFailure(if (failure.key == "invalid_response") MobileFailure("chat_unavailable") else failure)
+                    }
+                }
             }
             override fun onClosed(eventSource: EventSource) {
                 if (!retired.get() && !cancelled.get()) onFailure(MobileFailure("network_unavailable"))
@@ -206,8 +226,9 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                     401 -> "unauthorized"
                     403 -> "forbidden"
                     429 -> "rate_limited"
+                    in 400..599 -> "chat_unavailable"
                     else -> when (t) {
-                        is EventLimitExceeded -> "invalid_response"
+                        is EventLimitExceeded -> "chat_unavailable"
                         is SSLException -> "tls_failed"
                         else -> "network_unavailable"
                     }

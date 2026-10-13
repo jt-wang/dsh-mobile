@@ -12,7 +12,7 @@ import androidx.compose.ui.platform.LocalContext
 
 internal enum class ThemePreference { DARK, LIGHT, SYSTEM }
 internal data class ThemeSetting(val value: ThemePreference, val update: (ThemePreference) -> Unit)
-internal val LocalThemeSetting = staticCompositionLocalOf { ThemeSetting(ThemePreference.DARK) {} }
+internal val LocalThemeSetting = staticCompositionLocalOf { ThemeSetting(ThemePreference.SYSTEM) {} }
 internal val LocalDarkTheme = staticCompositionLocalOf { true }
 internal val LocalMotionEnabled = staticCompositionLocalOf { true }
 
@@ -20,7 +20,7 @@ internal val LocalMotionEnabled = staticCompositionLocalOf { true }
 internal const val THEME_PREFERENCES = "mobile_appearance"
 internal const val THEME_KEY = "theme"
 internal fun readThemePreference(preferences: SharedPreferences): ThemePreference =
-    ThemePreference.entries.firstOrNull { it.name == preferences.getString(THEME_KEY, null) } ?: ThemePreference.DARK
+    ThemePreference.entries.firstOrNull { it.name == preferences.getString(THEME_KEY, null) } ?: ThemePreference.SYSTEM
 
 @Composable
 internal fun rememberThemeSetting(): ThemeSetting {

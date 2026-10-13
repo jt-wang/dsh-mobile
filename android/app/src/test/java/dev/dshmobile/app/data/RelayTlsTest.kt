@@ -229,6 +229,27 @@ class RelayTlsTest {
             }
         }
     }
+    @Test fun `HTTP2 sequential requests reuse one opaque tunnel instead of repeating handshakes`() {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName(logical).build()
+        withBridge(certificate) { host, bridge ->
+            val endpoint = endpoint(certificate, bridge)
+            RelayLoopbackProxy(endpoint).use { proxy ->
+                val client = SecureTransport.client(endpoint, proxy)
+                try {
+                    repeat(3) { index ->
+                        host.enqueue(MockResponse().setBody("Synthetic-$index"))
+                        client.newCall(Request.Builder().url(endpoint.baseUrl + "/v1/test/$index").build()).execute().use {
+                            assertEquals(okhttp3.Protocol.HTTP_2, it.protocol)
+                            assertEquals("Synthetic-$index", it.body!!.string())
+                        }
+                    }
+                    assertEquals(3, host.requestCount)
+                    assertEquals(1, bridge.headers.size)
+                    assertEquals(listOf(0, 1, 2), (0..2).map { host.takeRequest(2, TimeUnit.SECONDS)!!.sequenceNumber })
+                } finally { client.connectionPool.evictAll(); client.dispatcher.executorService.shutdown() }
+            }
+        }
+    }
     @Test fun `rapid valid uploads coalesce ping barriers rather than tripping relay control rate`() {
         val certificate = HeldCertificate.Builder().addSubjectAlternativeName(logical).build()
         withBridge(certificate) { host, bridge ->

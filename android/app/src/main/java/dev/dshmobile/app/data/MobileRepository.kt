@@ -11,6 +11,8 @@ interface MobileRepository {
     suspend fun pair(invitation: Invitation, deviceName: String)
     suspend fun refresh()
     suspend fun selectSession(sessionId: String)
+    /** Leave local observation/loading only; never cancel desktop work. */
+    suspend fun leaveSession() {}
     suspend fun createSession(workspaceId: String, presetId: String? = null)
     suspend fun updateDraft(text: String)
     suspend fun sendMessage(text: String)

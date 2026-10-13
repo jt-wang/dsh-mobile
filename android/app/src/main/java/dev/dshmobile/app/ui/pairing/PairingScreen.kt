@@ -30,7 +30,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.dshmobile.app.R
@@ -39,6 +38,11 @@ import dev.dshmobile.app.model.MobileState
 import dev.dshmobile.app.ui.*
 import dev.dshmobile.app.ui.components.ErrorText
 import dev.dshmobile.app.ui.theme.LocalMobileColors
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
+import dev.dshmobile.app.ui.theme.MonoFamily
 import java.net.URI
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -85,24 +89,24 @@ internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
         return
     }
     Scaffold(containerColor = MaterialTheme.colorScheme.background, topBar = {
-        TopAppBar(title = { Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(MobileIcons.Mark, null, tint = MaterialTheme.colorScheme.primary)
-            Text(stringResource(R.string.mobile_brand), style = MaterialTheme.typography.titleLarge)
-        } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
+        CenterAlignedTopAppBar(title = { Text(stringResource(R.string.mobile_brand), style = MaterialTheme.typography.titleMedium) },
+            colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.background))
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            Icon(MobileIcons.Computer, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
-            Text(stringResource(R.string.mobile_pair_title), style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+            Box(Modifier.size(56.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape), contentAlignment = Alignment.Center) {
+                Icon(MobileIcons.Computer, null, Modifier.size(28.dp))
+            }
+            Text(stringResource(R.string.mobile_pair_title), style = MaterialTheme.typography.headlineMedium, modifier = Modifier.semantics { heading() })
             Text(stringResource(R.string.mobile_pair_subtitle), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 listOf(R.string.mobile_pair_step_one, R.string.mobile_pair_step_two, R.string.mobile_pair_step_three).forEachIndexed { index, text ->
                     val stepLabel = stringResource(R.string.mobile_pair_step_number, index + 1)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.small, modifier = Modifier.sizeIn(minWidth = 32.dp, minHeight = 32.dp).padding(4.dp).semantics { contentDescription = stepLabel }) {
+                        Surface(color = Color.Transparent, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline), shape = CircleShape, modifier = Modifier.sizeIn(minWidth = 32.dp, minHeight = 32.dp).padding(4.dp).semantics { contentDescription = stepLabel }) {
                             Box(contentAlignment = Alignment.Center) { Text("${index + 1}", style = MaterialTheme.typography.labelMedium) }
                         }
-                        Text(stringResource(text), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        Text(stringResource(text), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -120,13 +124,15 @@ internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
                         }
                     }
                 }, enabled = !state.busy && !scanning, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("pairing_scan"),
-                    colors = ButtonDefaults.buttonColors(containerColor = accents.action, contentColor = accents.onAction), shape = MaterialTheme.shapes.medium) {
+                    colors = ButtonDefaults.buttonColors(containerColor = accents.action, contentColor = accents.onAction), shape = CircleShape) {
                     Text(stringResource(R.string.mobile_scan_qr))
                 }
                 Text(stringResource(R.string.mobile_scan_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedButton(onClick = { importer.launch("*/*") }, enabled = !state.busy && !scanning,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("pairing_import"), shape = MaterialTheme.shapes.medium) { Text(stringResource(R.string.mobile_import)) }
-                TextButton(onClick = { model.supersedeInvitationImport(); manual = !manual }, enabled = !state.busy && !scanning, modifier = Modifier.heightIn(min = 48.dp).testTag("pairing_manual")) {
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("pairing_import"), shape = CircleShape, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text(stringResource(R.string.mobile_import)) }
+                TextButton(onClick = { model.supersedeInvitationImport(); manual = !manual }, enabled = !state.busy && !scanning, modifier = Modifier.heightIn(min = 48.dp).testTag("pairing_manual"),
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                     Text(stringResource(if (manual) R.string.mobile_hide_json else R.string.mobile_paste_json))
                 }
             }
@@ -135,19 +141,24 @@ internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
             if (manual) OutlinedTextField(value = model.invitation, onValueChange = { model.editInvitation(it); previewError = null; trust = null },
                 label = { Text(stringResource(R.string.mobile_invitation)) }, supportingText = { Text(stringResource(R.string.mobile_invitation_hint)) },
                 visualTransformation = PasswordVisualTransformation(), isError = previewError != null, minLines = 2, maxLines = 4, enabled = !state.busy && !scanning,
+                shape = MaterialTheme.shapes.medium, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = MaterialTheme.colorScheme.onSurface, unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant),
                 modifier = Modifier.fillMaxWidth().testTag("pairing_invitation"))
             OutlinedTextField(value = model.deviceName, onValueChange = model::editDeviceName, label = { Text(stringResource(R.string.mobile_device_name)) },
-                placeholder = { Text(defaultName) }, singleLine = true, enabled = !state.busy && !scanning, modifier = Modifier.fillMaxWidth().testTag("pairing_device_name"))
+                placeholder = { Text(defaultName) }, singleLine = true, enabled = !state.busy && !scanning, shape = MaterialTheme.shapes.medium,
+                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = MaterialTheme.colorScheme.onSurface, unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth().testTag("pairing_device_name"))
             previewError?.let { ErrorText(it) }; model.importError?.let { ErrorText(it) }; state.error?.let { ErrorText(it) }
             OutlinedButton(onClick = {
                 try { trust = InvitationReview.parse(model.invitation); previewError = null }
                 catch (failure: MobileFailure) { trust = null; previewError = failure.key }
                 catch (_: Exception) { trust = null; previewError = "invitation_invalid" }
-            }, enabled = model.invitation.isNotBlank() && !state.busy && !model.importingInvitation && !scanning, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("pairing_preview")) {
+            }, enabled = model.invitation.isNotBlank() && !state.busy && !model.importingInvitation && !scanning, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("pairing_preview"),
+                shape = CircleShape, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                 Text(stringResource(if (state.busy) R.string.mobile_connecting else R.string.mobile_preview_host))
             }
-            if (state.busy || model.importingInvitation) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (state.error != null) OutlinedButton(onClick = { reset = true }, enabled = !state.busy, modifier = Modifier.fillMaxWidth().testTag("reset_connection")) {
+            if (state.busy || model.importingInvitation) LinearProgressIndicator(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurface, trackColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+            if (state.error != null) OutlinedButton(onClick = { reset = true }, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("reset_connection"),
+                shape = CircleShape, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
                 Text(stringResource(R.string.mobile_reset_connection))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -189,8 +200,9 @@ internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
 internal fun TrustReviewContent(preview: TrustPreview, busy: Boolean, onBack: () -> Unit, onConnect: () -> Unit) {
     Surface(Modifier.fillMaxSize().safeDrawingPadding(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-            TextButton(onClick = onBack, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp).testTag("trust_back")) {
-                Icon(MobileIcons.Back, null)
+            TextButton(onClick = onBack, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp).testTag("trust_back"),
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
+                Icon(MobileIcons.ChevronLeft, null)
                 Spacer(Modifier.width(8.dp))
                 Text(stringResource(R.string.mobile_back))
             }
@@ -204,13 +216,14 @@ internal fun TrustReviewContent(preview: TrustPreview, busy: Boolean, onBack: ()
                 else FingerprintBlock(preview.pin)
                 preview.relayOrigin?.let { origin ->
                     Text(stringResource(R.string.mobile_remote_mode), style = MaterialTheme.typography.titleSmall)
-                    SelectionContainer { Text(stringResource(R.string.mobile_relay_host, origin), Modifier.testTag("pairing_relay"), fontFamily = FontFamily.Monospace) }
+                    SelectionContainer { Text(stringResource(R.string.mobile_relay_host, origin), Modifier.testTag("pairing_relay"), fontFamily = MonoFamily) }
                     Text(stringResource(R.string.mobile_remote_explanation))
                     Text(stringResource(R.string.mobile_pc_online_required))
                 }
                 if (preview.customCertificate) Text(stringResource(R.string.mobile_custom_certificate))
                 Text(stringResource(R.string.mobile_trust_verify))
-                Button(onClick = onConnect, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("pairing_connect")) {
+                Button(onClick = onConnect, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("pairing_connect"), shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(containerColor = LocalMobileColors.current.action, contentColor = LocalMobileColors.current.onAction)) {
                     Text(stringResource(R.string.mobile_trust_connect))
                 }
             }
@@ -231,7 +244,8 @@ internal fun FingerprintBlock(pin: String) {
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("SHA-256", pin)))
             haptic()
             copied = true
-        } }, modifier = Modifier.heightIn(min = 48.dp).testTag("copy_fingerprint")) {
+        } }, modifier = Modifier.heightIn(min = 48.dp).testTag("copy_fingerprint"), shape = CircleShape,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
             Text(stringResource(if (copied) R.string.mobile_copied else R.string.mobile_copy_fingerprint))
         }
     }
@@ -246,9 +260,9 @@ private tailrec fun Context.activity(): Activity? = when (this) {
 @Composable
 private fun IdentityBlock(label: String, value: String) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(label, style = MaterialTheme.typography.labelLarge)
-        Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.small) {
-            SelectionContainer { Text(value, Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace) }
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.small, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
+            SelectionContainer { Text(value, Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodyMedium, fontFamily = MonoFamily) }
         }
     }
 }

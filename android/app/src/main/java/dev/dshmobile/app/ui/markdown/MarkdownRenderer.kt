@@ -13,7 +13,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.*
-import androidx.compose.ui.text.font.FontFamily
+import dev.dshmobile.app.ui.theme.MonoFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -82,9 +82,9 @@ private fun inlineText(text: String): AnnotatedString {
                 withStyle(SpanStyle(
                     fontWeight = if (span.bold) FontWeight.Bold else null,
                     fontStyle = if (span.italic) FontStyle.Italic else null,
-                    fontFamily = if (span.code) FontFamily.Monospace else null,
+                    fontFamily = if (span.code) MonoFamily else null,
                     background = if (span.code) colors.surfaceContainerHigh else androidx.compose.ui.graphics.Color.Unspecified,
-                    color = when { span.link != null -> colors.primary; span.code -> colors.onSurface; else -> androidx.compose.ui.graphics.Color.Unspecified },
+                    color = when { span.link != null -> colors.onSurface; span.code -> colors.onSurface; else -> androidx.compose.ui.graphics.Color.Unspecified },
                     textDecoration = if (span.link != null) TextDecoration.Underline else null)) {
                     // A URL annotation is intentionally absent: links are styled, selectable, never opened.
                     append(span.text)
@@ -99,14 +99,14 @@ private fun CodeBlock(block: MarkdownBlock.Code, onCopy: (String) -> Unit, selec
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.medium,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
         Column {
-            Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(block.language.ifBlank { stringResource(R.string.mobile_code) }, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 IconButton(onClick = { onCopy(block.copyText) }) { Icon(MobileIcons.Copy, stringResource(R.string.mobile_copy_code), Modifier.size(18.dp)) }
             }
             OptionalSelection(selectable) {
-                Text(block.text, Modifier.horizontalScroll(rememberScrollState()).padding(16.dp),
-                    style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace, softWrap = false)
+                Text(block.text, Modifier.horizontalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
+                    style = MaterialTheme.typography.bodySmall, fontFamily = MonoFamily, softWrap = false)
             }
             if (!block.closed) Text(stringResource(R.string.mobile_code_incomplete), Modifier.padding(start = 16.dp, bottom = 12.dp),
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -127,7 +127,7 @@ private fun MarkdownTable(block: MarkdownBlock.Table, selectable: Boolean) {
                 (listOf(block.header) + block.rows).forEachIndexed { rowIndex, row ->
                     Row(Modifier.background(if (rowIndex == 0) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainer)) {
                         row.forEachIndexed { column, cell ->
-                            Text(cell, Modifier.width(widths[column]).padding(12.dp), style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace,
+                            Text(cell, Modifier.width(widths[column]).padding(12.dp), style = MaterialTheme.typography.bodyMedium, fontFamily = MonoFamily,
                                 fontWeight = if (rowIndex == 0) FontWeight.Medium else FontWeight.Normal)
                         }
                     }

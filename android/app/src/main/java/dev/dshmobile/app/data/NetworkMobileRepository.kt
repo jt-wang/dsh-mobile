@@ -11,6 +11,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,7 +28,7 @@ import java.util.UUID
 import kotlin.random.Random
 
 fun createMobileRepository(context: Context, scope: CoroutineScope): MobileRepository =
-    NetworkMobileRepository(EncryptedStateStore(context.applicationContext), scope, BuildConfig.DEBUG)
+    NetworkMobileRepository(EncryptedStateStore(context.applicationContext), scope, BuildConfig.DEBUG, observeRestoredSession = false)
 
 /**
  * The single admission lock covers persistence, dispatch and receipt recovery. Lifecycle changes
@@ -37,16 +43,23 @@ internal class NetworkMobileRepository(
         val cap = minOf(30_000L, 1_000L shl minOf(attempt, 5))
         Random.nextLong(cap / 2, cap + 1)
     },
+    private val observeRestoredSession: Boolean = true,
 ) : MobileRepository {
     private val repositoryJob = SupervisorJob(ownerScope.coroutineContext[Job])
     private val scope = CoroutineScope(ownerScope.coroutineContext + repositoryJob)
     private val mutex = Mutex()
+    private val history = SessionHistoryCache(now)
+    private val selectionGuard = Any()
+    private var selection: Deferred<Unit>? = null
+    private var historyRead: Deferred<SessionSnapshot>? = null
+    @Volatile private var selectionRevision = 0L
+    @Volatile private var observingSession = observeRestoredSession
     // An admitted command outlives the local bubble/composition that initiated it.
     private val promptActions = dev.dshmobile.app.model.LocalPromptActions(
         dismiss = { id -> scope.launch { dismissLocalPrompt(id) }.join() },
         resend = { id -> scope.launch { resendLocalPrompt(id) }.join() },
     )
-    private val mutableState = MutableStateFlow(MobileState(localPromptActions = promptActions))
+    private val mutableState = MutableStateFlow(MobileState(localPromptActions = promptActions, observingSession = observingSession))
     override val state: StateFlow<MobileState> = mutableState.asStateFlow()
     private var stored = StoredState()
     private var restored = false
@@ -83,8 +96,11 @@ internal class NetworkMobileRepository(
             "network_unavailable", "tls_failed", "invalid_response", "host_error", "rate_limited" -> ConnectionState.OFFLINE
             else -> state.value.connection
         }
-        mutableState.value = state.value.copy(connection = connection, busy = false, error = key)
-        if (connection != ConnectionState.ONLINE) stopObserver()
+        if (key in setOf("revoked", "unauthorized", "forbidden")) history.clear()
+        mutableState.value = state.value.copy(connection = connection, busy = false, error = key,
+            snapshot = if (key in setOf("revoked", "unauthorized", "forbidden")) null else state.value.snapshot,
+            snapshotStale = state.value.snapshotStale || connection != ConnectionState.ONLINE || key == "chat_unavailable")
+        if (connection != ConnectionState.ONLINE || key in setOf("forbidden", "chat_unavailable")) stopObserver()
         if (connection == ConnectionState.OFFLINE) scheduleReconnect()
     }
     private suspend fun persist(value: StoredState) {
@@ -152,7 +168,7 @@ internal class NetworkMobileRepository(
             connection = if (host == null) ConnectionState.DISCONNECTED else ConnectionState.OFFLINE,
             draft = draftFor(stored.selectedSessionId), pending = stored.pending?.presentation(),
             acceptedPrompts = stored.acceptedPrompts.map { it.presentation() }, localPromptActions = promptActions,
-            error = if (stored.pending != null) "command_uncertain" else null,
+            error = if (stored.pending != null) "command_uncertain" else null, observingSession = observingSession,
         )
     }
     override suspend fun restore() = action {
@@ -200,7 +216,7 @@ internal class NetworkMobileRepository(
             }
             mutableState.value = MobileState(paired = true, hostName = host.hostName, localPromptActions = promptActions,
                 remoteMode = host.endpoint.relay != null, relayHost = host.endpoint.relay?.let { safeRelayOrigin(it) },
-                connection = ConnectionState.SYNCING, busy = true)
+                connection = ConnectionState.SYNCING, busy = true, observingSession = observingSession)
             checkpoint = "pair.device-refresh"
             if (foreground) refreshLocked() else mutableState.value = state.value.copy(connection = ConnectionState.OFFLINE, busy = false)
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -212,52 +228,168 @@ internal class NetworkMobileRepository(
         if (stored.host == null) throw MobileFailure("not_paired")
         if (foreground) refreshLocked()
     }
-    private suspend fun refreshLocked() {
+    private data class RefreshMetadata(
+        val capabilities: CapabilitiesResponse,
+        val workspaces: List<dev.dshmobile.app.model.Workspace>,
+        val presets: List<dev.dshmobile.app.model.Preset>,
+        val index: HostApi.SessionIndex,
+    )
+    private suspend fun refreshLocked(readHistory: Boolean = true) {
+        try { refreshFromHostLocked(readHistory) }
+        catch (cancelled: CancellationException) {
+            // A navigation-owned refresh can be cancelled during metadata GETs. The closed stream
+            // and incomplete handshake are not ONLINE, and SYNCING must not survive its owner.
+            if (state.value.connection == ConnectionState.SYNCING) {
+                mutableState.value = state.value.copy(connection = ConnectionState.OFFLINE, busy = false,
+                    snapshotStale = state.value.snapshot != null)
+                scheduleReconnect()
+            }
+            throw cancelled
+        }
+    }
+    private suspend fun refreshFromHostLocked(readHistory: Boolean) {
         val network = api()
         stopObserver()
         mutableState.value = state.value.copy(connection = ConnectionState.SYNCING, busy = true, error = null)
-        val caps = network.capabilities()
-        val workspaces = network.workspaces()
-        val presets = network.presets()
-        val index = if (caps.capabilities.sessions) network.sessions() else HostApi.SessionIndex(emptyList(), false)
+        // Independent bounded GETs overlap; capability negotiation still gates session reads.
+        val metadata = coroutineScope {
+            val caps = async { network.capabilities() }
+            val workspaces = async { network.workspaces() }
+            val presets = async { network.presets() }
+            val index = async { if (caps.await().capabilities.sessions) network.sessions() else HostApi.SessionIndex(emptyList(), false) }
+            RefreshMetadata(caps.await(), workspaces.await(), presets.await(), index.await())
+        }
+        val (caps, workspaces, presets, index) = metadata
         val sessions = index.items
         if (sessions.any { session -> workspaces.none { it.id == session.workspaceId } }) throw MobileFailure("invalid_response")
+        if (!index.truncated) history.retain(sessions.map { it.id }.toSet())
         val selected = stored.selectedSessionId?.takeIf { id -> sessions.any { it.id == id } }
-        val snapshot = if (selected != null) network.snapshot(selected) else null
+        // Publish the authorized index before any potentially slow history projection.
+        mutableState.value = state.value.copy(hostName = caps.hostName, capabilities = caps.capabilities,
+            workspaces = workspaces, presets = presets, sessions = sessions, sessionsTruncated = index.truncated,
+            demo = caps.upstreamVersion == "fixture", lastSyncedAt = now())
+        var historyError: String? = null
+        val refreshed = try {
+            if (readHistory && selected != null && observingSession) readObservedSnapshot(network, selected) else null
+        } catch (failure: MobileFailure) {
+            if (failure.key != "chat_unavailable") throw failure
+            // Metadata already authenticated successfully. A projection/size error belongs to
+            // this chat, not host connectivity, and must not revalidate any cached cursor.
+            historyError = failure.key
+            null
+        }
+        val snapshot = refreshed ?: state.value.snapshot?.takeIf { it.session.id == selected }
         if (stored.selectedSessionId != selected) persist(stored.copy(selectedSessionId = selected))
         mutableState.value = state.value.copy(
             hostName = caps.hostName, capabilities = caps.capabilities, workspaces = workspaces,
-            presets = presets, sessions = sessions, sessionsTruncated = index.truncated, snapshot = snapshot, draft = draftFor(selected),
+            presets = presets, sessions = sessions, sessionsTruncated = index.truncated,
+            snapshot = state.value.snapshot?.takeIf { it == snapshot } ?: snapshot,
+            snapshotStale = snapshot != null && refreshed == null, draft = draftFor(selected), error = historyError,
             demo = caps.upstreamVersion == "fixture", lastSyncedAt = now(), busy = false,
             connection = if (foreground) ConnectionState.ONLINE else ConnectionState.OFFLINE,
         )
-        reconcileSnapshot(snapshot)
+        if (refreshed != null && observingSession) reconcileSnapshot(refreshed)
         if (stored.pending != null) resolveLocked(reloadSnapshot = false)
         // When observing, a successful GET does not mean the stream recovered. Reset only on
         // a real SSE snapshot; otherwise repeated stream-open failures would retry forever.
         if (snapshot == null || !caps.capabilities.liveSnapshots) reconnectAttempt = 0
         if (foreground && state.value.connection == ConnectionState.ONLINE) startObserver()
     }
-    override suspend fun selectSession(sessionId: String) = action {
+    override suspend fun selectSession(sessionId: String) {
+        val task = synchronized(selectionGuard) {
+            selection?.cancel()
+            historyRead?.cancel()
+            val revision = ++selectionRevision
+            observingSession = true
+            mutableState.value = state.value.copy(observingSession = true)
+            scope.async(start = CoroutineStart.LAZY) {
+                action {
+                    try { selectLocked(sessionId, revision) }
+                    finally {
+                        if (revision == selectionRevision || !observingSession)
+                            mutableState.value = state.value.copy(busy = false)
+                    }
+                }
+            }.also { selection = it }
+        }
+        task.start()
+        try { task.await() }
+        catch (cancelled: CancellationException) {
+            // Back/switch cancels this read, not the caller or an admitted mutation.
+            if (!kotlinx.coroutines.currentCoroutineContext().isActive) {
+                task.cancel()
+                throw cancelled
+            }
+            if (!task.isCancelled) throw cancelled
+        } finally { synchronized(selectionGuard) { if (selection === task) selection = null } }
+    }
+    override suspend fun leaveSession() {
+        synchronized(selectionGuard) {
+            if (!observingSession && selection == null && historyRead == null && observer == null) return
+            observingSession = false
+            mutableState.value = state.value.copy(observingSession = false, snapshotStale = state.value.snapshot != null,
+                error = state.value.error?.takeUnless { it == "chat_unavailable" })
+            selectionRevision++
+            selection?.cancel(); selection = null
+            historyRead?.cancel(); historyRead = null
+        }
+        stopObserver()
+    }
+    /** Cancelling a presentation read never cancels its refresh/receipt owner. Call under admission. */
+    private suspend fun readObservedSnapshot(network: HostApi, sessionId: String): SessionSnapshot? = coroutineScope {
+        val task = synchronized(selectionGuard) {
+            if (!observingSession) return@coroutineScope null
+            historyRead?.cancel()
+            async(start = CoroutineStart.LAZY) { network.snapshot(sessionId) }.also { historyRead = it }
+        }
+        task.start()
+        try { task.await() }
+        catch (cancelled: CancellationException) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (!task.isCancelled) throw cancelled
+            null
+        } finally { synchronized(selectionGuard) { if (historyRead === task) historyRead = null } }
+    }
+    private suspend fun selectLocked(sessionId: String, revision: Long) {
         restoreLocked()
         if (!foreground) throw MobileFailure("offline_no_send")
         if (!validId(sessionId)) throw MobileFailure("invalid_selection")
-        if (state.value.connection != ConnectionState.ONLINE || state.value.sessions.none { it.id == sessionId }) refreshLocked()
-        if (state.value.sessions.none { it.id == sessionId }) {
-            // Index can be bounded: the host snapshot independently enforces current read grants.
-            val target = api().snapshot(sessionId)
-            if (state.value.workspaces.none { it.id == target.session.workspaceId }) throw MobileFailure("invalid_selection")
-            mutableState.value = state.value.copy(sessions = state.value.sessions + target.session)
-        }
+        // Navigation owns the target GET below; metadata recovery must not project the old chat
+        // (or GET this same target twice). Durable receipt recovery inside refresh is unchanged.
+        if (state.value.connection != ConnectionState.ONLINE || state.value.sessions.none { it.id == sessionId }) refreshLocked(readHistory = false)
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        if (revision != selectionRevision || !observingSession) return
         stopObserver()
-        mutableState.value = state.value.copy(busy = true, error = null)
-        val snapshot = api().snapshot(sessionId)
-        persist(stored.copy(selectedSessionId = sessionId))
-        mutableState.value = MobileReducer.replaceSnapshot(state.value, snapshot, now()).copy(
-            draft = draftFor(sessionId), busy = false,
-        )
-        reconcileSnapshot(snapshot)
-        startObserver()
+        // Cached history is presentation only. Never reconcile a receipt or use its cursor to stop work.
+        val before = state.value
+        val cached = history.get(sessionId)?.takeIf { entry ->
+            state.value.sessions.any { it.id == sessionId && it.workspaceId == entry.session.workspaceId } &&
+                state.value.workspaces.any { it.id == entry.session.workspaceId }
+        }
+        mutableState.value = state.value.copy(busy = true, error = null,
+            snapshot = cached ?: state.value.snapshot?.takeUnless { it.session.id == sessionId },
+            snapshotStale = cached != null, draft = if (cached != null) draftFor(sessionId) else state.value.draft)
+        try {
+            val snapshot = api().snapshot(sessionId)
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (revision != selectionRevision || !observingSession) return
+            if (state.value.workspaces.none { it.id == snapshot.session.workspaceId }) throw MobileFailure("invalid_selection")
+            if (state.value.sessions.none { it.id == sessionId }) {
+                // A bounded index may omit a target; one authorized GET is sufficient, not two.
+                mutableState.value = state.value.copy(sessions = state.value.sessions + snapshot.session)
+            }
+            persist(stored.copy(selectedSessionId = sessionId))
+            mutableState.value = MobileReducer.replaceSnapshot(state.value, snapshot, now()).copy(
+                draft = draftFor(sessionId), busy = false,
+            )
+            reconcileSnapshot(snapshot)
+            startObserver()
+        } catch (cancelled: CancellationException) {
+            // Restore the previous selection only before a durable navigation write took place.
+            if (state.value.snapshotStale || stored.selectedSessionId != sessionId) mutableState.value = state.value.copy(
+                snapshot = before.snapshot, snapshotStale = before.snapshotStale || (!observingSession && before.snapshot != null), draft = before.draft)
+            throw cancelled
+        }
     }
     override suspend fun updateDraft(text: String) {
         if (closed) return
@@ -285,6 +417,8 @@ internal class NetworkMobileRepository(
     }
     override suspend fun createSession(workspaceId: String, presetId: String?) = action {
         restoreLocked(); online()
+        observingSession = true
+        mutableState.value = state.value.copy(observingSession = true)
         if (state.value.capabilities?.sessions != true) throw MobileFailure("unsupported")
         if (state.value.workspaces.none { it.id == workspaceId && it.canExecute } ||
             (presetId != null && state.value.presets.none { it.id == presetId })) throw MobileFailure("invalid_selection")
@@ -320,6 +454,7 @@ internal class NetworkMobileRepository(
     }
     private fun executableSnapshot(): SessionSnapshot {
         val snapshot = state.value.snapshot ?: throw MobileFailure("invalid_selection")
+        if (state.value.snapshotStale) throw MobileFailure("invalid_selection")
         if (!snapshot.session.canExecute || state.value.workspaces.none { it.id == snapshot.session.workspaceId && it.canExecute }) throw MobileFailure("forbidden")
         if (snapshot.activity !in setOf("idle", "running")) throw MobileFailure("unsupported")
         return snapshot
@@ -392,6 +527,7 @@ internal class NetworkMobileRepository(
     }
     private suspend fun reconcileSnapshot(snapshot: SessionSnapshot?) {
         if (snapshot == null) return
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { history.put(snapshot) }
         val observedAt = now()
         val accepted = stored.acceptedPrompts.mapNotNull { local ->
             if (MobileReducer.reconcilesPrompt(local.presentation(), snapshot)) return@mapNotNull null
@@ -469,7 +605,7 @@ internal class NetworkMobileRepository(
     private fun startObserver() {
         stopObserver()
         val snapshot = state.value.snapshot ?: return
-        if (!foreground || closed || state.value.connection != ConnectionState.ONLINE || state.value.capabilities?.liveSnapshots != true) return
+        if (!observingSession || state.value.snapshotStale || !foreground || closed || state.value.connection != ConnectionState.ONLINE || state.value.capabilities?.liveSnapshots != true) return
         val current = generation
         observer = api().observe(snapshot.session.id, onSnapshot = { replacement ->
             scope.launch {
@@ -527,7 +663,7 @@ internal class NetworkMobileRepository(
         stopObserver(); cancelReconnect()
         store.clear() // If this fails, report storage_failed and never claim the device was forgotten.
         api?.close(); api = null
-        stored = StoredState(); restored = true; liveDrafts.clear()
+        stored = StoredState(); restored = true; liveDrafts.clear(); history.clear(); observingSession = false
         mutableState.value = MobileState(localPromptActions = promptActions)
     }
     override fun close() {

@@ -15,7 +15,7 @@ object MobileReducer {
 
     fun canSend(state: MobileState, draft: String): Boolean =
         state.connection == ConnectionState.ONLINE && state.capabilities?.textPrompt == true &&
-            !state.busy && canAdmitPrompt(state) && draft.isNotBlank() && draft.toByteArray(Charsets.UTF_8).size <= 32_768 &&
+            !state.busy && !state.snapshotStale && canAdmitPrompt(state) && draft.isNotBlank() && draft.toByteArray(Charsets.UTF_8).size <= 32_768 &&
             state.snapshot?.let { snapshot ->
                 snapshot.activity in setOf("idle", "running") && snapshot.session.canExecute &&
                     state.workspaces.any { it.id == snapshot.session.workspaceId && it.canExecute }
@@ -23,7 +23,9 @@ object MobileReducer {
 
     fun replaceSnapshot(state: MobileState, snapshot: SessionSnapshot, syncedAt: Long): MobileState =
         state.copy(
-            snapshot = snapshot,
+            // Equal replacement still revalidates, without restarting classification/markdown effects.
+            snapshot = state.snapshot?.takeIf { it == snapshot } ?: snapshot,
+            snapshotStale = false,
             acceptedPrompts = state.acceptedPrompts.filterNot { reconcilesPrompt(it, snapshot) },
             sessions = state.sessions.map { if (it.id == snapshot.session.id) snapshot.session else it },
             lastSyncedAt = syncedAt,
