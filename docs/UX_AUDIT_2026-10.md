@@ -6,7 +6,7 @@
 
 | Экран | Балл | Ключевое наблюдение |
 |---|---:|---|
-| Чат + композер | 7.5 | Ясные Send/Stop, очередь и статусы; нет поиска/меню long-press; плотность растёт при activity+предупреждениях |
+| Чат + композер | 7.5 | Ясные Send/Stop, очередь и статусы; нет поиска/меню long-press; плотность растет при activity+предупреждениях |
 | Чаты / проектный фильтр | 7.5 | Поиск, pull-to-refresh, empty/offline; FAB перекрывает нижний ряд (pairing-verify report), нет unread/favorites |
 | Создание чата | 7.5 | Проекты/пресеты доступны; длинный выбор и горизонтальные чипы требуют прокрутки |
 | Pairing / доверие | 7.5 | QR/импорт/вставка, подтверждение личности; много пояснений и плотный trust с отпечатком |
@@ -47,8 +47,8 @@
 5. **P1 Function · Unread badges.** AC: новые ответы помечаются и озвучиваются, вход в чат сбрасывает статус, reconnect не дублирует. `model/MobileModels.kt`, `data/StoredState.kt`, `data/NetworkMobileRepository.kt`, `ui/home/ChatListScreen.kt`, strings. **L**.
 6. **P1 Function · Поиск по текущей переписке.** AC: искать в загруженной истории, переходить к совпадению; обозначить частичную историю и empty result. `ui/chat/ChatScreen.kt`, `ChatTimeline.kt`, `MessageItem.kt`, RU/EN strings. **M**.
 7. **P1 Function · Проверить UX черновиков per-chat.** AC: A не попадает в B, A восстанавливается после навигации/перезапуска, есть regression test; хранилище уже реализовано. `ui/MobileViewModel.kt`, `data/NetworkMobileRepository.kt`, `data/StoredState.kt`, tests. **M**.
-8. **P1 Function · Избранные/закреплённые проекты.** AC: закреплённое наверху фильтра и new-chat picker, порядок сохраняется, открепление не меняет разрешения. `data/StoredState.kt`, `ui/home/ChatListScreen.kt`, `ui/newchat/NewChatSheet.kt`, model/repository, strings. **M**.
-9. **P1 Function · Long-press меню сообщения.** AC: доступно копирование без конфликта выделения, эквивалентно для TalkBack; кнопка copy остаётся fallback. `ui/chat/MessageItem.kt`, `ChatTimeline.kt`, strings. **S**.
+8. **P1 Function · Избранные/закрепленные проекты.** AC: закрепленное наверху фильтра и new-chat picker, порядок сохраняется, открепление не меняет разрешения. `data/StoredState.kt`, `ui/home/ChatListScreen.kt`, `ui/newchat/NewChatSheet.kt`, model/repository, strings. **M**.
+9. **P1 Function · Long-press меню сообщения.** AC: доступно копирование без конфликта выделения, эквивалентно для TalkBack; кнопка copy остается fallback. `ui/chat/MessageItem.kt`, `ChatTimeline.kt`, strings. **S**.
 10. **P2 Polish · Haptic после действия.** AC: короткий feedback на принятую отправку/stop/copy, уважает системную настройку и не срабатывает на stream-обновления. `ui/chat/Composer.kt`, `ChatScreen.kt`, tests. **S**.
 
 ## Предлагаемый раздел работ
@@ -57,4 +57,4 @@
 - **Работник B — chat/pairing:** пункты 2, 3, 6, 7, 9, 10; зона `ui/chat/**`, `ui/pairing/**`, связанные strings/tests. Не менять список.
 - **Интегратор:** пункт 4 — theme/fonts. Модель/repository/storage могут стать общими для 5/8; заранее согласовать API или последовательно интегрировать, иначе split не disjoint.
 
-**Не проверено:** TalkBack вживую, телефон/WAN, реальный ответ хоста, 2.0 scale, 375dp, IME+rotation; queue-quiet снимков нет. Файлы приложения не менялись; создан только этот отчёт.
+**Не проверено:** TalkBack вживую, телефон/WAN, реальный ответ хоста, 2.0 scale, 375dp, IME+rotation; queue-quiet снимков нет. Файлы приложения не менялись; создан только этот отчет.

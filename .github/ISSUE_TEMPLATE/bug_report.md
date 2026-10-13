@@ -38,4 +38,4 @@ What happened and what did you expect? / Что произошло и что о�
 
 Optional synthetic screenshots or minimal logs only. / Только синтетические скриншоты или минимальные очищенные логи.
 
-**Never attach** pairing invitations, tokens, headers, private chats, state databases, credentials, certificates/keys, personal paths or real network addresses. / **Не прикладывайте** приглашения привязки, токены, заголовки авторизации, приватные чаты, базы состояния, учётные данные, сертификаты/ключи, личные пути и реальные адреса.
+**Never attach** pairing invitations, tokens, headers, private chats, state databases, credentials, certificates/keys, personal paths or real network addresses. / **Не прикладывайте** приглашения привязки, токены, заголовки авторизации, приватные чаты, базы состояния, учетные данные, сертификаты/ключи, личные пути и реальные адреса.
