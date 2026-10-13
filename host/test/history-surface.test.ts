@@ -306,12 +306,15 @@ test('recovery admits at most sixty-four waiters and immediately reuses an abort
   const cancelled = new AbortController(), first = h.adapter.snapshot('synthetic-session', cancelled.signal);
   await reading;
   const admitted = Array.from({ length: 63 }, () => h.adapter.snapshot('synthetic-session', AbortSignal.timeout(3000)));
-  await new Promise<void>(resolve => setImmediate(resolve));
+  // Opening resolves the workspace path through real fs I/O, so one event-loop turn does not order admission.
+  const flights = (h.adapter as unknown as { historyFlights: Map<string, { waiters: Set<unknown> }> }).historyFlights;
+  const joined = async (count: number) => { while (flights.get('synthetic-session')?.waiters.size !== count) await new Promise<void>(resolve => setImmediate(resolve)); };
+  await joined(64);
   try {
     await assert.rejects(h.adapter.snapshot('synthetic-session', AbortSignal.timeout(1000)), { code: 'unavailable' });
     cancelled.abort(); await assert.rejects(first, { name: 'AbortError' });
     admitted.push(h.adapter.snapshot('synthetic-session', AbortSignal.timeout(3000)));
-    await new Promise<void>(resolve => setImmediate(resolve)); release();
+    await joined(64); release();
     assert.ok((await Promise.all(admitted)).every(snapshot => snapshot.messages.length === 64));
     assert.equal(h.reads.length, 3, 'waiter admission/abort must not duplicate or cancel the shared recovery');
   } finally { cancelled.abort(); release(); }
