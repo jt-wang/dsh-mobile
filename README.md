@@ -6,7 +6,7 @@
 
 **Ваш агент [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) работает на компьютере. С Android-телефона вы ставите задачи, читаете ответы в реальном времени и получаете уведомление «Ответ готов».**
 
-[Скачать APK 0.5.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.5.0) · [Установка](#установка) · [Архитектура](#как-это-устроено) · [Безопасность](#безопасность) · [English](#english)
+[Скачать APK 0.6.1](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.6.1) · [Установка](#установка) · [Архитектура](#как-это-устроено) · [Безопасность](#безопасность) · [English](#english)
 
 > Неофициальный проект Павла Логачева. Разрабатывается независимо от DeepSeek.
 
@@ -17,14 +17,14 @@ Android 8.0+ · Привязка по QR-коду · Wi‑Fi или Tailscale
 ## Что можно делать с телефона
 
 - **Открывать чаты всех проектов.** Искать чаты и фильтровать по проекту. Список проектов следует боковой панели DSH и обновляется без повторной привязки.
-- **Ставить задачи.** Создать чат, выбрать проект и пресет, отправить текст.
+- **Ставить задачи.** Выбрать проект и пресет и сразу написать задачу: приложение создаст чат и отправит текст один раз.
 - **Читать ответ в реальном времени.** Markdown, таблицы, блоки кода с копированием. Служебные события свернуты в строку «Действия агента» — полный текст доступен по нажатию.
 - **Дописывать, пока агент работает.** Сообщение встанет в очередь DSH и дойдет до агента на следующем шаге.
 - **Останавливать работу.** Отдельная кнопка «Стоп» запрашивает подтверждение.
 - **Получать уведомления.** «Ответ готов» и «Агент ждет вашего решения» включаются по желанию; отдельные проекты и чаты можно отключить.
 - **Возвращаться к переписке.** Поиск по сообщениям, черновик для каждого чата и копирование по долгому нажатию.
 
-Есть светлая и темная тема, русский и английский интерфейс, поддержка крупного шрифта.
+Тема следует системной, светлую или темную можно выбрать вручную. Интерфейс на русском и английском, поддерживается крупный шрифт.
 
 <picture><source media="(max-width: 767px)" srcset="docs/assets/dsh-mobile-screens-mobile.png"><img src="docs/assets/dsh-mobile-screens.png" alt="Три экрана: чаты разных проектов, ответ в Markdown во время работы агента и выбор проекта перед новым чатом."></picture>
 
@@ -59,7 +59,7 @@ Android-клиент написан на Kotlin и Jetpack Compose, плагин
 
 2. **Скачайте и проверьте файлы релиза.**
 
-   Из [релиза 0.5.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.5.0) нужны подписанный APK, архив `dsh-mobile-host-<version>.zip` и их файлы `.sha256`. Все файлы должны быть из одного релиза. `UNSIGNED-verification.apk` — проверочный артефакт, не файл для установки.
+   Из [релиза 0.6.1](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.6.1) нужны подписанный APK, архив `dsh-mobile-host-<version>.zip` и их файлы `.sha256`. Все файлы должны быть из одного релиза. `UNSIGNED-verification.apk` — проверочный артефакт, не файл для установки.
 
    Укажите абсолютные пути к скачанным файлам и сравните хеши с `.sha256`. При несовпадении остановитесь.
 
@@ -128,7 +128,7 @@ Android-клиент написан на Kotlin и Jetpack Compose, плагин
 
 **Для работы вне дома** установите Tailscale на компьютер и телефон, подключите их к своей сети Tailscale и укажите имя компьютера при подготовке плагина. Открывать порт на роутере не нужно. Альтернатива — [собственный relay на VPS](<docs/RELAY_DEPLOYMENT.md>).
 
-**Обновление с 0.4.0:** подписанный тем же ключом APK устанавливается поверх с сохранением привязки. Плагин обновляется установщиком из нового архива; порядок обновления и отката описан в [инструкции](<docs/SETUP.md>).
+**Обновление с 0.4.0 или 0.5.0:** подписанный тем же ключом APK устанавливается поверх с сохранением привязки. Плагин обновляется установщиком из нового архива; порядок обновления и отката описан в [инструкции](<docs/SETUP.md>).
 
 ## Безопасность
 
@@ -155,15 +155,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ../tools/android-build
 
 Обычная release-сборка APK не подписана и не устанавливается как есть. Сборка, упаковка плагина и подпись своим ключом описаны в [инструкции по сборке](<docs/BUILD.md>) и [инструкции выпуска APK](<docs/ANDROID_RELEASE.md>).
 
-## Проверки релиза 0.5.0
+## Проверки релиза 0.6.1
 
 | Часть | Что проверено |
 |---|---|
-| Android | 190 JVM-тестов, 9 UI-тестов на эмуляторе, lint без ошибок |
-| Плагин | 121 тест: права и отзыв доступа, повторная доставка, смена проектов, уведомления и восстановление. Нагрузка на 600 неактивных чатов |
-| Совместимость с DSH | Изолированные прогоны на настоящем DSH `0.2.0-rc.2` и `0.2.1-alpha.1` |
+| Android | 221 JVM-тест, 9 инструментальных тестов на эмуляторе, lint без ошибок |
+| Плагин 0.5.1 | 162 теста: права и отзыв доступа, повторная доставка, смена проектов, уведомления, восстановление истории и нагрузка на 600 неактивных чатов. Четыре теста требуют установленного DSH и в обычном прогоне пропускаются |
+| Relay | 18 тестов |
+| Совместимость с DSH | Поддерживаются те же версии: `0.2.0-rc.2` и `0.2.1-alpha.1`. Изолированные прогоны на настоящем DSH выполнялись при выпуске 0.5.0 и для 0.6.1 не повторялись |
 | Установщик | 28 сценариев на синтетическом профиле: подготовка, активация, обновление, откат, удаление и сохранность байтов профиля |
-| Сквозная проверка | Эмулятор с изолированным DSH: очередь и «Стоп», уведомления в фоне и Doze, переход в нужный чат, приватность экрана блокировки, переподключение после перезапуска плагина |
+| Сквозная проверка | Эмулятор с синтетическим хостом без DSH: привязка, создание чата и отправка задачи, восстановление после перезапуска приложения, работа без связи и переподключение. Сценарии с изолированным DSH (очередь, «Стоп», уведомления) проверялись в 0.5.0 и для 0.6.1 не повторялись |
 | Разрешения APK | Интернет, камера, внутреннее служебное; уведомления и фоновая служба — только при включенных уведомлениях. Без телеметрии и сервисов Google |
 
 ## Ограничения
@@ -198,7 +199,7 @@ DSH Mobile is an unofficial Android client for DeepSeek Harness, developed indep
 
 Pair with a one-use QR code and connect over Wi‑Fi, Tailscale or your own optional relay. DSH Mobile provides no hosted cloud server or shared relay. A companion plugin exposes a narrow HTTPS API, not the DSH web UI. The phone verifies the computer's pinned certificate, and each device has revocable permissions. Project filtering is not a sandbox: agents retain their desktop tool permissions.
 
-Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.5.0) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The computer must remain on. Notifications use an opt-in foreground connection without Google services; physical-phone notification delivery has not yet been verified. Attachments, answers to agent questions and approvals still require the desktop.
+Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.6.1) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The computer must remain on. Notifications use an opt-in foreground connection without Google services; physical-phone notification delivery has not yet been verified. Attachments, answers to agent questions and approvals still require the desktop.
 
 Built by [Pavel Logachev](https://github.com/pavel-logachev): 20 years in IT, first as an engineer, then as a project manager. I build websites, web services, Telegram bots, apps and automation for your task. Have a similar one? [pavel@logachev.net](mailto:pavel@logachev.net) · [logachev.net](https://logachev.net/)
 
