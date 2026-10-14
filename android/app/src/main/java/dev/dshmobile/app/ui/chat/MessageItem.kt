@@ -1,6 +1,9 @@
 package dev.dshmobile.app.ui.chat
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -21,6 +24,9 @@ import dev.dshmobile.app.model.ChatMessage
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.components.shortTime
 import dev.dshmobile.app.ui.markdown.MarkdownContent
+import dev.dshmobile.app.ui.theme.ControlSize
+import dev.dshmobile.app.ui.theme.IconSize
+import dev.dshmobile.app.ui.theme.Spacing
 import dev.dshmobile.app.ui.theme.tabular
 
 @Composable
@@ -60,7 +66,10 @@ internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQ
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             content()
         }
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.offset(x = if (user) 12.dp else (-12).dp)) {
+        // Compact meta row: 24dp tall, copy glyph aligned to the text edge. The copy target still answers
+        // touches across 48dp (Compose extends small pointer targets to the minimum touch size).
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.XS),
+            modifier = Modifier.heightIn(min = ControlSize.MetaRow).offset(x = if (user) Spacing.XS else -Spacing.XS)) {
             if (!user) Box {
                 CopyButton(message, labels.getValue(MessageAction.Copy), onCopy)
                 MessageMenu(menu, { menu = false }, labels, ::perform)
@@ -96,8 +105,9 @@ internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQ
 
 @Composable
 private fun CopyButton(message: ChatMessage, label: String, onCopy: (String) -> Unit) {
-    IconButton(onClick = { onCopy(message.text) }, modifier = Modifier.size(48.dp).testTag("copy:${message.id}")) {
-        Icon(MobileIcons.Copy, label, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    Box(Modifier.size(ControlSize.MetaRow).clip(CircleShape).clickable(role = Role.Button, onClickLabel = label) { onCopy(message.text) }
+        .testTag("copy:${message.id}"), contentAlignment = Alignment.Center) {
+        Icon(MobileIcons.Copy, label, Modifier.size(IconSize.Meta), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -10,6 +10,10 @@ import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { startHostServer } from '../src/server.ts';
 import { HostState } from '../src/state.ts';
+import { createDshAdapter } from '../src/dsh-adapter.ts';
+import { createWorkspaceSource } from '../src/workspace-source.ts';
+import { opening } from './fixtures/rc2.ts';
+import { HostError } from '../src/errors.ts';
 import type { HostAdapter, HostSnapshot, DeviceGrants, HostConfiguration } from '../src/types.ts';
 
 const snapshot: HostSnapshot = { session: { id: 's-alpha', title: 'Synthetic conversation', workspaceId: 'alpha', updatedAt: 1, running: false }, messages: [{ id: 'm1', role: 'assistant', text: 'Fixture only', createdAt: 1 }], cursor: 1, hasMore: false, activity: 'idle' };
@@ -85,6 +89,138 @@ test('SSE admission validates and publishes the first watch snapshot without a s
   const sse = await request('/sessions/s-alpha/events', deviceToken), reader = sse.body!.getReader();
   try { assert.equal(sse.status, 200); assert.match(new TextDecoder().decode((await reader.read()).value), /Fixture only/); assert.equal(watches, 1); assert.equal(snapshots, 0, 'SSE must not open the same chat once before watch'); }
   finally { await reader.cancel(); }
+});
+
+test('GET and SSE authorize the authoritative point snapshot without scanning the session catalog', async t => {
+  const adapter = new TestAdapter(); let catalogs = 0;
+  const list = adapter.listSessions.bind(adapter);
+  adapter.listSessions = async () => { catalogs++; return list(); };
+  const { host, request, pair } = await setup(t, adapter), { deviceId, deviceToken } = await pair();
+  const baseline = catalogs;
+  assert.equal((await request('/sessions/s-alpha', deviceToken)).status, 200);
+  const sse = await request('/sessions/s-alpha/events', deviceToken), reader = sse.body!.getReader();
+  try { assert.equal(sse.status, 200); await reader.read(); }
+  finally { await reader.cancel(); }
+  assert.equal(catalogs, baseline, 'point reads must not pay for the complete persisted catalog');
+  assert.equal((await request('/sessions/s-beta', deviceToken)).status, 404, 'snapshot scope still hides unreadable sessions');
+  host.state.replaceDeviceGrants(deviceId, { readWorkspaceIds: ['beta'], executeWorkspaceIds: [] });
+  assert.equal((await request('/sessions/s-alpha', deviceToken)).status, 404, 'new grants are checked on every read');
+});
+
+for (const lane of ['', '/events']) test(`a broken point ${lane || 'GET'} hides unreadable and archived sessions before exposing an opening error`, async t => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mobile-broken-read-')));
+  for (const id of ['alpha', 'beta']) mkdirSync(join(dir, id));
+  const workspaces = ['alpha', 'beta'].map(id => ({ id, name: id, path: join(dir, id) }));
+  const baseSource = await createWorkspaceSource({ workspaces }), archived = new Set<string>();
+  const source = { ...baseSource, archivedSessionIds: () => archived };
+  let headers = 0, catalogs = 0, openings = 0;
+  let held: { entered: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaceSource: source,
+    sessionStatus: () => ({ running: false, updatedAt: 0 }),
+    sessionHeader: async (id, signal) => { headers++; signal.throwIfAborted(); return { ...opening.header, id, cwd: join(dir, id === 's-alpha' ? 'alpha' : 'beta') }; },
+    sessionController: {
+      async list() { catalogs++; throw new Error('Failure admission must not scan the catalog'); },
+      async *follow() { openings++; held?.entered.resolve(); if (held) await held.release.promise; throw Object.assign(new Error('PRIVATE corrupt event/projection detail'), { code: 'SESSION_QUERY_CORRUPT_SESSION' }); },
+      async page() { return {}; }, async projections() { return {}; },
+      async create() { throw new Error('Not used'); }, async prompt() { throw new Error('Not used'); }, cancel() {},
+    },
+  });
+  let host: Awaited<ReturnType<typeof startHostServer>> | undefined;
+  t.after(async () => { held?.release.resolve(); adapter.dispose(); await host?.close(); rmSync(dir, { recursive: true, force: true }); });
+  host = await startHostServer({ config: { hostName: 'Synthetic broken read', bind: '127.0.0.1', port: 0, statePath: join(dir, 'state.sqlite'), allowInsecureLoopback: true, workspaces }, workspaceSource: source, adapter });
+  const { baseUrl } = await host.start();
+  const device = host.state.consumePairing(host.state.createPairing({ readWorkspaceIds: ['alpha'], executeWorkspaceIds: [] }).pairingToken, 'Synthetic phone');
+  const get = (id: string) => fetch(`${baseUrl}/v1/sessions/${id}${lane}`, { headers: { Authorization: `Bearer ${device.deviceToken}` }, signal: AbortSignal.timeout(5000) });
+  const denied = await get('s-beta');
+  assert.equal(denied.status, 404); assert.equal((await denied.json()).error.code, 'not_found');
+  archived.add('s-alpha');
+  const hidden = await get('s-alpha');
+  assert.equal(hidden.status, 404); assert.equal((await hidden.json()).error.code, 'not_found');
+  archived.clear();
+  const broken = await get('s-alpha');
+  assert.equal(broken.status, 500); const body = await broken.json();
+  assert.equal(body.error.code, 'internal_error'); assert.doesNotMatch(JSON.stringify(body), /PRIVATE|corrupt event/);
+  assert.equal(catalogs, 0); assert.equal(headers, 2, 'archival short-circuits without header I/O; other failures use fresh metadata');
+  // The upstream error is shared, but admission is not: denied and permitted
+  // devices observing the same broken opening must receive different envelopes.
+  const other = host.state.consumePairing(host.state.createPairing({ readWorkspaceIds: ['beta'], executeWorkspaceIds: [] }).pairingToken, 'Synthetic beta phone');
+  const before = openings;
+  held = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+  const a = get('s-beta'); await held.entered.promise;
+  const b = fetch(`${baseUrl}/v1/sessions/s-beta${lane}`, { headers: { Authorization: `Bearer ${other.deviceToken}` }, signal: AbortSignal.timeout(5000) });
+  await new Promise(resolve => setTimeout(resolve, 50)); held.release.resolve();
+  const [ar, br] = await Promise.all([a, b]);
+  assert.equal(ar.status, 404); assert.equal(br.status, 500); await ar.body?.cancel(); await br.body?.cancel();
+  assert.equal(openings - before, 1); assert.equal(headers, 4, 'each waiter resolves current scope independently'); assert.equal(catalogs, 0);
+});
+
+for (const lane of ['', '/events']) test(`failed ${lane || 'GET'} point reads hide all non-abort header or scope resolution errors`, async t => {
+  const adapter = new TestAdapter();
+  let failure: Error = Object.assign(new Error('PRIVATE unsupported/corrupt header'), { code: 'SESSION_FORMAT_UNSUPPORTED' });
+  const scoped: HostAdapter = Object.assign(adapter, { async sessionScope() { throw failure; } });
+  adapter.snapshot = async () => { throw new Error('PRIVATE opening failure'); };
+  const { request, pair } = await setup(t, scoped), { deviceToken } = await pair();
+  for (const error of [failure, new HostError('unavailable'), new HostError('workspace_registry_unavailable')]) {
+    failure = error;
+    for (const id of ['s-alpha', 's-beta']) {
+      const response = await request(`/sessions/${id}${lane}`, deviceToken);
+      assert.equal(response.status, 404); const body = await response.json();
+      assert.equal(body.error.code, 'not_found'); assert.doesNotMatch(JSON.stringify(body), /PRIVATE|header|scope/);
+    }
+  }
+  failure = new DOMException('Upstream header read cancelled', 'AbortError');
+  const aborted = await request(`/sessions/s-alpha${lane}`, deviceToken);
+  assert.equal(aborted.status, 500, 'an upstream AbortError keeps its previous safe error, not a hiding 404');
+  assert.equal((await aborted.json()).error.code, 'internal_error');
+});
+
+for (const lane of ['', '/events']) test(`disconnect while resolving failed ${lane || 'GET'} scope aborts the read without publishing a hiding response`, { timeout: 5000 }, async t => {
+  const adapter = new TestAdapter(), entered = Promise.withResolvers<void>(), stopped = Promise.withResolvers<unknown>();
+  const scoped: HostAdapter = Object.assign(adapter, { async sessionScope(_id: string, signal: AbortSignal): Promise<string> {
+    entered.resolve();
+    return new Promise<never>((_resolve, reject) => signal.addEventListener('abort', () => { stopped.resolve(signal.reason); reject(signal.reason); }, { once: true }));
+  } });
+  adapter.snapshot = async () => { throw new Error('Synthetic opening fault'); };
+  const { host, baseUrl, pair } = await setup(t, scoped), { deviceToken } = await pair();
+  let published = 0;
+  host.server.on('request', (_req, res) => { res.once('finish', () => { published++; }); });
+  const controller = new AbortController();
+  const request = fetch(`${baseUrl}/v1/sessions/s-alpha${lane}`, { headers: { Authorization: `Bearer ${deviceToken}` }, signal: controller.signal });
+  await entered.promise; controller.abort();
+  await assert.rejects(request, { name: 'AbortError' });
+  assert.equal((await stopped.promise as Error).name, 'AbortError');
+  await host.close(); assert.equal(published, 0);
+});
+
+for (const lane of ['', '/events']) test(`revocation during a pending fast ${lane || 'GET'} opening prevents private publication`, async t => {
+  const adapter = new TestAdapter(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const snapshot = adapter.snapshot.bind(adapter);
+  adapter.snapshot = async id => { entered.resolve(); await release.promise; return snapshot(id); };
+  const { host, request, pair } = await setup(t, adapter), { deviceId, deviceToken } = await pair();
+  const pending = request('/sessions/s-alpha' + lane, deviceToken);
+  await entered.promise; host.state.revokeDevice(deviceId); release.resolve();
+  const response = await pending;
+  assert.equal(response.status, 401); assert.doesNotMatch(JSON.stringify(await response.json()), /Fixture only/);
+});
+
+test('runningSubagents is an additive validated summary and snapshot field, independent of main turn state', async t => {
+  const adapter = new TestAdapter(), value = adapter.snapshots.get('s-alpha')!;
+  (value.session as any).runningSubagents = 1; (value as any).runningSubagents = 1;
+  const { request, pair } = await setup(t, adapter), { deviceToken } = await pair();
+  assert.equal((await (await request('/sessions', deviceToken)).json()).items[0].runningSubagents, 1);
+  const first = await (await request('/sessions/s-alpha', deviceToken)).json();
+  assert.equal(first.runningSubagents, 1); assert.equal(first.session.runningSubagents, 1);
+  assert.equal(first.session.running, false); assert.equal(first.activity, 'idle');
+  const sse = await request('/sessions/s-alpha/events', deviceToken), reader = sse.body!.getReader();
+  try { const text = new TextDecoder().decode((await reader.read()).value); assert.equal(JSON.parse(text.split('\n').find(line => line.startsWith('data: '))!.slice(6)).runningSubagents, 1); }
+  finally { await reader.cancel(); }
+  (value.session as any).runningSubagents = 0; (value as any).runningSubagents = 0;
+  assert.equal((await (await request('/sessions/s-alpha', deviceToken)).json()).runningSubagents, 0);
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1']) {
+    (value.session as any).runningSubagents = invalid; (value as any).runningSubagents = invalid;
+    for (const suffix of ['', '/events']) assert.equal((await request('/sessions/s-alpha' + suffix, deviceToken)).status, 500);
+    assert.equal((await request('/sessions', deviceToken)).status, 500);
+  }
 });
 
 test('a partial history notice survives GET and SSE even when newest activity is known', async t => {

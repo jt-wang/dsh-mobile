@@ -83,13 +83,15 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun refresh() { viewModelScope.launch { repository.refresh() } }
     fun selectSession(id: String) {
-        if (interactionBlocked || state.value.busy) return
+        if (interactionBlocked) return
         interactionBlocked = true // Close the tap-to-repository-launch race immediately.
         viewModelScope.launch {
             try {
                 editorActions.withLock { repository.selectSession(id) }
-                editorSessionId = state.value.snapshot?.session?.id
-                editorDraft = state.value.draft
+                if (pendingDraftWrites == 0) {
+                    editorSessionId = state.value.snapshot?.session?.id
+                    editorDraft = state.value.draft
+                }
             } finally { interactionBlocked = false }
         }
     }
@@ -144,7 +146,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     fun updateDraft(text: String) {
-        if (interactionBlocked || state.value.busy || state.value.pending != null) return
+        if ((!state.value.snapshotStale && (interactionBlocked || state.value.busy)) || state.value.pending != null) return
         val origin = state.value.snapshot?.session?.id ?: return
         if (origin != editorSessionId) return
         editorDraft = text // Immediate editor feedback; disk persistence is asynchronous.

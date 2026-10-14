@@ -57,6 +57,174 @@ async function harness(t: { after: (fn: () => Promise<void>) => void }, pollInte
     emit: (value: DshObservation) => { for (const listener of listeners) listener(value); }, listeners: () => listeners.size };
 }
 
+test('point observation resolves its fresh opening header without catalog I/O and reads current liveness', async t => {
+  const h = await harness(t); let catalogs = 0;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }],
+    sessionController: { ...h.controller, async list() { catalogs++; throw new Error('Point read scanned corpus'); } },
+    sessionStatus: () => ({ running: h.row.running, updatedAt: h.row.updatedAt }),
+  });
+  t.after(async () => { adapter.dispose(); });
+  const signal = new AbortController().signal;
+  const first = await adapter.snapshot('session-fixture', signal);
+  assert.equal(first.session.title, 'Synthetic example');
+  assert.equal(first.session.workspaceId, 'alpha'); assert.equal(catalogs, 0);
+  h.row.running = true;
+  assert.equal((await adapter.snapshot('session-fixture', signal)).session.running, true, 'status is read at each exact opening cut');
+  h.frame.header.cwd = h.dir;
+  await assert.rejects(adapter.snapshot('session-fixture', signal), { code: 'not_found' }, 'opening header must resolve uncached even after an earlier authorized read');
+  assert.equal(h.cleanup().resumed, 0);
+});
+
+test('concurrent GET-style snapshot and watch share one cold opening with independent cancellation', async t => {
+  const h = await harness(t), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  let openings = 0;
+  const follow = h.controller.follow.bind(h.controller);
+  h.controller.follow = async function* (request, signal) { openings++; entered.resolve(); await release.promise; yield* follow(request, signal); };
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: h.controller, workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }],
+    sessionStatus: () => ({ running: false, updatedAt: h.row.updatedAt }), pollIntervalMs: 10000,
+  });
+  t.after(async () => { adapter.dispose(); });
+  const gone = new AbortController(), staying = new AbortController();
+  const abandoned = adapter.snapshot('session-fixture', gone.signal);
+  const watcher = adapter.watch('session-fixture', staying.signal)[Symbol.asyncIterator](), wanted = watcher.next();
+  const stillWanted = adapter.snapshot('session-fixture', staying.signal);
+  await entered.promise; gone.abort(); release.resolve(); await assert.rejects(abandoned, { name: 'AbortError' });
+  try {
+    assert.equal((await wanted).value!.messages.at(-1)!.text, 'The authoritative answer.');
+    assert.equal((await stillWanted).messages.at(-1)!.text, 'The authoritative answer.');
+    assert.equal(openings, 1, 'only one upstream restore/projection for the concurrent burst');
+  } finally { staying.abort(); await watcher.return?.(); }
+  assert.equal(h.cleanup().resumed, 0); assert.equal(h.cleanup().closed, 1);
+  h.frame.records.push({ type: 'event', event: { seq: 8, time: 1700000000008, type: 'session/title', data: { title: 'New title' } } } as any); h.frame.cursor = 8;
+  assert.equal((await adapter.snapshot('session-fixture', new AbortController().signal)).session.title, 'New title');
+  assert.equal(openings, 2, 'a completed burst is not cached across events or later requests');
+});
+
+test('fast point reads hide missing upstream sessions and subagents without catalog authority', async t => {
+  const h = await harness(t);
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: h.controller, workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }],
+    sessionStatus: () => ({ running: false, updatedAt: 0 }),
+  });
+  t.after(async () => { adapter.dispose(); });
+  h.controller.follow = async function* () { throw Object.assign(new Error('PRIVATE UPSTREAM DETAIL'), { isDSHRemoteError: true, code: 'session/not-found' }); };
+  await assert.rejects(adapter.snapshot('missing', new AbortController().signal), { code: 'not_found' });
+  h.controller.follow = async function* () { throw Object.assign(new Error('PRIVATE CHILD DETAIL'), { isDSHRemoteError: true, code: 'session/agent-busy', details: { reason: 'use subagent delivery for this child session' } }); };
+  await assert.rejects(adapter.snapshot('hidden-child', new AbortController().signal), { code: 'not_found' });
+  h.controller.follow = async function* () { throw new Error('Storage unavailable'); };
+  await assert.rejects(adapter.snapshot('missing', new AbortController().signal), /Storage unavailable/, 'generic faults are not disguised as absence');
+  h.controller.follow = async function* (_request, signal) { try { yield { ...h.frame, header: { ...h.frame.header, origin: 'subagent' } }; } finally { assert.equal(signal.aborted, true); } };
+  await assert.rejects(adapter.snapshot('session-fixture', new AbortController().signal), { code: 'not_found' });
+});
+
+test('child count changes on normal list and watch refresh while an idle main remains idle', { timeout: 5000 }, async t => {
+  const h = await harness(t); let count = 1;
+  h.rows([h.row, { ...h.row, sessionId: 'hidden-child', origin: 'subagent', parentSessionId: 'session-fixture', running: true }]);
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: h.controller, workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }],
+    sessionStatus: () => ({ running: false, updatedAt: h.row.updatedAt }), runningSubagentCounts: () => new Map([['session-fixture', count]]), pollIntervalMs: 10, throttleMs: 1,
+  });
+  t.after(async () => { adapter.dispose(); });
+  const rows = await adapter.listSessions(new AbortController().signal);
+  assert.equal(rows.length, 1); assert.equal(rows[0]!.runningSubagents, 1); assert.equal(rows[0]!.running, false);
+  const active = new AbortController(), iterator = adapter.watch('session-fixture', active.signal)[Symbol.asyncIterator]();
+  try {
+    const first = (await iterator.next()).value!;
+    assert.equal(first.runningSubagents, 1); assert.equal(first.activity, 'idle');
+    count = 0;
+    const settled = (await iterator.next()).value!;
+    assert.equal(settled.runningSubagents, 0); assert.equal(settled.session.runningSubagents, 0);
+    assert.equal(settled.activity, 'idle'); assert.equal(settled.session.running, false);
+    assert.equal((await adapter.listSessions(new AbortController().signal))[0]!.runningSubagents, 0);
+  } finally { active.abort(); await iterator.return?.(); }
+  assert.equal(h.cleanup().resumed, 0);
+});
+
+for (const reason of ['last-waiter', 'lifecycle', 'adapter'] as const) test(`an abandoned ${reason} opening cannot hold a slot or overwrite a newer cold read`, async t => {
+  const h = await harness(t), entered = Promise.withResolvers<void>();
+  let disposed: (id: string) => void = () => {}, openings = 0, stalledSignal: AbortSignal | undefined;
+  const follow = h.controller.follow.bind(h.controller);
+  h.controller.follow = async function* (request, signal) {
+    if (++openings === 1) { stalledSignal = signal; entered.resolve(); await new Promise<void>(() => {}); }
+    yield* follow(request, signal);
+  };
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: h.controller, workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }],
+    sessionStatus: () => ({ running: false, updatedAt: 0 }), events: { subscribe() { return () => {}; }, subscribeDisposed(listener) { disposed = listener; return () => {}; } },
+  });
+  t.after(async () => { adapter.dispose(); });
+  const active = new AbortController(), opening = adapter.snapshot('session-fixture', active.signal);
+  await entered.promise;
+  if (reason === 'last-waiter') active.abort(); else if (reason === 'lifecycle') disposed('session-fixture'); else adapter.dispose();
+  await assert.rejects(opening, { name: 'AbortError' }); assert.equal(stalledSignal!.aborted, true);
+  if (reason !== 'adapter') {
+    const fresh = await adapter.snapshot('session-fixture', new AbortController().signal);
+    assert.equal(fresh.messages.at(-1)!.text, 'The authoritative answer.'); assert.equal(openings, 2);
+  }
+});
+
+test('coalesced openings enforce sixty-four waiters and sixteen active-session slots', async t => {
+  const h = await harness(t); let openings = 0;
+  h.controller.follow = async function* (_request, signal) { openings++; await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })); signal.throwIfAborted(); };
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: h.controller, workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }], sessionStatus: () => ({ running: false, updatedAt: 0 }) });
+  t.after(async () => { adapter.dispose(); });
+  const active = new AbortController();
+  const waiters = Array.from({ length: 64 }, () => adapter.snapshot('held', active.signal));
+  const rejected = waiters.map(waiter => assert.rejects(waiter, { name: 'AbortError' }));
+  await assert.rejects(adapter.snapshot('held', active.signal), { code: 'unavailable' });
+  assert.equal(openings, 1); active.abort(); await Promise.all(rejected);
+  const many = new AbortController();
+  const sessions = Array.from({ length: 16 }, (_, i) => adapter.snapshot(`held-${i}`, many.signal));
+  const stopped = sessions.map(session => assert.rejects(session, { name: 'AbortError' }));
+  await assert.rejects(adapter.snapshot('overflow', many.signal), { code: 'unavailable' });
+  assert.equal(openings, 17); many.abort(); await Promise.all(stopped);
+});
+
+test('coalescing never shares authorization bindings across a changed registry provider or retargeted cwd', async t => {
+  const h = await harness(t), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  let registry = { list: () => [{ id: 'alpha', path: h.alpha, title: 'Alpha', async status() { return 'ok' as const; } }], archivedSessionIds: [] as string[] };
+  const source = await createWorkspaceSource({ workspaceSource: 'dsh-registry' }, () => registry);
+  let resolved = h.alpha;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: h.controller, workspaceSource: source, sessionStatus: () => ({ running: false, updatedAt: 0 }), realpath: async () => { entered.resolve(); await release.promise; return resolved; } });
+  t.after(async () => { adapter.dispose(); });
+  const pending = adapter.snapshot('session-fixture', new AbortController().signal);
+  await entered.promise; registry = { ...registry }; release.resolve();
+  await assert.rejects(pending, { code: 'not_found' }, 'same rows with a new provider invalidate the awaiting scope');
+  assert.equal((await adapter.snapshot('session-fixture', new AbortController().signal)).session.workspaceId, 'alpha');
+  resolved = h.dir;
+  await assert.rejects(adapter.snapshot('session-fixture', new AbortController().signal), { code: 'not_found' });
+  resolved = h.alpha; registry.archivedSessionIds = ['session-fixture'];
+  await assert.rejects(adapter.snapshot('session-fixture', new AbortController().signal), { code: 'not_found' });
+});
+
+test('failure scope uses fresh point headers, hides missing/child/archive and invalidates an awaited provider view', async t => {
+  const h = await harness(t);
+  let registry = { list: () => [{ id: 'alpha', path: h.alpha, title: 'Alpha', async status() { return 'ok' as const; } }], archivedSessionIds: [] as string[] };
+  const source = await createWorkspaceSource({ workspaceSource: 'dsh-registry' }, () => registry);
+  let header: unknown = h.frame.header, reads = 0;
+  let hold: { entered: ReturnType<typeof Promise.withResolvers<void>>; release: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaceSource: source,
+    sessionController: { ...h.controller, async list() { throw new Error('Header admission scanned the catalog'); }, async *follow() { throw new Error('Header admission read event log'); } },
+    sessionHeader: async () => { reads++; return header; }, realpath: async cwd => { hold?.entered.resolve(); if (hold) await hold.release.promise; return realpath(cwd); },
+  });
+  t.after(async () => { hold?.release.resolve(); adapter.dispose(); });
+  const signal = new AbortController().signal;
+  assert.equal(await adapter.sessionScope('session-fixture', signal), 'alpha');
+  header = { ...h.frame.header, cwd: h.dir };
+  await assert.rejects(adapter.sessionScope('session-fixture', signal), { code: 'not_found' });
+  header = { ...h.frame.header, origin: 'subagent' };
+  await assert.rejects(adapter.sessionScope('session-fixture', signal), { code: 'not_found' });
+  header = undefined;
+  await assert.rejects(adapter.sessionScope('session-fixture', signal), { code: 'not_found' });
+  header = h.frame.header; registry.archivedSessionIds = ['session-fixture'];
+  const before = reads;
+  await assert.rejects(adapter.sessionScope('session-fixture', signal), { code: 'not_found' });
+  assert.equal(reads, before, 'archive is checked even before point metadata read');
+  registry.archivedSessionIds = []; hold = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+  const pending = adapter.sessionScope('session-fixture', signal);
+  await hold.entered.promise; registry = { ...registry }; hold.release.resolve();
+  await assert.rejects(pending, { code: 'not_found' }, 'a new provider cannot authorize an old awaited view');
+  assert.equal(await adapter.sessionScope('session-fixture', signal), 'alpha');
+  assert.equal(h.cleanup().resumed, 0); assert.equal(h.cleanup().closed, 0);
+});
+
 test('notification evidence is cold-safe and demands authoritative completed turn and pending episode', async t => {
   const h = await harness(t); const signal = new AbortController().signal;
   const source = h.adapter.notifications()!;

@@ -23,6 +23,8 @@ import dev.dshmobile.app.model.*
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.MobileViewModel
 import dev.dshmobile.app.ui.components.*
+import androidx.compose.ui.text.style.TextOverflow
+import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.theme.LocalMobileColors
 
 @Composable
@@ -44,11 +46,12 @@ internal fun Composer(state: MobileState, model: MobileViewModel, onCancel: () -
                     placeholder = stringResource(if (running) R.string.mobile_message_queued_hint else R.string.mobile_message),
                     enabled = inputEnabled, modifier = Modifier.testTag("message_input")) {
                     // Secondary Stop retains ChatScreen's existing confirmation callback.
-                    if (running) IconButton(onClick = onCancel, enabled = canCancel(state) && !model.interactionBlocked,
-                        modifier = Modifier.size(48.dp).testTag("stop_run")) {
-                        Box(Modifier.size(36.dp).border(1.5.dp, MaterialTheme.colorScheme.outline, CircleShape), contentAlignment = Alignment.Center) {
-                            Icon(MobileIcons.StopFilled, stringResource(R.string.mobile_cancel_run), Modifier.size(18.dp))
-                        }
+                    // Stop is the tonal twin of Send: same 40dp disc in a 48dp target, filled only by the surface tone.
+                    if (running) FilledTonalIconButton(onClick = onCancel, enabled = canCancel(state) && !model.interactionBlocked, shape = CircleShape,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            contentColor = MaterialTheme.colorScheme.onSurface),
+                        modifier = Modifier.testTag("stop_run")) {
+                        Icon(MobileIcons.StopFilled, stringResource(R.string.mobile_cancel_run), Modifier.size(IconSize.Action))
                     }
                     RoundActionButton(MobileIcons.Send, stringResource(R.string.mobile_send), sendEnabled, Modifier.testTag("send_message")) { model.sendMessage(haptic) }
                 }
@@ -75,7 +78,8 @@ internal fun PillField(value: String, onValueChange: (String) -> Unit, placehold
             modifier = modifier.weight(1f).padding(top = 12.dp, bottom = 12.dp, end = 8.dp).semantics { contentDescription = placeholder },
             decorationBox = { inner ->
                 Box {
-                    if (value.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = colors.onSurfaceVariant, maxLines = 1)
+                    if (value.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = colors.onSurfaceVariant, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
                     inner()
                 }
             })
@@ -90,7 +94,8 @@ internal fun RoundActionButton(icon: androidx.compose.ui.graphics.vector.ImageVe
     FilledIconButton(onClick = onClick, enabled = enabled, shape = CircleShape,
         colors = IconButtonDefaults.filledIconButtonColors(containerColor = accents.action, contentColor = accents.onAction,
             disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest, disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant),
-        modifier = modifier.size(48.dp)) {
-        Icon(icon, label, Modifier.size(22.dp))
+        // Material's default 40dp disc (ControlSize.RoundAction); its minimumInteractiveComponentSize keeps a 48dp target.
+        modifier = modifier) {
+        Icon(icon, label, Modifier.size(IconSize.Action))
     }
 }

@@ -16,6 +16,22 @@ import java.io.File
 /** Real AndroidKeyStore + AtomicFile, on an isolated test app only; never a live paired device. */
 @RunWith(AndroidJUnit4::class)
 class EncryptedStateStoreInstrumentedTest {
+    @Test fun encryptedHistorySurvivesOwnersAndClearRemovesFileAndKey() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val file = File(context.noBackupFilesDir, "history.enc")
+        check(!file.exists()) { "Requires isolated unpaired application" }
+        val store = EncryptedHistoryStore(context)
+        try {
+            val snapshot = dev.dshmobile.app.model.SessionSnapshot(dev.dshmobile.app.model.SessionSummary("synthetic-chat", "Synthetic", "synthetic-project", 1, false, true),
+                listOf(dev.dshmobile.app.model.ChatMessage("synthetic-message", "assistant", "Synthetic private history", 1)), 1, false, "idle")
+            val record = HistoryRecord("synthetic-binding", listOf(HistoryEntry(snapshot, 1)))
+            store.write(record)
+            assertFalse(file.readBytes().toString(Charsets.UTF_8).contains("Synthetic private history"))
+            assertEquals(record, EncryptedHistoryStore(context).read())
+            store.clear(); assertFalse(file.exists())
+            assertFalse(java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.containsAlias("dsh-mobile-history-v1"))
+        } finally { store.clear() }
+    }
     @Test fun bootstrapTlsCloseAndReplacementOnMainThread() = runBlocking {
         var checkpoint = "tls.setup"
         val certificate = okhttp3.tls.HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()

@@ -43,13 +43,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.Color
 import dev.dshmobile.app.ui.theme.MonoFamily
+import dev.dshmobile.app.ui.theme.Spacing
+import dev.dshmobile.app.ui.theme.ControlSize
+import dev.dshmobile.app.ui.theme.IconSize
 import java.net.URI
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
     var trust by remember { mutableStateOf<InvitationReview?>(null) }
-    var previewError by remember { mutableStateOf<String?>(null) }
+    // Error keys are non-secret resource keys; saving them keeps the message across Activity recreation.
+    var previewError by rememberSaveable { mutableStateOf<String?>(null) }
     var manual by rememberSaveable { mutableStateOf(false) }
     var reset by remember { mutableStateOf(false) }
     val defaultName = stringResource(R.string.mobile_default_device)
@@ -93,9 +97,9 @@ internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
             colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.background))
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            Box(Modifier.size(56.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape), contentAlignment = Alignment.Center) {
-                Icon(MobileIcons.Computer, null, Modifier.size(28.dp))
+            .padding(horizontal = Spacing.Gutter, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            Box(Modifier.size(ControlSize.TouchTarget).background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape), contentAlignment = Alignment.Center) {
+                Icon(MobileIcons.Computer, null, Modifier.size(IconSize.Action))
             }
             Text(stringResource(R.string.mobile_pair_title), style = MaterialTheme.typography.headlineMedium, modifier = Modifier.semantics { heading() })
             Text(stringResource(R.string.mobile_pair_subtitle), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -127,27 +131,40 @@ internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
                     colors = ButtonDefaults.buttonColors(containerColor = accents.action, contentColor = accents.onAction), shape = CircleShape) {
                     Text(stringResource(R.string.mobile_scan_qr))
                 }
-                Text(stringResource(R.string.mobile_scan_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // The hint belongs to Scan: 8dp below it, 16dp before the next action.
+                Text(stringResource(R.string.mobile_scan_hint), Modifier.padding(bottom = Spacing.S), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedButton(onClick = { importer.launch("*/*") }, enabled = !state.busy && !scanning,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("pairing_import"), shape = CircleShape, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text(stringResource(R.string.mobile_import)) }
+                // Text starts on the gutter like the buttons above (no inner TextButton inset).
                 TextButton(onClick = { model.supersedeInvitationImport(); manual = !manual }, enabled = !state.busy && !scanning, modifier = Modifier.heightIn(min = 48.dp).testTag("pairing_manual"),
+                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = Spacing.S),
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                     Text(stringResource(if (manual) R.string.mobile_hide_json else R.string.mobile_paste_json))
                 }
             }
-            if (model.invitation.isNotBlank()) Text(stringResource(R.string.mobile_invitation_ready), style = MaterialTheme.typography.bodyMedium,
+            val anyError = previewError != null || model.importError != null || state.error != null
+            // "Loaded" and an error never show together; the error wins.
+            if (model.invitation.isNotBlank() && !anyError) Text(stringResource(R.string.mobile_invitation_ready), style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             if (manual) OutlinedTextField(value = model.invitation, onValueChange = { model.editInvitation(it); previewError = null; trust = null },
-                label = { Text(stringResource(R.string.mobile_invitation)) }, supportingText = { Text(stringResource(R.string.mobile_invitation_hint)) },
+                label = { Text(stringResource(R.string.mobile_invitation)) },
+                // The secret hint stays neutral grey even in the error state; the field's own error sits right under it.
+                supportingText = { Column(verticalArrangement = Arrangement.spacedBy(Spacing.XS)) {
+                    Text(stringResource(R.string.mobile_invitation_hint), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    previewError?.let { ErrorText(it) }
+                } },
                 visualTransformation = PasswordVisualTransformation(), isError = previewError != null, minLines = 2, maxLines = 4, enabled = !state.busy && !scanning,
                 shape = MaterialTheme.shapes.medium, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = MaterialTheme.colorScheme.onSurface, unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant),
                 modifier = Modifier.fillMaxWidth().testTag("pairing_invitation"))
+            // Scan/import errors (no field to attach to) sit right after the actions that caused them.
+            if (!manual) previewError?.let { ErrorText(it) }
+            model.importError?.let { ErrorText(it) }
             OutlinedTextField(value = model.deviceName, onValueChange = model::editDeviceName, label = { Text(stringResource(R.string.mobile_device_name)) },
                 placeholder = { Text(defaultName) }, singleLine = true, enabled = !state.busy && !scanning, shape = MaterialTheme.shapes.medium,
                 colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = MaterialTheme.colorScheme.onSurface, unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant),
                 modifier = Modifier.fillMaxWidth().testTag("pairing_device_name"))
-            previewError?.let { ErrorText(it) }; model.importError?.let { ErrorText(it) }; state.error?.let { ErrorText(it) }
+            state.error?.let { ErrorText(it) }
             OutlinedButton(onClick = {
                 try { trust = InvitationReview.parse(model.invitation); previewError = null }
                 catch (failure: MobileFailure) { trust = null; previewError = failure.key }
@@ -162,7 +179,7 @@ internal fun PairingScreen(state: MobileState, model: MobileViewModel) {
                 Text(stringResource(R.string.mobile_reset_connection))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Icon(MobileIcons.Shield, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(MobileIcons.Shield, null, Modifier.size(IconSize.Row), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(stringResource(R.string.mobile_pair_security), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }

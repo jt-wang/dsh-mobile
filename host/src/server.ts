@@ -158,10 +158,16 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
   async function checkScope(deviceId: string, workspaceId: string, execute = false, hidden = false): Promise<AuthorizedDevice> {
     return checkKnownScope(deviceId, workspaceId, await workspaceIds(), execute, hidden);
   }
+  function childCount(value: unknown): number | undefined {
+    if (value === undefined) return undefined;
+    if (!Number.isSafeInteger(value) || (value as number) < 0) throw new HostError('internal_error');
+    return value as number;
+  }
   function sessionForDevice(session: HostSession, deviceId: string, ids: ReadonlySet<string>) {
     const device = checkKnownScope(deviceId, session.workspaceId, ids, false, true);
     if (typeof session.id !== 'string' || typeof session.title !== 'string' || !Number.isFinite(session.updatedAt) || typeof session.running !== 'boolean') throw new HostError('internal_error');
-    return { id: session.id, title: session.title.slice(0, 256), workspaceId: session.workspaceId, updatedAt: session.updatedAt, running: session.running, canExecute: allowsWorkspace(device.grants.executeWorkspaceIds, session.workspaceId) };
+    const runningSubagents = childCount(session.runningSubagents);
+    return { id: session.id, title: session.title.slice(0, 256), workspaceId: session.workspaceId, updatedAt: session.updatedAt, running: session.running, ...(runningSubagents !== undefined ? { runningSubagents } : {}), canExecute: allowsWorkspace(device.grants.executeWorkspaceIds, session.workspaceId) };
   }
   async function snapshotForDevice(snapshot: HostSnapshot, deviceId: string, expectedId: string) {
     if (!snapshot || snapshot.session.id !== expectedId || !Array.isArray(snapshot.messages) || !Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < -1 || !['idle', 'running', 'waiting', 'unknown'].includes(snapshot.activity)) throw new HostError('internal_error');
@@ -179,7 +185,10 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
         (detail.tool !== undefined && (typeof detail.tool !== 'string' || !/^[A-Za-z0-9_.:/-]{1,128}$/.test(detail.tool))))) throw new HostError('internal_error');
     const activityDetail = detail && ['running', 'waiting'].includes(snapshot.activity)
       ? { turnStartedAt: detail.turnStartedAt, ...(detail.tool !== undefined ? { tool: detail.tool } : {}) } : undefined;
-    const result = { ...(activityDetail ? { activityDetail } : {}), session, messages, cursor: snapshot.cursor, hasMore: snapshot.hasMore === true || snapshot.messages.length > 100, activity: snapshot.activity, ...(snapshot.notice === HISTORY_CUT_NOTICE ? { notice: HISTORY_CUT_NOTICE } : snapshot.activity === 'waiting' || snapshot.activity === 'unknown' ? { notice: 'Return to the desktop to check this task.' } : {}) };
+    const runningSubagents = childCount(snapshot.runningSubagents);
+    if (runningSubagents !== undefined && session.runningSubagents !== undefined && runningSubagents !== session.runningSubagents) throw new HostError('internal_error');
+    const count = runningSubagents ?? session.runningSubagents;
+    const result = { ...(count !== undefined ? { runningSubagents: count } : {}), ...(activityDetail ? { activityDetail } : {}), session, messages, cursor: snapshot.cursor, hasMore: snapshot.hasMore === true || snapshot.messages.length > 100, activity: snapshot.activity, ...(snapshot.notice === HISTORY_CUT_NOTICE ? { notice: HISTORY_CUT_NOTICE } : snapshot.activity === 'waiting' || snapshot.activity === 'unknown' ? { notice: 'Return to the desktop to check this task.' } : {}) };
     // Keep complete messages and Unicode intact. Observation is a bounded latest-history view.
     while (Buffer.byteLength(JSON.stringify(result), 'utf8') > 2 * 1024 * 1024) {
       if (result.messages.length <= 1) throw new HostError('payload_too_large');
@@ -197,11 +206,38 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     await checkScope(deviceId, session.workspaceId, false, true);
     return session;
   }
-  async function sessionSnapshot(sessionId: string, deviceId: string, signal: AbortSignal): Promise<HostSnapshot> {
-    const session = await permittedSession(sessionId, deviceId, signal);
-    const snapshot = await adapter.snapshot(sessionId, signal);
+  async function failedPointRead(sessionId: string, deviceId: string, signal: AbortSignal, error: unknown): Promise<never> {
+    // An event/projection failure must not disclose whether a hidden journal is
+    // corrupt. Re-resolve only its current header scope, separately per device.
+    signal.throwIfAborted(); freshDevice(deviceId);
+    try {
+      if (workspaceSource.archivedSessionIds().has(sessionId)) throw new HostError('not_found');
+      const workspaceId = adapter.sessionScope
+        ? await adapter.sessionScope(sessionId, signal)
+        : (await permittedSession(sessionId, deviceId, signal)).workspaceId;
+      signal.throwIfAborted();
+      await checkScope(deviceId, workspaceId, false, true);
+      if (workspaceSource.archivedSessionIds().has(sessionId)) throw new HostError('not_found');
+    } catch (resolutionError) {
+      // Old listing omits unreadable headers. Failure admission must hide them
+      // too, including stat/scope errors, without swallowing cancellation/revoke.
+      signal.throwIfAborted(); freshDevice(deviceId);
+      if (resolutionError instanceof Error && resolutionError.name === 'AbortError') throw resolutionError;
+      throw new HostError('not_found');
+    }
+    // Only an authorized, non-archived target keeps its original safe error.
+    throw error;
+  }
+  async function sessionSnapshot(sessionId: string, deviceId: string, signal: AbortSignal, catalogPreflight = true): Promise<HostSnapshot> {
+    // Mutations retain their independent admission preflight. Point observation
+    // is authorized by the adapter's freshly resolved opening header, not a
+    // complete corpus scan (rc.2 reads every persisted header on list()).
+    const session = catalogPreflight ? await permittedSession(sessionId, deviceId, signal) : undefined;
+    let snapshot: HostSnapshot;
+    try { snapshot = await adapter.snapshot(sessionId, signal); }
+    catch (error) { if (catalogPreflight) throw error; return failedPointRead(sessionId, deviceId, signal, error); }
     signal.throwIfAborted();
-    if (snapshot.session.workspaceId !== session.workspaceId) throw new HostError('not_found');
+    if (session && snapshot.session.workspaceId !== session.workspaceId) throw new HostError('not_found');
     if (workspaceSource.archivedSessionIds().has(sessionId)) throw new HostError('not_found');
     await checkScope(deviceId, snapshot.session.workspaceId, false, true);
     return snapshot;
@@ -259,13 +295,14 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       }
     }
     try {
-      const session = await permittedSession(sessionId, deviceId, controller.signal);
-      iterator = adapter.watch(sessionId, controller.signal)[Symbol.asyncIterator]();
-      const opening = await iterator.next();
-      if (opening.done) throw new HostError('unavailable');
+      let opening: IteratorResult<HostSnapshot>;
+      try {
+        iterator = adapter.watch(sessionId, controller.signal)[Symbol.asyncIterator]();
+        opening = await iterator.next();
+        if (opening.done) throw new HostError('unavailable');
+      } catch (error) { return await failedPointRead(sessionId, deviceId, controller.signal, error); }
       const first = opening.value;
       controller.signal.throwIfAborted();
-      if (first.session.workspaceId !== session.workspaceId) throw new HostError('not_found');
       await checkScope(deviceId, first.session.workspaceId, false, true);
       await snapshotForDevice(first, deviceId, sessionId);
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Accel-Buffering': 'no' });
@@ -306,7 +343,13 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
         } catch { /* Never stream raw upstream errors, stacks, tokens, or host paths. */ }
         finally { stop(); try { await iterator?.return?.(); } catch { /* Observation cleanup cannot leak upstream errors. */ } }
       })();
-    } catch (error) { stop(); try { await iterator?.return?.(); } catch { /* Preserve the safe admission error. */ } throw error; }
+    } catch (error) {
+      stop(); try { await iterator?.return?.(); } catch { /* Preserve the safe admission error. */ }
+      // Local revoke can abort an opening before its fresh scope check. Preserve
+      // the same auth envelope as an external durable revoke, not generic 500.
+      if (!res.headersSent && !closing && !state.getDevice(deviceId)) throw new HostError('unauthorized');
+      throw error;
+    }
   }
 
   async function streamNotifications(deviceId: string, after: string | undefined, res: ServerResponse, signal: AbortSignal) {
@@ -462,7 +505,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       await streamSnapshots(segments[1]!, device.deviceId, res, signal); return;
     }
     if (req.method === 'GET' && segments[0] === 'sessions' && segments.length === 2) {
-      const snapshot = await sessionSnapshot(segments[1]!, device.deviceId, signal);
+      const snapshot = await sessionSnapshot(segments[1]!, device.deviceId, signal, false);
       sendJson(res, 200, await snapshotForDevice(snapshot, device.deviceId, segments[1]!)); return;
     }
     if (req.method === 'GET' && segments[0] === 'commands' && segments.length === 2) {

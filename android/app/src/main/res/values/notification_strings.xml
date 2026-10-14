@@ -23,4 +23,9 @@
     <string name="notif_initializing">Checking notification coverage…</string>
     <string name="notif_degraded">Some events may have been missed.</string>
     <string name="notif_offline">Connection interrupted. Reconnecting; alerts may be delayed.</string>
+    <string name="notif_mode_sound">With sound</string>
+    <string name="notif_mode_silent">Silent</string>
+    <string name="notif_mode_off">Off</string>
+    <string name="notif_answer_system">Answer channel settings</string>
+    <string name="notif_attention_system">Attention channel settings</string>
 </resources>

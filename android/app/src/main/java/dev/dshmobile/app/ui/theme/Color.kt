@@ -31,7 +31,7 @@ internal val LightColors = lightColorScheme(
     primaryContainer = Color(0xFFE6E6E9), onPrimaryContainer = Color(0xFF0D0D0F),
     secondary = Color(0xFF4A4A50), onSecondary = Color(0xFFFFFFFF),
     secondaryContainer = Color(0xFFDCDCE0), onSecondaryContainer = Color(0xFF0D0D0F),
-    tertiary = Color(0xFF8A5A00), onTertiary = Color(0xFFFFFFFF),
+    tertiary = Color(0xFFA86400), onTertiary = Color(0xFFFFFFFF),
     background = Color(0xFFFFFFFF), onBackground = Color(0xFF0D0D0F),
     surface = Color(0xFFFFFFFF), onSurface = Color(0xFF0D0D0F),
     surfaceVariant = Color(0xFFF0F0F2), onSurfaceVariant = Color(0xFF65656C),
@@ -46,7 +46,10 @@ internal data class MobileColors(
     val action: Color = Color(0xFFF2F2F3), val onAction: Color = Color(0xFF0B0B0C),
     val warning: Color = Color(0xFFE3B566), val warningContainer: Color = Color(0xFF2A2417),
     val success: Color = Color(0xFF4CC38A),
+    /** Warning hue for glyphs (status dots); text keeps [warning]. Equal on dark, brighter on light. */
+    val warningIndicator: Color = warning,
 )
+// Light warning: text tone A86400 keeps 4.7:1 on white; the dot tone C07000 keeps 3.8:1 and reads as amber, not grey-brown.
 internal val LightMobileColors = MobileColors(action = Color(0xFF0D0D0F), onAction = Color(0xFFFFFFFF),
-    warning = Color(0xFF8A5A00), warningContainer = Color(0xFFFBF0DA), success = Color(0xFF1F8A55))
+    warning = Color(0xFFA86400), warningContainer = Color(0xFFFBF0DA), success = Color(0xFF1F8A55), warningIndicator = Color(0xFFC07000))
 internal val LocalMobileColors = staticCompositionLocalOf { MobileColors() }

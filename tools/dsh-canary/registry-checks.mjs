@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, appendFile, readdir } from 'node:fs/promises';
 import { request } from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -133,6 +133,73 @@ export async function registryChecks({ runtime, loader, directories, runRoot, pr
     await controller.insertBefore({ workspaceId: workspaces[0].id });
     assert.deepEqual((await call('/workspaces', token)).body.items, (await baseline()).items.map(row => ({ id: row.workspaceId, name: row.title, canExecute: true })));
     assert.equal(deterministic.calls, 0, 'Registry list/create does not call a model');
+    const { subagentChecks } = await import('./subagent-checks.mjs');
+    const children = await subagentChecks(runtime, loader, projectRoot, directories.workspace, async (parentId, count, hiddenChildId) => {
+      // Exercise the actual profile-insert plugin's fresh ctx.get live services.
+      const listing = await call('/sessions', token), chat = await call(`/sessions/${parentId}`, token);
+      assert.equal(listing.status, 200); assert.equal(chat.status, 200);
+      const parentRow = listing.body.items.find(item => item.id === parentId);
+      assert.equal(parentRow.runningSubagents, count); assert.equal(parentRow.running, false);
+      assert.equal(chat.body.runningSubagents, count); assert.equal(chat.body.session.runningSubagents, count);
+      assert.equal(chat.body.session.running, false); assert.equal(chat.body.activity, 'idle');
+      if (hiddenChildId) {
+        assert.equal(listing.body.items.some(item => item.id === hiddenChildId), false);
+        assert.equal((await call(`/sessions/${hiddenChildId}`, token)).status, 404);
+      }
+    });
+    // Real persistence with an intact header and corrupt event body, never a
+    // controller throw stub. The profile plugin must use header-only stat on
+    // failure and keep the same hiding envelope for GET and SSE.
+    const brokenId = `session-broken-body-${randomUUID()}`;
+    const brokenHandle = await ctx.sessionPersistence.create({ version: 4, id: brokenId, createdAt: Date.now(), cwd: workspaces[1].path, isSeeded: false });
+    await brokenHandle.flush(); await brokenHandle.close();
+    let journal;
+    for (const project of await readdir(directories.sessions)) {
+      const directory = path.join(directories.sessions, project, brokenId);
+      let entries;
+      try { entries = await readdir(directory); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      assert.equal(journal, undefined, 'A synthetic session has one authoritative physical directory');
+      assert.ok(entries.includes('session.v4.jsonl'));
+      journal = assertOwnedPath(runRoot, path.join(directory, 'session.v4.jsonl'));
+    }
+    assert.ok(journal); await appendFile(journal, JSON.stringify({ type: 'turn/end', seq: 'PRIVATE invalid seq', time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } }) + '\n');
+    await assert.rejects(async () => { const probe = await ctx.sessionPersistence.open(brokenId, 'read'); try { await probe.read(); } finally { await probe.close(); } }, 'A malformed committed terminal cannot be silently recovered as a torn tail');
+    assert.equal((await ctx.sessionPersistence.stat(brokenId)).header.id, brokenId, 'Metadata remains readable without decoding the broken body');
+    assert.equal(ctx.sessions.get(brokenId), undefined, 'Broken target is genuinely cold');
+    const narrowOffer = admin.createPairing({ readWorkspaceIds: [workspaces[0].id], executeWorkspaceIds: [] });
+    const narrow = await call('/pairings', undefined, { pairingToken: narrowOffer.pairingToken, deviceName: 'Synthetic denied phone' });
+    const boundaries = [];
+    for (const suffix of ['', '/events']) {
+      const denied = await call(`/sessions/${brokenId}${suffix}`, narrow.body.deviceToken);
+      assert.equal(denied.status, 404); assert.equal(denied.body.error.code, 'not_found');
+      const broken = await call(`/sessions/${brokenId}${suffix}`, token);
+      assert.equal(broken.status, 500); assert.equal(broken.body.error.code, 'internal_error');
+      assert.doesNotMatch(JSON.stringify(broken.body), /PRIVATE|record|jsonl|stack/);
+      boundaries.push({ lane: suffix || 'GET', denied: denied.status, permitted: broken.status });
+    }
+    await controller.archiveSession({ sessionId: brokenId });
+    for (const suffix of ['', '/events']) {
+      const hidden = await call(`/sessions/${brokenId}${suffix}`, token);
+      assert.equal(hidden.status, 404); assert.equal(hidden.body.error.code, 'not_found');
+    }
+    assert.equal(ctx.sessions.get(brokenId), undefined); assert.equal(ctx.agents.get(brokenId), undefined);
+    console.error(`BROKEN_BODY_HTTP ${JSON.stringify(boundaries)}`);
+    // The catalog omits an unsupported generation, while stat() throws. Failure
+    // admission must hide this unreadable header even for an allowed workspace.
+    const futureJournal = assertOwnedPath(runRoot, path.join(path.dirname(journal), 'session.v999.jsonl'));
+    await writeFile(futureJournal, JSON.stringify({ version: 999, id: brokenId, createdAt: Date.now(), cwd: workspaces[1].path, isSeeded: false }) + '\n', { flag: 'wx' });
+    await controller.unarchiveSession({ sessionId: brokenId });
+    await assert.rejects(ctx.sessionPersistence.stat(brokenId), 'Point stat rejects the unreadable future header');
+    assert.equal((await ctx.sessionController.list({}, abort.signal)).items.some(row => row.sessionId === brokenId), false, 'Installed listing hides an unreadable header');
+    const headerBoundaries = [];
+    for (const suffix of ['', '/events']) for (const [scope, auth] of [['denied', narrow.body.deviceToken], ['permitted', token]]) {
+      const hidden = await call(`/sessions/${brokenId}${suffix}`, auth);
+      assert.equal(hidden.status, 404); assert.equal(hidden.body.error.code, 'not_found');
+      assert.doesNotMatch(JSON.stringify(hidden.body), /999|generation|jsonl|PRIVATE|stack/);
+      headerBoundaries.push({ lane: suffix || 'GET', scope, status: hidden.status });
+    }
+    assert.equal(ctx.sessions.get(brokenId), undefined); assert.equal(ctx.agents.get(brokenId), undefined);
+    console.error(`BROKEN_HEADER_HTTP ${JSON.stringify(headerBoundaries)}`);
     // Loss remains HTTP 503, not a stale cached registry or explicit fallback.
     const registrySlot = ctx.reflect.store[ctx[Context.isolate].workspaceRegistry];
     // Clear the provided value through Cordis's provider-owned public set API:
@@ -149,7 +216,7 @@ export async function registryChecks({ runtime, loader, directories, runRoot, pr
     assert.equal(companion.fiber.state, 4, 'Companion fiber fully disposed');
     assert.equal(options.isolation.activeListeners, 0, 'Owned listener closed on profile disposal');
     abort.abort();
-    return { checks: ['real-loader-file-url-profile-insert', 'same-realm-registry-get-without-inject', 'three-real-registry-workspaces', 'registry-http-workspaces-and-sessions', 'per-workspace-session-filter', 'registry-create-attaches-session', 'registry-create-requestId-dedup', 'registry-live-rename-order-archive', 'registry-loss-fails-closed-http-503', 'profile-plugin-disposal-closes-listener', 'registry-zero-llm-calls'], result: { workspaces: expectedProjects, sessions, createdSessionId: receipt.result.sessionId, http: { workspaces: projects.status, sessions: listed.status }, registryPresent: true, tracingProxyIdentityStable: false, sameRealm: true } };
+    return { checks: ['real-loader-file-url-profile-insert', 'same-realm-registry-get-without-inject', 'three-real-registry-workspaces', 'registry-http-workspaces-and-sessions', 'per-workspace-session-filter', 'registry-create-attaches-session', 'registry-create-requestId-dedup', 'registry-live-rename-order-archive', 'registry-loss-fails-closed-http-503', 'profile-plugin-disposal-closes-listener', 'registry-zero-llm-calls-before-child-canary', 'real-profile-child-summary/snapshot', 'cold-broken-body-denied-get/sse-404', 'cold-broken-body-archived-get/sse-404', 'cold-broken-body-permitted-get/sse-safe-500', 'cold-unreadable-header-stat-throws-list-omits', 'cold-unreadable-header-denied/permitted-get/sse-404', ...children.checks], result: { workspaces: expectedProjects, sessions, createdSessionId: receipt.result.sessionId, http: { workspaces: projects.status, sessions: listed.status }, registryPresent: true, tracingProxyIdentityStable: false, sameRealm: true } };
   } finally {
     admin?.close();
     await loaderFiber.dispose();

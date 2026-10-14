@@ -23,4 +23,9 @@
     <string name="notif_initializing">Проверяется полнота уведомлений…</string>
     <string name="notif_degraded">Часть событий могла быть пропущена.</string>
     <string name="notif_offline">Связь прервана. Переподключение; уведомления могут задерживаться.</string>
+    <string name="notif_mode_sound">Со звуком</string>
+    <string name="notif_mode_silent">Без звука</string>
+    <string name="notif_mode_off">Выключены</string>
+    <string name="notif_answer_system">Настройки канала ответов</string>
+    <string name="notif_attention_system">Настройки канала запросов ввода</string>
 </resources>

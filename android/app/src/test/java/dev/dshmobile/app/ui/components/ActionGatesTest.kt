@@ -20,6 +20,12 @@ class ActionGatesTest {
         assertFalse(canCancel(state().copy(snapshotStale = true)))
     }
 
+    @Test fun `subagent only working never enables main turn Stop`() {
+        val idle = state(running = false, activity = "idle")
+        assertFalse(canCancel(idle.copy(snapshot = idle.snapshot!!.copy(session = idle.snapshot.session.copy(runningSubagents = 3)))))
+        val main = state()
+        assertTrue(canCancel(main.copy(snapshot = main.snapshot!!.copy(session = main.snapshot.session.copy(runningSubagents = 3)))))
+    }
     @Test fun `mutation gates remain closed offline busy and unresolved`() {
         for (blocked in listOf(state().copy(connection = ConnectionState.OFFLINE), state().copy(busy = true),
             state().copy(pending = PendingCommand("request", "create", null, null, "uncertain")))) {
@@ -33,8 +39,8 @@ class ActionGatesTest {
             state().copy(connection = ConnectionState.OFFLINE, snapshotStale = true))) {
             assertTrue(canEditDraft(editable))
             assertFalse(MobileReducer.canSend(editable, "Local draft"))
-            assertFalse(canEditDraft(editable, interactionBlocked = true))
-            assertFalse(canEditDraft(editable.copy(busy = true)))
+            assertTrue(canEditDraft(editable, interactionBlocked = true))
+            assertTrue(canEditDraft(editable.copy(busy = true)))
             assertFalse(canEditDraft(editable.copy(pending = PendingCommand("request", "send", "chat", "text", "uncertain"))))
         }
         assertFalse(canEditDraft(state().copy(workspaces = listOf(Workspace("project", "Synthetic", false)))))

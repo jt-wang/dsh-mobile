@@ -21,6 +21,9 @@ import androidx.compose.ui.unit.dp
 import dev.dshmobile.app.R
 import dev.dshmobile.app.model.*
 import dev.dshmobile.app.ui.LazyItemKeys
+import dev.dshmobile.app.ui.MobileIcons
+import dev.dshmobile.app.ui.theme.ControlSize
+import dev.dshmobile.app.ui.theme.IconSize
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -106,9 +109,17 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
                 }
             } }
         }
-        if (unread && !following && searchQuery.isBlank()) Button(shape = androidx.compose.foundation.shape.CircleShape, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.inverseSurface, contentColor = MaterialTheme.colorScheme.inverseOnSurface), onClick = {
+        // Secondary navigation: a tonal pill with a hairline, never louder than Send; Material keeps the 48dp target.
+        if (unread && !following && searchQuery.isBlank()) FilledTonalButton(shape = androidx.compose.foundation.shape.CircleShape,
+            colors = ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest, contentColor = MaterialTheme.colorScheme.onSurface),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            contentPadding = PaddingValues(start = 12.dp, end = 16.dp), onClick = {
             following = true; unread = false
             scope.launch { if (list.layoutInfo.totalItemsCount > 0) { list.scrollToItem(list.layoutInfo.totalItemsCount - 1); list.scrollBy(Float.MAX_VALUE) } }
-        }, modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp).testTag("new_messages")) { Text(stringResource(R.string.mobile_new_messages)) }
+        }, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).height(ControlSize.Pill).testTag("new_messages")) {
+            Icon(MobileIcons.ChevronDown, null, Modifier.size(IconSize.Meta))
+            Spacer(Modifier.width(6.dp))
+            Text(stringResource(R.string.mobile_new_messages), style = MaterialTheme.typography.labelLarge)
+        }
     }
 }

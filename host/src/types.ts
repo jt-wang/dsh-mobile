@@ -2,6 +2,7 @@ export interface WorkspaceConfig { id: string; name: string; path: string }
 export interface Preset { id: string; name: string }
 export interface HostSession {
   id: string; title: string; workspaceId: string; updatedAt: number; running: boolean;
+  runningSubagents?: number;
 }
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; createdAt: number;
@@ -10,6 +11,7 @@ export interface ChatMessage {
 export interface HostSnapshot {
   session: HostSession; messages: ChatMessage[]; cursor: number; hasMore: boolean;
   activity: 'idle' | 'running' | 'waiting' | 'unknown'; notice?: string;
+  runningSubagents?: number;
   activityDetail?: { turnStartedAt: number; tool?: string };
 }
 export interface HostAdapter {
@@ -17,6 +19,8 @@ export interface HostAdapter {
   notifications?(): import('./notifications.ts').NotificationSources | undefined;
   listPresets(signal: AbortSignal): Promise<Preset[]>;
   listSessions(signal: AbortSignal): Promise<HostSession[]>;
+  /** Header-only scope resolution for hiding failed point reads; never returns transcript data. */
+  sessionScope?(sessionId: string, signal: AbortSignal): Promise<string>;
   snapshot(sessionId: string, signal: AbortSignal): Promise<HostSnapshot>;
   watch(sessionId: string, signal: AbortSignal): AsyncIterable<HostSnapshot>;
   /** Server-authorized identity is checked again inside the adapter before upstream admission. */

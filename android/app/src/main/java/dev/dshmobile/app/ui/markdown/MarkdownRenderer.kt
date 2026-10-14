@@ -102,7 +102,8 @@ private fun CodeBlock(block: MarkdownBlock.Code, onCopy: (String) -> Unit, selec
             Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(block.language.ifBlank { stringResource(R.string.mobile_code) }, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                IconButton(onClick = { onCopy(block.copyText) }) { Icon(MobileIcons.Copy, stringResource(R.string.mobile_copy_code), Modifier.size(18.dp)) }
+                IconButton(onClick = { onCopy(block.copyText) }) { Icon(MobileIcons.Copy, stringResource(R.string.mobile_copy_code), Modifier.size(dev.dshmobile.app.ui.theme.IconSize.Meta),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
             OptionalSelection(selectable) {
                 Text(block.text, Modifier.horizontalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 14.dp),

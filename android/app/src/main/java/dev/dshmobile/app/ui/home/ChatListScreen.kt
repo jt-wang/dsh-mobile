@@ -24,6 +24,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
@@ -34,7 +35,10 @@ import dev.dshmobile.app.model.*
 import dev.dshmobile.app.ui.LazyItemKeys
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.components.*
+import dev.dshmobile.app.ui.theme.ControlSize
+import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.theme.LocalMobileColors
+import dev.dshmobile.app.ui.theme.Spacing
 import dev.dshmobile.app.ui.theme.tabular
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,7 +46,7 @@ import dev.dshmobile.app.ui.theme.tabular
 internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String) -> Unit, projectId: String?, onProject: (String?) -> Unit,
     onSelect: (String) -> Unit, onNewChat: () -> Unit, onSettings: () -> Unit, onConnection: () -> Unit, onRefresh: () -> Unit,
     interactionBlocked: Boolean, pendingDelivery: @Composable () -> Unit) {
-    val sessions = if (state.capabilities?.sessions == true) state.sessions else emptyList()
+    val sessions = state.sessions // Disk index is presentation only; connection still gates all host actions.
     val projects = remember(state.workspaces, sessions) { projectSummaries(state.workspaces, sessions) }
     val visible = remember(sessions, query, projectId) { filterSessions(sessions, projectId, query) }
     val locale = LocalConfiguration.current.locales[0]
@@ -56,14 +60,16 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
             CenterAlignedTopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onSettings, modifier = Modifier.testTag("settings")) {
-                        Icon(MobileIcons.Settings, stringResource(R.string.mobile_settings_connection))
+                        Icon(MobileIcons.Settings, stringResource(R.string.mobile_settings_connection), Modifier.size(IconSize.Action))
                     }
                 },
                 title = { HomeTitle(state, onConnection) },
                 actions = {
-                    IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) onQuery("") }, modifier = Modifier.testTag("home_search_toggle")) {
-                        Icon(if (searchOpen) MobileIcons.Close else MobileIcons.Search,
-                            stringResource(if (searchOpen) R.string.mobile_clear_search else R.string.mobile_search_chats))
+                    // The header keeps the magnifier as a toggle (tonal while open); the only cross is the field's clear action.
+                    IconToggleButton(checked = searchOpen, onCheckedChange = { searchOpen = it; if (!it) onQuery("") }, modifier = Modifier.testTag("home_search_toggle"),
+                        colors = IconButtonDefaults.iconToggleButtonColors(checkedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            checkedContentColor = MaterialTheme.colorScheme.onSurface)) {
+                        Icon(MobileIcons.Search, stringResource(R.string.mobile_search_chats), Modifier.size(IconSize.Action))
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.background,
@@ -81,7 +87,10 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                     item(key = "list-filters") {
                         Column {
                             if (searchOpen) SearchField(query, onQuery)
-                            LazyRow(Modifier.fillMaxWidth().testTag("project_filters"), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                            val tabs = rememberLazyListState()
+                            // Tab text starts on the gutter (row padding + the tab's own 12dp); edges fade where more tabs scroll in.
+                            LazyRow(Modifier.fillMaxWidth().edgeFade(tabs).testTag("project_filters"), state = tabs,
+                                contentPadding = PaddingValues(horizontal = Spacing.Gutter - Spacing.M)) {
                                 item(key = LazyItemKeys.ALL_PROJECTS) { ProjectTab(stringResource(R.string.mobile_all_projects), projectId == null, "project_all") { onProject(null) } }
                                 items(projects, key = { LazyItemKeys.project(it.workspace.id) }) { project ->
                                     ProjectTab(stringResource(R.string.mobile_project_filter, project.workspace.name, project.chatCount), projectId == project.workspace.id,
@@ -89,8 +98,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                                 }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            if (state.demo) Text(stringResource(R.string.mobile_demo_tag), Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp).testTag("demo_label"),
-                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (state.demo) DemoBadge(Modifier.padding(start = Spacing.Gutter, end = Spacing.Gutter, top = Spacing.L))
                         }
                     }
                     if (visible.isEmpty()) item(key = LazyItemKeys.EMPTY_CHATS) {
@@ -106,8 +114,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                                 state.connection != ConnectionState.ONLINE && sessions.isEmpty() -> R.string.mobile_history_unavailable
                                 projectId != null -> R.string.mobile_no_project_body
                                 else -> R.string.mobile_home_empty_body
-                            }), modifier = Modifier.fillMaxWidth().padding(top = 32.dp),
-                            action = if (query.isNotBlank()) { { TextButton(onClick = { onQuery("") }) { Text(stringResource(R.string.mobile_clear_search)) } } } else null)
+                            }), modifier = Modifier.fillMaxWidth().padding(top = 32.dp))
                     }
                     groups.forEach { group ->
                         item(key = LazyItemKeys.section(group.section.name)) {
@@ -123,8 +130,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                             SessionRow(session, workspaceName(state, session.workspaceId),
                                 timestamp = sessionTimestamp(session.updatedAt, group.section, now, locale = locale),
                                 readOnly = !session.canExecute || state.workspaces.none { it.id == session.workspaceId && it.canExecute },
-                                enabled = !state.busy && !interactionBlocked && (state.connection == ConnectionState.ONLINE ||
-                                    (state.connection in listOf(ConnectionState.OFFLINE, ConnectionState.DISCONNECTED) && state.snapshot?.session?.id == session.id)),
+                                enabled = !interactionBlocked && state.connection in listOf(ConnectionState.ONLINE, ConnectionState.SYNCING, ConnectionState.OFFLINE),
                                 onClick = { onSelect(session.id) })
                         }
                     }
@@ -148,9 +154,12 @@ private fun HomeTitle(state: MobileState, onConnection: () -> Unit) {
             liveRegion = LiveRegionMode.Polite
         }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Text(stringResource(R.string.mobile_brand), style = MaterialTheme.typography.titleMedium)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusDot(connectionColor(state.connection), pulse = state.connection in listOf(ConnectionState.CONNECTING, ConnectionState.SYNCING))
-            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // Off-line the issue strip below writes the label; the header keeps only the dot (label stays for TalkBack).
+        val online = state.connection == ConnectionState.ONLINE
+        Row(Modifier.heightIn(min = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatusDot(connectionColor(state.connection), if (online) Modifier else Modifier.semantics { contentDescription = label },
+                pulse = state.connection in listOf(ConnectionState.CONNECTING, ConnectionState.SYNCING))
+            if (online) Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -159,13 +168,19 @@ private fun HomeTitle(state: MobileState, onConnection: () -> Unit) {
 private fun SearchField(query: String, onQuery: (String) -> Unit) {
     TextField(value = query, onValueChange = onQuery, singleLine = true,
         placeholder = { Text(stringResource(R.string.mobile_search_chats)) },
-        leadingIcon = { Icon(MobileIcons.Search, null, Modifier.size(20.dp)) },
-        trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { onQuery("") }) { Icon(MobileIcons.Close, stringResource(R.string.mobile_clear_search), Modifier.size(20.dp)) } },
+        leadingIcon = { Icon(MobileIcons.Search, null, Modifier.size(IconSize.Row)) },
+        trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { onQuery("") }) { Icon(MobileIcons.Close, stringResource(R.string.mobile_clear_search), Modifier.size(IconSize.Row)) } },
         shape = CircleShape, colors = TextFieldDefaults.colors(
             unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer, focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
             unfocusedIndicatorColor = Color.Transparent, focusedIndicatorColor = Color.Transparent,
             unfocusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant, focusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("chat_search"))
+}
+
+internal fun sessionWorkLabel(session: SessionSummary, main: String, subagents: String, count: String): String? = when {
+    session.running -> main + if (session.runningSubagents > 0) " · $count" else ""
+    session.runningSubagents > 0 -> subagents
+    else -> null
 }
 
 /** Text tab with an underline; selection semantics stay native for TalkBack and tests. */
@@ -185,13 +200,17 @@ private fun ProjectTab(label: String, selected: Boolean, tag: String, onClick: (
 @Composable
 private fun SessionRow(session: SessionSummary, project: String, timestamp: String, readOnly: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val details = listOfNotNull(project, if (session.running) stringResource(R.string.mobile_working) else null,
+    val work = sessionWorkLabel(session, stringResource(R.string.mobile_working),
+        stringResource(R.string.mobile_subagents_working, session.runningSubagents), stringResource(R.string.mobile_subagents_count, session.runningSubagents))
+    val details = listOfNotNull(project, work,
         if (readOnly) stringResource(R.string.mobile_read_only) else null).joinToString(" · ")
     Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).clickable(enabled = enabled, onClick = onClick)
         .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 12.dp).testTag("session_${session.id}"),
-        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.Top) {
-        Box(Modifier.padding(top = 3.dp).size(16.dp), contentAlignment = Alignment.Center) {
-            if (session.running) Spinner(size = 15.dp) else IdleRing()
+        horizontalArrangement = Arrangement.spacedBy(Spacing.M), verticalAlignment = Alignment.Top) {
+        // One fixed cell, centred on the first title line (22sp line height × font scale), so running and idle rows share a left edge.
+        val titleLine = with(LocalDensity.current) { MaterialTheme.typography.titleMedium.lineHeight.toDp() }
+        Box(Modifier.size(ControlSize.StatusCell, maxOf(ControlSize.StatusCell, titleLine)), contentAlignment = Alignment.Center) {
+            if (session.running || session.runningSubagents > 0) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else IdleRing()
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -216,7 +235,7 @@ private fun NewTaskBar(enabled: Boolean, onNewChat: () -> Unit) {
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(28.dp))
             .clip(RoundedCornerShape(28.dp))
             .clickable(enabled = enabled, onClick = onNewChat)
-            .padding(start = 20.dp, end = 6.dp)
+            .padding(start = Spacing.Gutter, end = Spacing.S)
             .testTag("new_chat").semantics(mergeDescendants = true) {
                 role = Role.Button
                 contentDescription = label
@@ -224,9 +243,9 @@ private fun NewTaskBar(enabled: Boolean, onNewChat: () -> Unit) {
             }, verticalAlignment = Alignment.CenterVertically) {
             Text(stringResource(R.string.mobile_new_task_hint), Modifier.weight(1f).padding(end = 12.dp), style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Box(Modifier.size(44.dp).background(if (enabled) accents.action else MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape),
+            Box(Modifier.size(ControlSize.RoundAction).background(if (enabled) accents.action else MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape),
                 contentAlignment = Alignment.Center) {
-                Icon(MobileIcons.Plus, null, Modifier.size(22.dp), tint = if (enabled) accents.onAction else MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(MobileIcons.Plus, null, Modifier.size(IconSize.Action), tint = if (enabled) accents.onAction else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

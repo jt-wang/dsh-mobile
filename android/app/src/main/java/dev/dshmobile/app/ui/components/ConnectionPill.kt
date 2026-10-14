@@ -18,7 +18,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.dshmobile.app.R
 import dev.dshmobile.app.model.*
+import dev.dshmobile.app.ui.theme.ControlSize
 import dev.dshmobile.app.ui.theme.LocalMobileColors
+import dev.dshmobile.app.ui.theme.Spacing
 
 @Composable
 internal fun connectionLabel(connection: ConnectionState): String = stringResource(when (connection) {
@@ -36,7 +38,7 @@ internal fun connectionLabel(connection: ConnectionState): String = stringResour
 internal fun connectionColor(connection: ConnectionState): Color = when (connection) {
     ConnectionState.ONLINE -> LocalMobileColors.current.success
     ConnectionState.REVOKED, ConnectionState.INCOMPATIBLE -> MaterialTheme.colorScheme.error
-    ConnectionState.OFFLINE, ConnectionState.DISCONNECTED -> LocalMobileColors.current.warning
+    ConnectionState.OFFLINE, ConnectionState.DISCONNECTED -> LocalMobileColors.current.warningIndicator
     else -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
@@ -96,20 +98,30 @@ internal fun ConnectionDetails(state: MobileState, onDismiss: () -> Unit, onRefr
     }
 }
 
-/** Appears only for a connection issue; online takes no timeline height. */
+/**
+ * Appears only for a connection issue; online takes no timeline height. While it shows, it is the only
+ * place the connection label is written: headers keep just the dot. [detail] is an optional second
+ * line (for example, why the chat shows an older state).
+ */
 @Composable
-internal fun ConnectionIssueStrip(state: MobileState, onRefresh: () -> Unit) {
+internal fun ConnectionIssueStrip(state: MobileState, onRefresh: () -> Unit, detail: String? = null) {
     if (state.connection == ConnectionState.ONLINE) return
+    val label = connectionLabel(state.connection)
     Column {
-        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 20.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
+        Row(Modifier.fillMaxWidth().heightIn(min = ControlSize.TouchTarget).padding(start = Spacing.Gutter, end = Spacing.S), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             StatusDot(connectionColor(state.connection), pulse = state.connection in listOf(ConnectionState.CONNECTING, ConnectionState.SYNCING))
-            Text(connectionLabel(state.connection), Modifier.weight(1f).padding(vertical = 10.dp), style = MaterialTheme.typography.labelMedium,
+            Text(label, Modifier.weight(1f).padding(vertical = 10.dp), style = MaterialTheme.typography.labelMedium,
                 color = if (state.connection in listOf(ConnectionState.REVOKED, ConnectionState.INCOMPATIBLE)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
             if (state.connection in listOf(ConnectionState.OFFLINE, ConnectionState.DISCONNECTED)) {
                 TextButton(onClick = onRefresh, enabled = !state.busy, modifier = Modifier.testTag("reconnect"),
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text(stringResource(R.string.mobile_retry)) }
             }
+        }
+        // Second row aligns with the label, past the 8dp dot and its 10dp gap.
+        detail?.takeIf { it != label }?.let {
+            Text(it, Modifier.padding(start = Spacing.Gutter + 18.dp, end = Spacing.Gutter, bottom = 10.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     }

@@ -24,7 +24,7 @@ export function officialLoader(runtimeRoot) {
   const require = createRequire(path.join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'));
   const evidence = [];
   let installedVersion;
-  const allowed = new Set(['cordis', 'cordis-plugin-loader', 'cordis-plugin-include', 'dsh-app-boot', 'dsh-agent-preset-registry', 'dsh-agent-preset', 'dsh-api-workspace-controller', 'dsh-credentials', ...COMPONENTS.map(([id]) => id), 'dsh-session-persistence-jsonl', 'dsh-storage-json', 'dsh-fs-local', 'dsh-attachment-local']);
+  const allowed = new Set(['cordis', 'cordis-plugin-loader', 'cordis-plugin-include', 'dsh-app-boot', 'dsh-agent-preset-registry', 'dsh-agent-preset', 'dsh-api-workspace-controller', 'dsh-credentials', 'dsh-subagent', 'dsh-subagent-fork-in-process', 'dsh-subagent-spawn-in-process', ...COMPONENTS.map(([id]) => id), 'dsh-session-persistence-jsonl', 'dsh-storage-json', 'dsh-fs-local', 'dsh-attachment-local']);
   return {
     evidence,
     get installedVersion() { return installedVersion; },
@@ -47,7 +47,7 @@ export function officialLoader(runtimeRoot) {
 }
 
 /** Real official registries, factory/loop, query, projection, persistence and controller. */
-export async function composeRuntime(loader, directories) {
+export async function composeRuntime(loader, directories, { compression = 'none' } = {}) {
   const { Context } = await loader.load('cordis');
   const { CredentialProvider } = await loader.load('dsh-credentials');
   const { LlmAdapter } = await loader.load('dsh-llm');
@@ -59,7 +59,7 @@ export async function composeRuntime(loader, directories) {
     ctx.plugin(ephemeralBrowserCredentials(CredentialProvider));
     for (const [id, config] of [
       ...COMPONENTS,
-      ['dsh-session-persistence-jsonl', { root: directories.sessions, compression: 'none' }],
+      ['dsh-session-persistence-jsonl', { root: directories.sessions, compression }],
       ['dsh-storage-json', { root: directories.storages }],
       ['dsh-fs-local', { cwd: directories.workspace }],
       ['dsh-attachment-local', { dshHome: directories.home }],

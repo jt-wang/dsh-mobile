@@ -13,6 +13,7 @@ data class Preset(val id: String, val name: String)
 data class SessionSummary(
     val id: String, val title: String, val workspaceId: String, val updatedAt: Long,
     val running: Boolean, val canExecute: Boolean,
+    @Serializable(with = RunningSubagentsSerializer::class) val runningSubagents: Int = 0,
 )
 @Serializable
 data class ChatMessage(
@@ -25,6 +26,7 @@ data class SessionSnapshot(
     val session: SessionSummary, val messages: List<ChatMessage>, val cursor: Long,
     val hasMore: Boolean, val activity: String, val notice: String? = null,
     val activityDetail: ActivityDetail? = null,
+    @Serializable(with = RunningSubagentsSerializer::class) val runningSubagents: Int = 0,
 )
 @Serializable
 data class ActivityDetail(val turnStartedAt: Long? = null, val tool: String? = null)

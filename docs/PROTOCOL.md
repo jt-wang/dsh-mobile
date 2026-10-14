@@ -44,6 +44,7 @@ All other routes require `Authorization: Bearer <deviceToken>`. Device revoke is
 type Session = {
   id: string; title: string; workspaceId: string; updatedAt: number;
   running: boolean; canExecute: boolean;
+  runningSubagents?: number; // integer >= 0; running delegated descendants
 };
 type Message = {
   id: string; role: 'user'|'assistant'|'system'; text: string;
@@ -57,12 +58,19 @@ type Snapshot = {
   cursor: number; // safe integer >= -1; -1 is the exact DSH empty-journal sentinel
   hasMore: boolean;
   activity: 'idle'|'running'|'waiting'|'unknown';
+  runningSubagents?: number; // integer >= 0; same as session.runningSubagents
   notice?: string;
   activityDetail?: { turnStartedAt: number; tool?: string };
 };
 ```
 
 History must respect DSH surface replacements; do not expose discarded intermediate assistant attempts as final answers. Replacement endpoints refer to current surface order, not numeric sequence ranges. If a bounded history cut lacks an endpoint and the surface cannot be proven, fail closed with activity `unknown`, an empty message surface and a desktop notice rather than retain potentially discarded answers. Some compacted/replaced histories may therefore require the desktop until full history reconstruction/paging is implemented. Hidden/tool/unknown event types are not dumped as raw JSON. Known-but-not-yet-supported question/approval states must show a neutral notice to return to the desktop, not silently present an idle task.
+
+### Running subagents (additive v1 extension, host plugin 0.6.0)
+
+`runningSubagents` is an optional integer >= 0 on each `Session` in `GET /sessions`, on `snapshot.runningSubagents` and on `snapshot.session.runningSubagents` in GET/SSE snapshots. Values are the same for the same session state. It counts running delegated descendant sessions created by subagent tools with origin `subagent`, including nested descendants; an ordinary independent fork is not counted. Use 0 or omit the field when none are running. A host composition without live services may omit it. Clients must treat an absent or invalid value as 0.
+
+Main-turn status, `Session.running`, `Snapshot.activity` and cancellation semantics are unchanged. Subagent sessions remain hidden from the list. App 0.7.0 can show the count even after the main turn ends; Stop still targets only the main turn. App 0.6.1 ignores the field. This is an additive API v1 extension, not a protocol version change.
 
 ### Quiet transcript projection (additive v1 extension)
 

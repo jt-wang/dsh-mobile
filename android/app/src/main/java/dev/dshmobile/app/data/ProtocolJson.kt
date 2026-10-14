@@ -50,7 +50,7 @@ internal fun validId(id: String): Boolean = id.isNotBlank() && id.length <= 512 
 internal fun validRequestId(id: String): Boolean = runCatching { UUID.fromString(id).toString() == id.lowercase() }.getOrDefault(false)
 internal fun SessionSummary.checked(): SessionSummary {
     if (!validId(id) || !validId(workspaceId) || updatedAt < 0 || title.length > 4096) throw MobileFailure("invalid_response")
-    return this
+    return if (runningSubagents < 0) copy(runningSubagents = 0) else this
 }
 internal fun SessionSnapshot.checked(expectedId: String): SessionSnapshot {
     session.checked()
@@ -63,7 +63,9 @@ internal fun SessionSnapshot.checked(expectedId: String): SessionSnapshot {
     val unknown = activity !in setOf("idle", "running", "waiting", "unknown") ||
         messages.any { it.role !in setOf("user", "assistant", "system") }
     return copy(
-        session = if (unknown) session.copy(canExecute = false) else session,
+        session = session.checked().copy(canExecute = session.canExecute && !unknown,
+            runningSubagents = maxOf(session.runningSubagents.coerceAtLeast(0), runningSubagents.coerceAtLeast(0))),
+        runningSubagents = maxOf(session.runningSubagents.coerceAtLeast(0), runningSubagents.coerceAtLeast(0)),
         messages = messages.map { if (it.role in setOf("user", "assistant", "system")) it else it.copy(role = "system", text = "") },
         activity = if (unknown) "unknown" else activity,
         notice = if (unknown) "unsupported" else notice,

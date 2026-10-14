@@ -63,6 +63,11 @@ try {
     mark('controller-create-prompt-follow-reconnect-cancel');
     const direct = await controllerChecks(runtime, directories.workspace);
     receipt.phases.push(direct);
+    if (!options.controllerOnly) {
+      mark('real-fork-spawn-nested-subagent-counts');
+      const { subagentChecks } = await import('./subagent-checks.mjs');
+      receipt.phases.push(await subagentChecks(runtime, loader, projectRoot, directories.workspace));
+    }
     receipt.controllerCalls = runtime.deterministic.calls;
     mark('dispose-first-runtime');
     await runtime.dispose(); runtime = undefined;

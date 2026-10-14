@@ -1,5 +1,6 @@
 package dev.dshmobile.app.ui.chat
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -20,7 +21,10 @@ import dev.dshmobile.app.model.*
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.MobileViewModel
 import dev.dshmobile.app.ui.components.*
+import dev.dshmobile.app.ui.theme.ControlSize
+import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.theme.LocalMobileColors
+import dev.dshmobile.app.ui.theme.Spacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -48,7 +52,7 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
     val header = snapshot?.session ?: state.sessions.firstOrNull { it.id == requestedSession }
     Scaffold(containerColor = MaterialTheme.colorScheme.background, snackbarHost = { SnackbarHost(snackbars) },
         topBar = { CenterAlignedTopAppBar(navigationIcon = {
-            IconButton(onClick = onBack, modifier = Modifier.testTag("chat_drawer")) { Icon(MobileIcons.ChevronLeft, stringResource(R.string.mobile_chats)) }
+            IconButton(onClick = onBack, modifier = Modifier.testTag("chat_drawer")) { Icon(MobileIcons.ChevronLeft, stringResource(R.string.mobile_chats), Modifier.size(IconSize.Action)) }
         }, title = {
             // The title block doubles as the connection affordance; acceptance waits on its state on every screen.
             // One tap target opens connection details; the title stays its own heading node and the
@@ -62,21 +66,24 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
                     stateDescription = state.connection.name
                     liveRegion = LiveRegionMode.Polite
                 }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (state.connection != ConnectionState.ONLINE) StatusDot(connectionColor(state.connection))
-                    Text(if (state.connection != ConnectionState.ONLINE) connectionLabel(state.connection)
-                        else header?.let { workspaceName(state, it.workspaceId) } ?: state.hostName, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    // Off-line the issue strip writes the label; the subtitle keeps the project and adds only the dot.
+                    if (state.connection != ConnectionState.ONLINE) {
+                        val label = connectionLabel(state.connection)
+                        StatusDot(connectionColor(state.connection), Modifier.semantics { contentDescription = label })
+                    }
+                    Text(header?.let { workspaceName(state, it.workspaceId) } ?: state.hostName, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }, actions = {
             Box {
                 var more by remember { mutableStateOf(false) }
-                IconButton(onClick = { more = true }, modifier = Modifier.testTag("chat_more")) { Icon(MobileIcons.More, stringResource(R.string.mobile_more_actions)) }
+                IconButton(onClick = { more = true }, modifier = Modifier.testTag("chat_more")) { Icon(MobileIcons.More, stringResource(R.string.mobile_more_actions), Modifier.size(IconSize.Action)) }
                 DropdownMenu(expanded = more, onDismissRequest = { more = false }, containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                    DropdownMenuItem(text = { Text(stringResource(R.string.mobile_search_history)) }, leadingIcon = { Icon(MobileIcons.Search, null, Modifier.size(20.dp)) },
+                    DropdownMenuItem(text = { Text(stringResource(R.string.mobile_search_history)) }, leadingIcon = { Icon(MobileIcons.Search, null, Modifier.size(IconSize.Row)) },
                         enabled = snapshot != null, modifier = Modifier.testTag("search_history"),
                         onClick = { more = false; searching = !searching; if (!searching) query = "" })
-                    DropdownMenuItem(text = { Text(stringResource(R.string.mobile_refresh)) }, leadingIcon = { Icon(MobileIcons.Refresh, null, Modifier.size(20.dp)) },
+                    DropdownMenuItem(text = { Text(stringResource(R.string.mobile_refresh)) }, leadingIcon = { Icon(MobileIcons.Refresh, null, Modifier.size(IconSize.Row)) },
                         enabled = !state.busy, modifier = Modifier.testTag("refresh_chat"), onClick = { more = false; refreshChat() })
 
                 }
@@ -85,7 +92,7 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
             scrolledContainerColor = MaterialTheme.colorScheme.background)) },
         bottomBar = {
             Column {
-                snapshot?.takeIf { it.activity in listOf("running", "waiting") }?.let { ActivityRow(it) }
+                snapshot?.takeIf { it.activity in listOf("running", "waiting") || (it.activity == "idle" && it.session.runningSubagents > 0) }?.let { ActivityRow(it) }
                 Composer(visibleState, model, onCancel = { cancel = true })
             }
         }) { padding ->
@@ -94,12 +101,18 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
                 onPrevious = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, -1) },
                 onNext = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, 1) },
                 onClose = { searching = false; query = "" })
-            ConnectionIssueStrip(state, refreshChat)
-            if (state.connection == ConnectionState.ONLINE) state.error?.let { ErrorText(it, Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
-            if (state.demo) Text(stringResource(R.string.mobile_demo_tag), Modifier.padding(horizontal = 20.dp, vertical = 4.dp).testTag("demo_label"),
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (snapshot != null && state.snapshotStale) Text(stringResource(if (state.busy || model.interactionBlocked) R.string.mobile_short_syncing else R.string.mobile_stale_state),
-                Modifier.padding(horizontal = 20.dp, vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            val staleText = if (snapshot != null && state.snapshotStale)
+                stringResource(if (state.busy || model.interactionBlocked) R.string.mobile_short_syncing else R.string.mobile_stale_state) else null
+            // Off-line, the stale-state explanation is the strip's second row instead of a separate third line.
+            ConnectionIssueStrip(state, refreshChat, detail = staleText)
+            if (state.connection == ConnectionState.ONLINE) state.error?.let { ErrorText(it, Modifier.padding(horizontal = Spacing.Gutter, vertical = Spacing.S)) }
+            if (state.demo) {
+                // Opaque band with a hairline: the timeline scrolls under an edge, not under floating text.
+                Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(horizontal = Spacing.Gutter, vertical = 6.dp)) { DemoBadge() }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            if (staleText != null && state.connection == ConnectionState.ONLINE) Text(staleText,
+                Modifier.padding(horizontal = Spacing.Gutter, vertical = Spacing.XS).semantics { liveRegion = LiveRegionMode.Polite },
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             snapshot?.let {
                 if (model.taskNotSentIn(it.session.id, model.editorDraft)) Text(stringResource(R.string.mobile_task_not_sent), Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
@@ -137,8 +150,9 @@ private fun ActivityRow(snapshot: SessionSnapshot) {
     Row(Modifier.fillMaxWidth().heightIn(min = 36.dp).padding(horizontal = 24.dp).testTag("activity_row").semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
         run {
-            if (snapshot.activity == "running") Spinner(size = 14.dp) else StatusDot(LocalMobileColors.current.warning)
+            if (snapshot.activity == "running" || (snapshot.activity == "idle" && snapshot.session.runningSubagents > 0)) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else StatusDot(LocalMobileColors.current.warningIndicator)
             Text(when {
+                snapshot.activity == "idle" && snapshot.session.runningSubagents > 0 -> stringResource(R.string.mobile_subagents_activity, snapshot.session.runningSubagents)
                 snapshot.activity == "waiting" -> stringResource(R.string.mobile_waiting_desktop)
                 snapshot.activityDetail == null -> when (elapsed) {
                     null -> stringResource(R.string.mobile_agent_working)

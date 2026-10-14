@@ -15,6 +15,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.semantics.Role
 import dev.dshmobile.app.ui.MobileIcons
+import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.components.shortTime
 import dev.dshmobile.app.ui.theme.MonoFamily
 import dev.dshmobile.app.ui.theme.tabular
@@ -42,9 +43,9 @@ internal fun AgentActivityGroup(group: ChatItem.Activity, onCopy: (String) -> Un
         Row(Modifier.clip(MaterialTheme.shapes.small).clickable(role = Role.Button) { expanded = !expanded }
             .heightIn(min = 48.dp).padding(end = 8.dp).testTag("agent_activity_expander").semantics(mergeDescendants = true) { stateDescription = disclosure },
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(MobileIcons.Terminal, null, Modifier.size(16.dp), tint = muted)
+            Icon(MobileIcons.Terminal, null, Modifier.size(IconSize.Meta), tint = muted)
             Text(label, style = MaterialTheme.typography.labelLarge, color = muted)
-            Icon(MobileIcons.ChevronRight, null, Modifier.size(16.dp).rotate(rotation), tint = muted)
+            Icon(MobileIcons.ChevronRight, null, Modifier.size(IconSize.Meta).rotate(rotation), tint = muted)
         }
         if (expanded) {
             val rail = MaterialTheme.colorScheme.outlineVariant

@@ -28,12 +28,14 @@ object MobileIcons {
         moveTo(18f, 10f); curveTo(18f, 14.4f, 14.4f, 18f, 10f, 18f); curveTo(5.6f, 18f, 2f, 14.4f, 2f, 10f)
         curveTo(2f, 5.6f, 5.6f, 2f, 10f, 2f); curveTo(14.4f, 2f, 18f, 5.6f, 18f, 10f); close()
     }
+    // Symmetric six-tooth gear with open gaps and a 3-unit hub: same optical weight as Search at the same size.
     val Settings = outline("Settings") {
-        moveTo(9f, 3f); lineTo(15f, 3f); lineTo(16f, 6f); lineTo(19f, 7f); lineTo(21f, 11f)
-        lineTo(19f, 14f); lineTo(18f, 18f); lineTo(14f, 19f); lineTo(12f, 21f); lineTo(9f, 19f)
-        lineTo(5f, 18f); lineTo(4f, 14f); lineTo(2f, 11f); lineTo(4f, 7f); lineTo(8f, 6f); close()
-        moveTo(16f, 12f); curveTo(16f, 14.2f, 14.2f, 16f, 12f, 16f); curveTo(9.8f, 16f, 8f, 14.2f, 8f, 12f)
-        curveTo(8f, 9.8f, 9.8f, 8f, 12f, 8f); curveTo(14.2f, 8f, 16f, 9.8f, 16f, 12f); close()
+        moveTo(9.57f, 5.86f); lineTo(10.04f, 3.22f); lineTo(13.96f, 3.22f); lineTo(14.43f, 5.86f); lineTo(16.10f, 6.83f); lineTo(18.62f, 5.91f)
+        lineTo(20.59f, 9.31f); lineTo(18.53f, 11.04f); lineTo(18.53f, 12.96f); lineTo(20.59f, 14.69f); lineTo(18.62f, 18.09f); lineTo(16.10f, 17.17f)
+        lineTo(14.43f, 18.14f); lineTo(13.96f, 20.78f); lineTo(10.04f, 20.78f); lineTo(9.57f, 18.14f); lineTo(7.90f, 17.17f); lineTo(5.38f, 18.09f)
+        lineTo(3.41f, 14.69f); lineTo(5.47f, 12.96f); lineTo(5.47f, 11.04f); lineTo(3.41f, 9.31f); lineTo(5.38f, 5.91f); lineTo(7.90f, 6.83f); close()
+        moveTo(15f, 12f); curveTo(15f, 13.66f, 13.66f, 15f, 12f, 15f); curveTo(10.34f, 15f, 9f, 13.66f, 9f, 12f)
+        curveTo(9f, 10.34f, 10.34f, 9f, 12f, 9f); curveTo(13.66f, 9f, 15f, 10.34f, 15f, 12f); close()
     }
     val Chat = outline("Chat") {
         moveTo(5f, 3f); lineTo(19f, 3f); curveTo(20.1f, 3f, 21f, 3.9f, 21f, 5f); lineTo(21f, 16f)

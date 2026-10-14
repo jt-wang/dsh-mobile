@@ -16,6 +16,10 @@ const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const MAX_HISTORY_CACHE_ENTRIES = 16;
 const MAX_HISTORY_CACHE_BYTES = 32 * 1024 * 1024;
 const MAX_HISTORY_WAITERS = 64;
+type OpeningWaiter = (frame?: Record<string, unknown>, error?: { reason: unknown }) => void;
+interface OpeningFlight { controller: AbortController; waiters: Set<OpeningWaiter> }
+// Only in-flight immutable opening frames are shared, not grants, cwd bindings,
+// mutable Transcript folds, or a completed snapshot across later requests.
 type HistoryWaiter = (error?: { reason: unknown }) => void;
 interface HistoryFlight { controller: AbortController; waiters: Set<HistoryWaiter>; view: readonly WorkspaceConfig[] }
 interface HistoryCacheEntry {
@@ -69,6 +73,17 @@ export interface DshAdapterOptions {
   /** Filesystem seam for deterministic authorization tests. */
   realpath?: (cwd: string) => Promise<string>;
   events?: DshEvents;
+  /** Inspected synchronous live Session/Agent state. The opening header owns
+   * scope/title; this seam avoids a whole corpus listing for point reads.
+   * Compositions without live status keep the controller-list fallback.
+   */
+  sessionStatus?: (sessionId: string) => { running: boolean; updatedAt: number };
+  /** Inspected SessionPersistence.stat header-only read (live Session preferred).
+   * Used only to decide scope when a point opening fails before its first frame.
+   */
+  sessionHeader?: (sessionId: string, signal: AbortSignal) => Promise<unknown>;
+  /** Synchronous live-only descendant reduction; no persisted catalog traversal. */
+  runningSubagentCounts?: () => ReadonlyMap<string, number>;
   pollIntervalMs?: number;
   throttleMs?: number;
 }
@@ -346,7 +361,7 @@ class Transcript {
     const waiting = this.approvals.size > 0 || this.questions.size > 0 || this.projectedQuestions;
     const knownActivity = !this.unsupported && !this.gap && (!this.historyCut || this.activityEstablished);
     return {
-      session: { ...this.session, running: this.running }, messages: messages.slice(-MAX_MESSAGES), cursor: this.cursor,
+      session: { ...this.session, running: this.running }, ...(this.session.runningSubagents !== undefined ? { runningSubagents: this.session.runningSubagents } : {}), messages: messages.slice(-MAX_MESSAGES), cursor: this.cursor,
       hasMore: this.hasMore || messages.length > MAX_MESSAGES,
       activity: !knownActivity ? 'unknown' : waiting ? 'waiting' : this.running ? 'running' : 'idle',
       ...(knownActivity && this.running && this.turn ? { activityDetail: { turnStartedAt: this.turn.startedAt, ...([...this.calls.values()].at(-1) ? { tool: [...this.calls.values()].at(-1)! } : {}) } } : {}),
@@ -383,6 +398,7 @@ export class DshAdapter implements HostAdapter {
   private historyBytes = 0;
   private historyScope = '';
   private readonly historyFlights = new Map<string, HistoryFlight>();
+  private readonly openingFlights = new Map<string, OpeningFlight>();
   private readonly disposeHistory: (() => void) | undefined;
   private readonly evidenceScopes = new WeakMap<NotificationEvidence, { view: readonly WorkspaceConfig[]; revision: number }>();
   private evidenceRevision = 0;
@@ -402,7 +418,7 @@ export class DshAdapter implements HostAdapter {
   }
   constructor(options: DshAdapterOptions, source: WorkspaceSource) {
     this.options = options; this.source = source; this.upstreamVersion = options.dshVersion;
-    this.disposeHistory = options.events?.subscribeDisposed?.(id => { this.evidenceRevision++; this.evictHistory(id); const flight = this.historyFlights.get(id); if (flight) this.detachHistory(id, flight); });
+    this.disposeHistory = options.events?.subscribeDisposed?.(id => { this.evidenceRevision++; this.evictHistory(id); const flight = this.historyFlights.get(id); if (flight) this.detachHistory(id, flight); const opening = this.openingFlights.get(id); if (opening) this.detachOpening(id, opening); });
   }
   notifications(): NotificationSources | undefined {
     const subscribe = this.options.events?.subscribeNotifications;
@@ -418,6 +434,7 @@ export class DshAdapter implements HostAdapter {
   dispose(): void {
     this.lifetime.abort(); this.disposeHistory?.();
     for (const [id, flight] of this.historyFlights) this.detachHistory(id, flight);
+    for (const [id, flight] of this.openingFlights) this.detachOpening(id, flight);
     this.history.clear(); this.historyBytes = 0;
   }
   private signal(signal: AbortSignal): AbortSignal { return AbortSignal.any([signal, this.lifetime.signal]); }
@@ -496,43 +513,120 @@ export class DshAdapter implements HostAdapter {
     const visible = new Set(sessions.map(session => session.id));
     for (const id of this.history.keys()) if (!visible.has(id)) this.evictHistory(id);
     for (const [id, flight] of this.historyFlights) if (!visible.has(id)) this.detachHistory(id, flight);
+    const counts = this.options.runningSubagentCounts?.();
+    if (counts) for (const session of sessions) session.runningSubagents = counts.get(session.id) ?? 0;
     return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+  async sessionScope(sessionId: string, signal: AbortSignal): Promise<string> {
+    const active = this.signal(signal); active.throwIfAborted();
+    if (this.source.archivedSessionIds().has(sessionId)) throw new HostError('not_found');
+    // Legacy controller-only compositions retain their original list authority;
+    // the installed plugin supplies a fresh point stat, never a catalog scan.
+    if (!this.options.sessionHeader) return (await this.permitted(sessionId, active)).session.workspaceId;
+    const header = object(await this.options.sessionHeader(sessionId, active));
+    active.throwIfAborted();
+    if (!header || header.id !== sessionId || header.origin === 'subagent') throw new HostError('not_found');
+    const { workspaces, view } = await this.workspaceMap();
+    const workspace = await this.workspace(header.cwd, workspaces);
+    active.throwIfAborted(); this.checkCurrent(view, sessionId);
+    if (!workspace) throw new HostError('not_found');
+    return workspace.id;
   }
   async snapshot(sessionId: string, signal: AbortSignal): Promise<HostSnapshot> {
     const { transcript, view } = await this.open(sessionId, this.signal(signal));
     this.checkCurrent(view, sessionId);
     return transcript.snapshot();
   }
-  private async open(sessionId: string, active: AbortSignal, expectedWorkspaceId?: string, listed?: HostSession): Promise<{ transcript: Transcript; view: readonly WorkspaceConfig[] }> {
-    const session = listed ?? (await this.permitted(sessionId, active, expectedWorkspaceId)).session;
+  private detachOpening(id: string, flight: OpeningFlight): void {
+    if (this.openingFlights.get(id) === flight) this.openingFlights.delete(id);
+    flight.controller.abort();
+    for (const waiter of [...flight.waiters]) waiter(undefined, { reason: flight.controller.signal.reason });
+  }
+  private async readOpening(sessionId: string, active: AbortSignal, admit?: (frame: Record<string, unknown>) => Promise<void>): Promise<Record<string, unknown>> {
     const cleanup = new AbortController();
     const readSignal = AbortSignal.any([active, cleanup.signal]);
     const iterator = this.options.sessionController.follow({ address: { kind: 'session', sessionId }, assistantStream: true, maxMessages: MAX_MESSAGES }, readSignal)[Symbol.asyncIterator]();
-    let transcript: Transcript | undefined, view: readonly WorkspaceConfig[] | undefined, frame: Record<string, unknown> | undefined;
-    let retentionCut = false;
     try {
-      const first = await iterator.next();
+      const first = await iterator.next(); active.throwIfAborted();
+      const frame = object(first.value);
+      if (first.done || frame?.type !== 'snapshot' || object(frame.header)?.id !== sessionId) throw new HostError('unavailable');
+      await admit?.(frame);
+      return frame;
+    } catch (error) {
+      const remote = object(error);
+      if (remote?.isDSHRemoteError === true && (remote.code === 'session/not-found' ||
+          (remote.code === 'session/agent-busy' && object(remote.details)?.reason === 'use subagent delivery for this child session'))) throw new HostError('not_found');
+      throw error;
+    } finally {
+      // rc.2 promotes only AFTER its first yield: never request a second frame.
+      cleanup.abort(); await iterator.return?.();
+    }
+  }
+  private opening(sessionId: string, active: AbortSignal): Promise<Record<string, unknown>> {
+    active.throwIfAborted();
+    let flight = this.openingFlights.get(sessionId);
+    const fresh = !flight;
+    if (!flight) {
+      if (this.openingFlights.size >= MAX_HISTORY_CACHE_ENTRIES) throw new HostError('unavailable');
+      flight = { controller: new AbortController(), waiters: new Set() };
+      this.openingFlights.set(sessionId, flight);
+    }
+    const owned = flight;
+    if (owned.waiters.size >= MAX_HISTORY_WAITERS) throw new HostError('unavailable');
+    const waiting = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const finish: OpeningWaiter = (frame, error) => {
+        if (!owned.waiters.delete(finish)) return;
+        active.removeEventListener('abort', aborted);
+        if (error) reject(error.reason); else resolve(frame!);
+        if (!owned.waiters.size && this.openingFlights.get(sessionId) === owned) this.detachOpening(sessionId, owned);
+      };
+      const aborted = () => finish(undefined, { reason: active.reason });
+      owned.waiters.add(finish); active.addEventListener('abort', aborted, { once: true });
+    });
+    if (fresh) {
+      const finish = (frame?: Record<string, unknown>, error?: { reason: unknown }) => {
+        if (this.openingFlights.get(sessionId) !== owned) return;
+        this.openingFlights.delete(sessionId);
+        for (const waiter of [...owned.waiters]) waiter(frame, error);
+      };
+      void this.readOpening(sessionId, this.signal(owned.controller.signal)).then(frame => finish(frame), reason => finish(undefined, { reason }));
+    }
+    return waiting;
+  }
+  private async open(sessionId: string, active: AbortSignal, expectedWorkspaceId?: string, listed?: HostSession): Promise<{ transcript: Transcript; view: readonly WorkspaceConfig[] }> {
+    let session = listed ?? (!this.options.sessionStatus || expectedWorkspaceId !== undefined ? (await this.permitted(sessionId, active, expectedWorkspaceId)).session : undefined);
+    // Mutations and legacy controller-only compositions keep their original
+    // admission/cleanup ordering. Coalesced openings carry no scope bindings.
+    let transcript: Transcript | undefined, view: readonly WorkspaceConfig[] | undefined;
+    let retentionCut = false;
+    const admit = async (frame: Record<string, unknown>) => {
       active.throwIfAborted();
-      frame = object(first.value);
-      const header = object(frame?.header);
-      if (first.done || frame?.type !== 'snapshot' || header?.id !== sessionId || header.origin === 'subagent') throw new HostError('unavailable');
+      const header = object(frame.header)!;
+      if (header.origin === 'subagent') throw new HostError('not_found');
+      if (!session) {
+        const status = this.options.sessionStatus!(sessionId);
+        if (typeof status.running !== 'boolean' || !Number.isSafeInteger(status.updatedAt) || status.updatedAt < 0 || !Number.isSafeInteger(header.createdAt) || (header.createdAt as number) < 0) throw new HostError('unavailable');
+        session = { id: sessionId, title: 'Untitled session', workspaceId: '', running: status.running, updatedAt: Math.max(header.createdAt as number, status.updatedAt) };
+      }
       const scope = await this.workspaceMap(); view = scope.view;
       const workspace = await this.workspace(header.cwd, scope.workspaces);
       this.checkCurrent(view, sessionId);
-      if (!workspace || workspace.id !== session.workspaceId) { this.evictHistory(sessionId); throw new HostError('not_found'); }
+      if (!workspace || (session.workspaceId && workspace.id !== session.workspaceId)) { this.evictHistory(sessionId); throw new HostError('not_found'); }
+      const counts = this.options.runningSubagentCounts?.();
+      session = { ...session, workspaceId: workspace.id, ...(counts ? { runningSubagents: counts.get(sessionId) ?? 0 } : {}) };
+      const metadata = object(object(object(frame.projections)?.values)?.sessionListMetadata);
+      if (typeof metadata?.lastPromptAt === 'number') session.updatedAt = Math.max(session.updatedAt, metadata.lastPromptAt);
       if (!Array.isArray(frame.records)) throw new HostError('unavailable');
       retentionCut = Buffer.byteLength(JSON.stringify(frame), 'utf8') > MAX_HISTORY_BYTES;
       if (retentionCut) this.evictHistory(sessionId);
       transcript = new Transcript(session);
       transcript.open(frame, retentionCut); // Oversized input folds control only, never surface text/stream.
-    } finally {
-      // rc.2 promotes a prepared cold session only AFTER the first yield. Never
-      // request a second frame, even when list() previously showed a live Agent.
-      cleanup.abort();
-      await iterator.return?.();
-    }
+    };
+    const shared = expectedWorkspaceId === undefined && this.options.sessionStatus;
+    const frame = await (shared ? this.opening(sessionId, active) : this.readOpening(sessionId, active, admit));
+    if (shared) await admit(frame);
     active.throwIfAborted();
-    if (!transcript || !view || !frame) throw new HostError('unavailable');
+    if (!transcript || !view || !session) throw new HostError('unavailable');
     this.checkCurrent(view, sessionId); // Iterator cleanup itself may yield.
     if (transcript.needsHistory && !retentionCut) transcript = await this.recoverShared(session, frame, view, active);
     active.throwIfAborted(); this.checkCurrent(view, sessionId);
@@ -679,7 +773,7 @@ export class DshAdapter implements HostAdapter {
       while (!active.aborted) {
         const now = Date.now();
         if ((resync && now - lastOpened >= pollMs) || now >= nextPoll) {
-          // List + first opening frame remain cold-safe even if an Agent was
+          // Fresh first opening frame remains cold-safe even if an Agent was
           // detached in between. No second pull or automatic prompt replay.
           transcript = undefined;
           const fresh = await this.open(sessionId, active);

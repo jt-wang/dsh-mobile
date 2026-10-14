@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.dshmobile.app.ui.theme.ControlSize
 import dev.dshmobile.app.ui.theme.LocalMotionEnabled
 
 @Composable
@@ -33,7 +34,7 @@ internal fun StatusDot(color: Color, modifier: Modifier = Modifier, pulse: Boole
 
 /** Rotating arc for work in progress; a static three-quarter arc when system animations are off. */
 @Composable
-internal fun Spinner(modifier: Modifier = Modifier, size: Dp = 16.dp, color: Color = MaterialTheme.colorScheme.onSurface) {
+internal fun Spinner(modifier: Modifier = Modifier, size: Dp = 16.dp, color: Color = MaterialTheme.colorScheme.onSurface, strokeWidth: Dp = 2.dp) {
     val angle = if (LocalMotionEnabled.current) {
         val transition = rememberInfiniteTransition(label = "spinner")
         val value by transition.animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "spinner angle")
@@ -41,7 +42,7 @@ internal fun Spinner(modifier: Modifier = Modifier, size: Dp = 16.dp, color: Col
     } else 0f
     val track = color.copy(alpha = 0.18f)
     Canvas(modifier.size(size)) {
-        val stroke = 2.dp.toPx()
+        val stroke = strokeWidth.toPx()
         val inset = stroke / 2
         val arcSize = Size(this.size.width - stroke, this.size.height - stroke)
         drawArc(track, 0f, 360f, false, Offset(inset, inset), arcSize, style = Stroke(stroke))
@@ -51,6 +52,6 @@ internal fun Spinner(modifier: Modifier = Modifier, size: Dp = 16.dp, color: Col
 
 /** Quiet marker for a chat with no work in progress; it deliberately claims no success or failure. */
 @Composable
-internal fun IdleRing(modifier: Modifier = Modifier, size: Dp = 8.dp) {
-    Box(modifier.size(size).border(1.5.dp, MaterialTheme.colorScheme.outline, CircleShape))
+internal fun IdleRing(modifier: Modifier = Modifier, size: Dp = ControlSize.StatusGlyph, strokeWidth: Dp = ControlSize.StatusStroke) {
+    Box(modifier.size(size).border(strokeWidth, MaterialTheme.colorScheme.outline, CircleShape))
 }

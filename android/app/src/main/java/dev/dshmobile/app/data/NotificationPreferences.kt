@@ -15,5 +15,8 @@ internal suspend fun syncNotificationPreferences(context: Context): Notification
         val remote = api.notificationSettings()
         val settings = api.putNotificationSettings(reconcileNotificationSettings(local.settings, remote, true))
         return store.update { if (it == local) it.copy(settings = settings, dirty = false) else it }
+    } catch (failure: MobileFailure) {
+        if (failure.key in setOf("revoked", "unauthorized", "forbidden")) EncryptedHistoryStore(context).reject(failure.key)
+        throw failure
     } finally { api.close() }
 }

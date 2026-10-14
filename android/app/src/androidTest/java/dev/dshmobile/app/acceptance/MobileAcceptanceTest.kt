@@ -169,9 +169,10 @@ class MobileAcceptanceTest {
         compose.onNodeWithTag("chat_drawer").performClick()
         compose.onNodeWithTag("new_chat").performClick()
         await(hasTestTag("workspace_picker"))
-        compose.onNodeWithTag("workspace_picker").performScrollToNode(hasTestTag("workspace_${config.workspaceId}"))
+        // The project list is part of the sheet's single scroll (no nested list), so scroll the sheet to the row.
+        compose.onNodeWithTag("new_chat_sheet").performScrollToNode(hasTestTag("workspace_${config.workspaceId}"))
         compose.onNodeWithTag("workspace_${config.workspaceId}").performClick()
-        compose.onNodeWithTag("create_chat").assertIsEnabled().performClick()
+        compose.onNodeWithTag("create_chat").performScrollTo().assertIsEnabled().performClick()
         checkpoint = "created-active-title"
         assertExactlyOneDisplayedTitle(config.createdSessionTitle)
         await(hasTestTag("message_input"))
@@ -267,7 +268,7 @@ class MobileAcceptanceTest {
                 "new-chat-sheet" -> {
                     compose.onNodeWithTag("new_chat").performClick()
                     await(hasTestTag("workspace_picker"))
-                    compose.onNodeWithTag("create_chat").assertIsDisplayed()
+                    compose.onNodeWithTag("create_chat").performScrollTo().assertIsDisplayed()
                 }
                 "settings-dark" -> {
                     compose.onNodeWithTag("settings").performClick()

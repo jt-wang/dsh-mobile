@@ -7,6 +7,8 @@ import { startHostServer } from './server.ts';
 import type { HostConfiguration } from './types.ts';
 import { createWorkspaceSource } from './workspace-source.ts';
 import type { DshWorkspaceRegistry } from './workspace-source.ts';
+import { runningSubagentCounts } from './running-subagents.ts';
+import type { LiveAgent, LiveSession } from './running-subagents.ts';
 
 /** Configuration is deliberately explicit and owner-local, never supplied by a mobile client. */
 export type Config = (HostConfiguration & { dshVersion: string; configPath?: never }) | { dshVersion: string; configPath: string };
@@ -14,8 +16,13 @@ export type Config = (HostConfiguration & { dshVersion: string; configPath?: nev
 export interface CompanionContext {
   sessionController: DshSessionController;
   agentPresets?: DshAgentPresets;
+  /** Inspected live state only, never used to authorize cwd or promote a Session. */
+  sessions?: { get(id: string): LiveSession | undefined; list(): LiveSession[] };
+  agents?: { get(id: string): LiveAgent | undefined; list(): LiveAgent[] };
+  /** Public rc.2 header-only persistence observation; no event-log decoding. */
+  sessionPersistence?: { stat(id: string, options?: { signal?: AbortSignal }): Promise<{ readonly header: unknown } | undefined> };
   /** Cordis 4.0.4 active lookup bypasses inject and returns fresh tracing proxies. */
-  get?(name: 'workspaceRegistry'): DshWorkspaceRegistry | undefined;
+  get?<K extends 'workspaceRegistry' | 'sessions' | 'agents' | 'sessionPersistence'>(name: K): ({ workspaceRegistry: DshWorkspaceRegistry; sessions: NonNullable<CompanionContext['sessions']>; agents: NonNullable<CompanionContext['agents']>; sessionPersistence: NonNullable<CompanionContext['sessionPersistence']> })[K] | undefined;
   on(name: string, listener: (...args: any[]) => void, options?: { global: boolean }): () => unknown;
 }
 export const name = 'dsh-mobile-companion';
@@ -68,8 +75,36 @@ export async function apply(ctx: CompanionContext, config: Config): Promise<() =
       hostConfig = await loadConfiguration(config.configPath);
     } else hostConfig = config as HostConfiguration;
     const workspaceSource = await createWorkspaceSource(hostConfig, () => ctx.get?.('workspaceRegistry'));
+    // Optional Cordis services must use get(): absent direct getters throw.
+    const sessions = () => ctx.get ? ctx.get('sessions') : ctx.sessions;
+    const agents = () => ctx.get ? ctx.get('agents') : ctx.agents;
+    const persistence = () => ctx.get ? ctx.get('sessionPersistence') : ctx.sessionPersistence;
+    const sessionHeader = persistence() ? async (id: string, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      const store = sessions(), backend = persistence();
+      if (!backend) throw new HostError('unavailable');
+      const live = store?.get(id);
+      if (live) return live.header;
+      const result = await backend.stat(id, { signal });
+      signal.throwIfAborted();
+      // Fresh proxies are normal; the backend's public identity survives them.
+      const current = persistence();
+      const identity = (service: NonNullable<typeof backend>) => Reflect.get(service, Symbol.for('cordis.original')) ?? service;
+      if (!current || identity(current) !== identity(backend)) throw new HostError('unavailable');
+      return sessions()?.get(id)?.header ?? result?.header;
+    } : undefined;
+    const sessionStatus = sessions() && agents() ? (id: string) => {
+      const store = sessions(), registry = agents();
+      if (!store || !registry) throw new HostError('unavailable');
+      return { running: registry.get(id)?.status === 'running', updatedAt: store.get(id)?.header.createdAt ?? 0 };
+    } : undefined;
     adapter = await createDshAdapter({ dshVersion: config.dshVersion, sessionController: ctx.sessionController,
-      ...(ctx.agentPresets ? { agentPresets: ctx.agentPresets } : {}), workspaceSource, events: eventBridge(ctx) });
+      ...(ctx.agentPresets ? { agentPresets: ctx.agentPresets } : {}), workspaceSource, events: eventBridge(ctx), ...(sessionHeader ? { sessionHeader } : {}),
+      ...(sessionStatus ? { sessionStatus, runningSubagentCounts: () => {
+        const store = sessions(), registry = agents();
+        if (!store || !registry) throw new HostError('unavailable');
+        return runningSubagentCounts(registry.list(), store.list());
+      } } : {}) });
     const host = await startHostServer({ config: hostConfig, adapter, workspaceSource });
     let closed = false;
     return async () => {

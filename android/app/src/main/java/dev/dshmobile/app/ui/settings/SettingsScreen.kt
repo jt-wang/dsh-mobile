@@ -2,6 +2,9 @@ package dev.dshmobile.app.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -45,20 +48,21 @@ internal fun SettingsScreen(state: MobileState, model: MobileViewModel, onBack: 
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).verticalScroll(rememberScrollState())
             .navigationBarsPadding().padding(bottom = 24.dp).testTag("settings_screen")) {
             // Computer: identity first, as on a device page.
-            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Box(Modifier.size(48.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape), contentAlignment = Alignment.Center) {
-                    Icon(MobileIcons.Computer, null, Modifier.size(24.dp))
+            // Identity row sized like a list item, not a headline: the screen title stays the largest text.
+            Row(Modifier.fillMaxWidth().padding(horizontal = Spacing.Gutter, vertical = Spacing.L), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.M)) {
+                Box(Modifier.size(ControlSize.RoundAction).background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape), contentAlignment = Alignment.Center) {
+                    Icon(MobileIcons.Computer, null, Modifier.size(IconSize.Row))
                 }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    SelectionContainer { Text(state.hostName, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis) }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.XXS)) {
+                    SelectionContainer { Text(state.hostName, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         StatusDot(connectionColor(state.connection))
-                        Text(connectionLabel(state.connection), style = MaterialTheme.typography.bodyMedium, color = muted)
+                        Text(connectionLabel(state.connection), style = MaterialTheme.typography.bodySmall, color = muted)
                     }
                 }
             }
-            if (state.demo) Text(stringResource(R.string.mobile_demo_notice), Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.bodySmall, color = muted)
+            if (state.demo) Text(stringResource(R.string.mobile_demo_notice), Modifier.padding(horizontal = Spacing.Gutter), style = MaterialTheme.typography.bodySmall, color = muted)
 
             Section(stringResource(R.string.mobile_connection_section)) {
                 Text(state.lastSyncedAt?.let { stringResource(R.string.mobile_last_sync, formattedTime(it)) } ?: stringResource(R.string.mobile_never_synced),
@@ -121,6 +125,23 @@ private fun Section(title: String?, content: @Composable ColumnScope.() -> Unit)
         content()
     }
 }
+
+/**
+ * Full-width navigation row to a system screen: label left, chevron right, 56dp. It bleeds through the section
+ * gutter so the ripple spans the screen while the text stays on the gutter. Use [LinkRowDivider] between rows.
+ */
+@Composable
+internal fun SettingsLinkRow(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, trailing: ImageVector = MobileIcons.ChevronRight,
+    trailingRotation: Float = 0f) {
+    Row(modifier.bleed(Spacing.Gutter).fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button, onClick = onClick)
+        .padding(horizontal = Spacing.Gutter), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.M)) {
+        Text(label, Modifier.weight(1f).padding(vertical = Spacing.M), style = MaterialTheme.typography.bodyLarge)
+        Icon(trailing, null, Modifier.size(IconSize.Row).rotate(trailingRotation), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+internal fun LinkRowDivider() = HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
 @Composable
 internal fun OutlineAction(label: String, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {

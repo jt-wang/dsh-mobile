@@ -330,7 +330,7 @@ class RepositoryTest {
             fixture.snapshotText = snapshot("""[{"id":"private-old","role":"assistant","text":"Synthetic old history","createdAt":10}]""")
             fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
             repo.refresh(); repo.selectSession("other")
-            clock += 10 * 60 * 1_000L + 1
+            clock += 24 * 60 * 60 * 1_000L + 1
             val requested = CompletableDeferred<Unit>()
             val release = java.util.concurrent.CountDownLatch(1)
             fixture.chatSnapshot = {
@@ -957,6 +957,84 @@ class RepositoryTest {
             assertEquals("New text", repo.state.value.draft)
             store.gate!!.complete(Unit)
             edit.await()
+        }
+    }
+    @Test fun `disk index appears before network after process death and revoked read erases disk history`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            fixture.snapshotText = snapshot("""[{"id":"old","role":"assistant","text":"Synthetic cached","createdAt":10}]""")
+            repo.refresh()
+            val disk = object : HistoryStore {
+                override val authority = HistoryAuthority()
+                var value = HistoryRecord()
+                override suspend fun read() = value
+                override suspend fun write(value: HistoryRecord) { this.value = value }
+                override suspend fun clear() { value = HistoryRecord() }
+            }
+            val caching = NetworkMobileRepository(store, scope, true, historyStore = disk)
+            caching.setForeground(true); caching.selectSession("chat"); caching.setForeground(false); caching.close()
+            val recreated = NetworkMobileRepository(store, scope, true, observeRestoredSession = false, historyStore = disk)
+            try {
+                recreated.restore()
+                assertEquals(listOf("chat"), recreated.state.value.sessions.map { it.id })
+                val requested = CompletableDeferred<Unit>()
+                val release = java.util.concurrent.CountDownLatch(1)
+                recreated.setForeground(true)
+                fixture.chatSnapshot = { requested.complete(Unit); release.await(5, TimeUnit.SECONDS); json("""{"error":{"code":"revoked","message":"Synthetic","retryable":false}}""", 401) }
+                val open = scope.async { recreated.selectSession("chat") }
+                try {
+                    requested.await()
+                    assertEquals(listOf("old"), recreated.state.value.snapshot!!.messages.map { it.id })
+                    assertTrue(recreated.state.value.snapshotStale)
+                    assertTrue(dev.dshmobile.app.ui.components.canEditDraft(recreated.state.value, true))
+                    assertFalse(dev.dshmobile.app.model.MobileReducer.canSend(recreated.state.value, "draft"))
+                    release.countDown(); open.await()
+                    assertNull(recreated.state.value.snapshot)
+                    assertTrue(disk.value.entries.isEmpty())
+                    assertTrue(recreated.state.value.sessions.isEmpty())
+                    assertTrue(fixture.mutations.isEmpty())
+                } finally { release.countDown(); open.cancel() }
+            } finally { recreated.close() }
+        }
+    }
+    @Test fun `service rejection clears live UI offline caches and prevents pending write resurrection`() = runBlocking {
+        withRepository { _, store, fixture, scope ->
+            val disk = MemoryHistoryStore()
+            val live = NetworkMobileRepository(store, scope, true, historyStore = disk)
+            try {
+                live.setForeground(true); live.selectSession("chat"); live.setForeground(false)
+                assertNotNull(live.state.value.snapshot)
+                disk.authority.invalidate("revoked") { disk.clear() }
+                assertNull(live.state.value.snapshot); assertTrue(live.state.value.sessions.isEmpty())
+                assertEquals(ConnectionState.REVOKED, live.state.value.connection)
+                live.leaveSession(); live.setForeground(false)
+                assertTrue(disk.read().entries.isEmpty())
+                // A later independently authorized refresh rebinds, not an old pending flush.
+                live.setForeground(true); live.selectSession("chat"); live.setForeground(false)
+                assertNotNull(live.state.value.snapshot)
+                assertEquals(historyBinding(store.value.host!!), disk.read().binding)
+                val recreated = PersistentHistory(disk, System::currentTimeMillis)
+                recreated.restore(historyBinding(store.value.host!!)); assertNotNull(recreated.get("chat"))
+                assertTrue(fixture.mutations.isEmpty())
+            } finally { live.close() }
+        }
+    }
+    @Test fun `home prefetch only issues bounded GETs and background cancels its held history requests`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            repo.close()
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = { requested.complete(Unit); release.await(5, TimeUnit.SECONDS); json(snapshot()) }
+            val prefetching = NetworkMobileRepository(store, scope, true, observeRestoredSession = false, prefetchEnabled = true)
+            try {
+                prefetching.setForeground(true)
+                withTimeout(5000) { requested.await() }
+                withTimeout(1000) { prefetching.setForeground(false) }
+                assertTrue(fixture.mutations.isEmpty())
+                assertFalse(prefetching.state.value.observingSession)
+                assertNull(prefetching.state.value.snapshot)
+                assertEquals(ConnectionState.OFFLINE, prefetching.state.value.connection)
+            } finally { release.countDown(); prefetching.close() }
         }
     }
     private suspend fun withRepository(now: () -> Long = System::currentTimeMillis, block: suspend (NetworkMobileRepository, MemoryStore, Fixture, CoroutineScope) -> Unit) {

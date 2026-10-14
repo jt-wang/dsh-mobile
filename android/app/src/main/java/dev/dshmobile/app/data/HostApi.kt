@@ -94,7 +94,7 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                         if (bytes.size > limit) throw MobileFailure("invalid_response")
                         val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
-                        HttpResult(it.code, text)
+                        HttpResult(it.code, text, retryAfterMillis(it.header("Retry-After")))
                     }
                     if (continuation.isActive) continuation.resume(result)
                 } catch (failure: Exception) {
@@ -118,7 +118,7 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
             409 -> "request_conflict"
             429 -> "rate_limited"
             else -> if (status in 400..599 && history) "chat_unavailable" else hostErrorKey(error.code)
-        })
+        }, retryAfterMs)
     }
 
     suspend fun pair(secret: String, name: String): PairingResponse {
@@ -265,8 +265,7 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                 override fun onClosed(eventSource: EventSource) { if (!cancelled.get() && !retired.get()) onFailure("network_unavailable", 0) }
                 override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                     if (cancelled.get() || retired.get()) return
-                    val retry = response?.header("Retry-After")?.let { value -> value.toLongOrNull()?.coerceIn(0, 3600)?.times(1000)
-                        ?: runCatching { java.time.ZonedDateTime.parse(value, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli() - System.currentTimeMillis() }.getOrNull()?.coerceIn(0, 3600000) } ?: 0
+                    val retry = retryAfterMillis(response?.header("Retry-After"))
                     onFailure(when { response?.code == 401 -> "unauthorized"; response?.code == 403 -> "forbidden"; response?.code == 429 -> "rate_limited"; t is SSLException -> "tls_failed"; t is EventLimitExceeded -> "invalid_response"; else -> "network_unavailable" }, retry)
                 }
             })
@@ -297,7 +296,7 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
     suspend fun closeAndAwait() { close(); awaitClosed() }
 
     internal data class SessionIndex(val items: List<dev.dshmobile.app.model.SessionSummary>, val truncated: Boolean)
-    private data class HttpResult(val status: Int, val text: String)
+    private data class HttpResult(val status: Int, val text: String, val retryAfterMs: Long = 0)
     /** Internal category only: never retain the raw exception, its message, cause or request. */
     private class ReadConnectionClosed(val call: Call) : Exception("network_unavailable")
     private companion object { const val SNAPSHOT_LIMIT = 2 * 1024 * 1024 }

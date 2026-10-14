@@ -33,7 +33,9 @@ import kotlinx.serialization.Serializable
     val settings: NotificationSettings = NotificationSettings(), val dirty: Boolean = false,
     val epoch: String? = null, val cursor: String? = null, val lastSequence: Long = -1,
     val processed: List<ProcessedNotification> = emptyList(), val attention: Map<String, String> = emptyMap(),
-    val monitoringStatus: String = "initializing") {
+    val monitoringStatus: String = "initializing",
+    val answerMode: AlertMode = AlertMode.SOUND, val attentionMode: AlertMode = AlertMode.SOUND,
+    val channelModesMigrated: Boolean = false) {
     fun applyPage(page: NotificationPage, now: Long): AppliedNotifications {
         val reset = page.resetRequired || epoch != page.epoch
         var seen = (if (reset) emptyList() else processed).filter { it.at > now - 7 * 86400000L }
@@ -52,7 +54,9 @@ import kotlinx.serialization.Serializable
             if (event.kind == "attention-cleared" || event.expiresAt > now) display += event
         }
         return AppliedNotifications(copy(epoch = page.epoch, cursor = page.nextCursor, lastSequence = sequence,
-            processed = seen, attention = pending.toMap(), monitoringStatus = page.coverage), display.filter { it.kind != "attention-needed" || pending[it.sessionId] == it.attentionId }, reset)
+            processed = seen, attention = pending.toMap(), monitoringStatus = page.coverage), display.filter { it.kind != "attention-needed" || pending[it.sessionId] == it.attentionId }
+                .groupBy { it.sessionId to it.kind }.values.map { it.last() }
+                .filter { it.kind != "answer-finished" || it.sessionId !in pending }, reset)
     }
 }
 internal data class AppliedNotifications(val state: NotificationLocal, val display: List<NotificationEvent>, val reset: Boolean)
