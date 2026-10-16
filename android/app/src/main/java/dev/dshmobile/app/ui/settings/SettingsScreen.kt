@@ -16,8 +16,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -80,19 +78,24 @@ internal fun SettingsScreen(state: MobileState, model: MobileViewModel, onBack: 
             }
 
             Section(stringResource(R.string.mobile_theme)) {
-                // Segmented control: three equal options, current one filled with the ink colour.
-                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainer).padding(4.dp).selectableGroup(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    listOf(ThemePreference.SYSTEM, ThemePreference.LIGHT, ThemePreference.DARK).forEach { option ->
-                        val selected = theme.value == option
-                        Box(Modifier.weight(1f).heightIn(min = 44.dp).clip(CircleShape)
-                            .background(if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent)
-                            .selectable(selected = selected, role = Role.RadioButton, onClick = { theme.update(option) })
-                            .testTag("theme_${option.name.lowercase()}"), contentAlignment = Alignment.Center) {
-                            Text(stringResource(when (option) { ThemePreference.DARK -> R.string.mobile_theme_dark; ThemePreference.LIGHT -> R.string.mobile_theme_light; ThemePreference.SYSTEM -> R.string.mobile_theme_system }),
-                                style = MaterialTheme.typography.labelLarge, color = if (selected) MaterialTheme.colorScheme.onSurface else muted,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp))
-                        }
+                SettingsChoiceList(listOf(ThemePreference.SYSTEM, ThemePreference.LIGHT, ThemePreference.DARK), theme.value,
+                    label = { option -> stringResource(when (option) { ThemePreference.DARK -> R.string.mobile_theme_dark; ThemePreference.LIGHT -> R.string.mobile_theme_light; ThemePreference.SYSTEM -> R.string.mobile_theme_system }) },
+                    tag = { option -> "theme_${option.name.lowercase()}" }, onChange = { theme.update(it) })
+            }
+
+            Section(stringResource(R.string.mobile_language)) {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                // Configuration changes (including system App languages) re-read the platform choice.
+                val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+                var language by remember(context, configuration) { mutableStateOf(dev.dshmobile.app.locale.languagePreference(context)) }
+                androidx.lifecycle.compose.LifecycleResumeEffect(context, configuration) {
+                    language = dev.dshmobile.app.locale.languagePreference(context)
+                    onPauseOrDispose { }
+                }
+                LanguageSettingsContent(language) { option ->
+                    (context as? android.app.Activity)?.let {
+                        dev.dshmobile.app.locale.setAppLanguage(it, option)
+                        language = dev.dshmobile.app.locale.languagePreference(it)
                     }
                 }
             }
@@ -115,6 +118,50 @@ internal fun SettingsScreen(state: MobileState, model: MobileViewModel, onBack: 
         confirmButton = { TextButton(onClick = { forget = false; model.forget() }, enabled = !state.busy, modifier = Modifier.testTag("forget_connection_confirm"),
             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.mobile_forget_confirm)) } },
         dismissButton = { TextButton(onClick = { forget = false }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text(stringResource(R.string.mobile_back)) } })
+}
+
+/** Same single-choice list as Theme; no app dependencies in content. */
+@Composable
+internal fun LanguageSettingsContent(value: dev.dshmobile.app.locale.LanguagePreference?, onChange: (dev.dshmobile.app.locale.LanguagePreference) -> Unit) {
+    SettingsChoiceList(dev.dshmobile.app.locale.LanguagePreference.entries, value,
+        label = { option -> stringResource(when (option) {
+            dev.dshmobile.app.locale.LanguagePreference.SYSTEM -> R.string.mobile_language_system
+            dev.dshmobile.app.locale.LanguagePreference.RUSSIAN -> R.string.mobile_language_russian
+            dev.dshmobile.app.locale.LanguagePreference.ENGLISH -> R.string.mobile_language_english
+        }) },
+        tag = { option -> "language_${option.name.lowercase()}" }, onChange = onChange)
+}
+
+/**
+ * Single-choice setting as a list, not a segmented control: "System default" / «Как в системе» do not fit a
+ * third of a narrow phone, and equal segments either truncate or wrap unevenly. Same answer as the system-link
+ * list in notifications: full-width rows with hairlines, long labels and large font scales wrap inside a row.
+ */
+@Composable
+private fun <T> SettingsChoiceList(options: List<T>, value: T?, label: @Composable (T) -> String, tag: (T) -> String, onChange: (T) -> Unit) {
+    Column(Modifier.fillMaxWidth().selectableGroup()) {
+        options.forEachIndexed { index, option ->
+            if (index > 0) LinkRowDivider()
+            SettingsChoiceRow(label(option), value == option, { onChange(option) }, Modifier.testTag(tag(option)))
+        }
+    }
+}
+
+/**
+ * [SettingsLinkRow] layout (full-bleed ripple, label on the gutter) with a check on the chosen option. Rows are
+ * one touch target tall rather than 56dp so a three-option list stays close to its section heading.
+ */
+@Composable
+private fun SettingsChoiceRow(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Row(modifier.bleed(Spacing.Gutter).fillMaxWidth().heightIn(min = ControlSize.TouchTarget)
+        .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+        .padding(horizontal = Spacing.Gutter), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.M)) {
+        Text(label, Modifier.weight(1f).padding(vertical = Spacing.M), style = MaterialTheme.typography.bodyLarge)
+        // The check slot is reserved on every row so labels wrap at the same width whichever option is chosen.
+        Box(Modifier.size(IconSize.Row), contentAlignment = Alignment.Center) {
+            if (selected) Icon(MobileIcons.Check, null, Modifier.size(IconSize.Row), tint = MaterialTheme.colorScheme.onSurface)
+        }
+    }
 }
 
 @Composable

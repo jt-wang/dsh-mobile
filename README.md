@@ -6,7 +6,7 @@
 
 **Ваш агент [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) работает на компьютере. С Android-телефона вы ставите задачи, читаете ответы в реальном времени и получаете уведомление «Ответ готов».**
 
-[Скачать APK 0.7.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.0) · [Установка](#установка) · [Архитектура](#как-это-устроено) · [Безопасность](#безопасность) · [English](#english)
+[Скачать APK 0.7.1](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.1) · [Установка](#установка) · [Архитектура](#как-это-устроено) · [Безопасность](#безопасность) · [English](#english)
 
 > Неофициальный проект Павла Логачева. Разрабатывается независимо от DeepSeek.
 
@@ -24,7 +24,7 @@ Android 8.0+ · Привязка по QR-коду · Wi‑Fi или Tailscale
 - **Получать уведомления.** Для «Ответ готов» и «Агент ждет вашего решения» отдельно выбираются «Со звуком» (всплывающий баннер со звуком), «Без звука» или «Выключены». У каждого режима свой канал Android; в настройках приложения есть переходы к системным настройкам каналов. При обновлении прежний системный выбор сохраняется: выключенный канал остается выключенным, беззвучный — беззвучным. Для открытого на экране чата уведомлений нет, обновление уже показанного уведомления не повторяет звук. Отдельные проекты и чаты можно отключить.
 - **Возвращаться к переписке.** Поиск по сообщениям, черновик для каждого чата и копирование по долгому нажатию.
 
-Тема следует системной, светлую или темную можно выбрать вручную. Интерфейс на русском и английском, поддерживается крупный шрифт.
+Тема следует системной, светлую или темную можно выбрать вручную. Интерфейс на русском и английском: язык следует системному или выбирается в настройках приложения. Поддерживается крупный шрифт.
 
 <picture><source media="(max-width: 767px)" srcset="docs/assets/dsh-mobile-screens-mobile.png"><img src="docs/assets/dsh-mobile-screens.png" alt="Три экрана: чаты разных проектов, ответ в Markdown во время работы агента и выбор проекта перед новым чатом."></picture>
 
@@ -59,7 +59,7 @@ Android-клиент написан на Kotlin и Jetpack Compose, плагин
 
 2. **Скачайте и проверьте файлы релиза.**
 
-   Из [релиза 0.7.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.0) нужны подписанный [dsh-mobile-0.7.0.apk](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.0/dsh-mobile-0.7.0.apk), архив плагина [dsh-mobile-host-0.6.0.zip](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.0/dsh-mobile-host-0.6.0.zip) и их контрольные суммы: [dsh-mobile-0.7.0.apk.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.0/dsh-mobile-0.7.0.apk.sha256), [dsh-mobile-host-0.6.0.zip.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.0/dsh-mobile-host-0.6.0.zip.sha256). Все файлы должны быть из одного релиза. `UNSIGNED-verification.apk` — проверочный артефакт, не файл для установки.
+   Из [релиза 0.7.1](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.1) нужны подписанный [dsh-mobile-0.7.1.apk](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.1/dsh-mobile-0.7.1.apk), архив плагина [dsh-mobile-host-0.6.0.zip](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.1/dsh-mobile-host-0.6.0.zip) и их контрольные суммы: [dsh-mobile-0.7.1.apk.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.1/dsh-mobile-0.7.1.apk.sha256), [dsh-mobile-host-0.6.0.zip.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.7.1/dsh-mobile-host-0.6.0.zip.sha256). Плагин в этом релизе не изменился: это тот же файл 0.6.0, что и в релизе 0.7.0. Все файлы должны быть из одного релиза. `UNSIGNED-verification.apk` — проверочный артефакт, не файл для установки.
 
    Укажите абсолютные пути к скачанным файлам и сравните хеши с `.sha256`. При несовпадении остановитесь.
 
@@ -128,9 +128,9 @@ Android-клиент написан на Kotlin и Jetpack Compose, плагин
 
 **Для работы вне дома** установите Tailscale на компьютер и телефон, подключите их к своей сети Tailscale и укажите имя компьютера при подготовке плагина. Открывать порт на роутере не нужно. Альтернатива — [собственный relay на VPS](<docs/RELAY_DEPLOYMENT.md>).
 
-**Обновление с 0.4.0, 0.5.0 или 0.6.1:** APK 0.7.0 подписан прежним ключом и устанавливается поверх с сохранением привязки. Переход с 0.6.1 проверен на телефоне владельца. Плагин обновляется установщиком из нового архива; переход 0.5.1 → 0.6.0 проверен на тестовой копии с сохранением конфигурации, TLS-ключа и остального содержимого профиля. Порядок обновления и отката описан в [инструкции](<docs/SETUP.md>).
+**Обновление с 0.4.0, 0.5.0, 0.6.1 или 0.7.0:** APK 0.7.1 подписан прежним ключом и устанавливается поверх, без удаления приложения. Установка 0.7.1 поверх опубликованного 0.7.0 проверена на эмуляторе Android 11: система сохранила данные приложения, оно запустилось без ошибок. Сохранение привязки при обновлении проверено на телефоне владельца для перехода 0.6.1 → 0.7.0, для 0.7.1 — еще нет. Плагин обновляется установщиком из нового архива; переход 0.5.1 → 0.6.0 проверен на тестовой копии с сохранением конфигурации, TLS-ключа и остального содержимого профиля. Если плагин 0.6.0 уже установлен из релиза 0.7.0, обновлять его не нужно. Порядок обновления и отката описан в [инструкции](<docs/SETUP.md>).
 
-Приложение 0.7.0 работает с плагином 0.5.1 — проверено на телефоне, но без индикатора субагентов и с более медленным первым открытием чата. Для приложения 0.6.1 и плагина 0.6.0 протокол совместим, однако эта пара отдельно не запускалась.
+Приложения 0.7.0 и 0.7.1 работают с плагином 0.5.1, но без индикатора субагентов и с более медленным первым открытием чата; на телефоне эта пара проверена с приложением 0.7.0. Для приложения 0.6.1 и плагина 0.6.0 протокол совместим, однако эта пара отдельно не запускалась.
 
 ## Безопасность
 
@@ -157,16 +157,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ../tools/android-build
 
 Обычная release-сборка APK не подписана и не устанавливается как есть. Сборка, упаковка плагина и подпись своим ключом описаны в [инструкции по сборке](<docs/BUILD.md>) и [инструкции выпуска APK](<docs/ANDROID_RELEASE.md>).
 
-## Проверки релиза 0.7.0
+## Проверки релиза 0.7.1
+
+Релиз 0.7.1 обновляет только приложение. Плагин 0.6.0, relay и установщик не менялись, поэтому их строки ниже — проверки [релиза 0.7.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.0).
 
 | Часть | Что проверено |
 |---|---|
-| Android | 244 JVM-теста; на эмуляторе — 5 инструментальных тестов каналов уведомлений и зашифрованного хранилища, 6 Compose-тестов интерфейса |
-| Плагин 0.6.0 | 185 тестов: в стандартном прогоне 181 проходит, 4 пропускаются без модуля DSH. Независимая проверка кода пройдена после двух раундов исправлений |
-| Relay | 18 тестов |
-| Совместимость с DSH | Поддерживаются те же версии: `0.2.0-rc.2` и `0.2.1-alpha.1`. Плагин 0.6.0 проверен на изолированном настоящем DSH `0.2.0-rc.2`: создание чата, переподключение, «Стоп», субагенты и поврежденные сессии |
-| Установщик | 28 сценариев; отдельно 9 проверок обновления 0.5.1 → 0.6.0 на тестовой копии с сохранением конфигурации, TLS-ключа и остального содержимого профиля |
-| Сквозная проверка | На эмуляторе — привязка. На OnePlus 15 владельца (Android 16) — обновление APK поверх 0.6.1 с сохранением привязки, приложение 0.7.0 с плагинами 0.5.1 и 0.6.0, замеры открытия списка и чатов с плагином 0.6.0 |
+| Android 0.7.1 | 247 JVM-тестов; Android lint без ошибок. На эмуляторе Android 16 (API 36) — 12 инструментальных тестов переключения языка и уведомлений, на эмуляторе Android 11 (API 30) — те же 12 тестов (применимы 11). Независимая проверка кода: четыре раунда, найденные дефекты исправлены |
+| Обновление | На эмуляторе Android 11 (API 30) — подписанный APK 0.7.1 поверх опубликованного 0.7.0 без удаления: подпись тем же ключом, система сохранила данные приложения, приложение запустилось без ошибок |
+| Не проверялось в 0.7.1 | Сохранение привязки при обновлении: на эмуляторе привязки не было. Отдельно устройства с Android 8–10 и 12, прошивки других производителей. Полный приемочный набор на эмуляторе вместе с тестовым хостом для этого релиза не повторялся |
+| Плагин 0.6.0 (из 0.7.0) | 185 тестов: в стандартном прогоне 181 проходит, 4 пропускаются без модуля DSH. Независимая проверка кода пройдена после двух раундов исправлений |
+| Relay (из 0.7.0) | 18 тестов |
+| Совместимость с DSH (из 0.7.0) | Поддерживаются те же версии: `0.2.0-rc.2` и `0.2.1-alpha.1`. Плагин 0.6.0 проверен на изолированном настоящем DSH `0.2.0-rc.2`: создание чата, переподключение, «Стоп», субагенты и поврежденные сессии |
+| Установщик (из 0.7.0) | 28 сценариев; отдельно 9 проверок обновления 0.5.1 → 0.6.0 на тестовой копии с сохранением конфигурации, TLS-ключа и остального содержимого профиля |
+| Сквозная проверка (из 0.7.0) | На эмуляторе — привязка. На OnePlus 15 владельца (Android 16) — обновление APK поверх 0.6.1 с сохранением привязки, приложение 0.7.0 с плагинами 0.5.1 и 0.6.0, замеры открытия списка и чатов с плагином 0.6.0 |
 | Разрешения APK | Интернет, камера, внутреннее служебное; уведомления и фоновая служба — только при включенных уведомлениях. Без телеметрии и сервисов Google |
 
 ## Ограничения
@@ -201,7 +205,7 @@ DSH Mobile is an unofficial Android client for DeepSeek Harness, developed indep
 
 Pair with a one-use QR code and connect over Wi‑Fi, Tailscale or your own optional relay. DSH Mobile provides no hosted cloud server or shared relay. A companion plugin exposes a narrow HTTPS API, not the DSH web UI. The phone verifies the computer's pinned certificate, and each device has revocable permissions. Project filtering is not a sandbox: agents retain their desktop tool permissions.
 
-Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.0) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The computer must remain on. Notifications use an opt-in foreground connection without Google services; automated emulator tests cover notifications, but the pop-up banner with sound has not yet been visually confirmed on a physical phone. Attachments, answers to agent questions and approvals still require the desktop.
+Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.1) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The computer must remain on. Notifications use an opt-in foreground connection without Google services; automated emulator tests cover notifications, but the pop-up banner with sound has not yet been visually confirmed on a physical phone. Attachments, answers to agent questions and approvals still require the desktop.
 
 Built by [Pavel Logachev](https://github.com/pavel-logachev): 20 years in IT, first as an engineer, then as a project manager. I build websites, web services, Telegram bots, apps and automation for your task. Have a similar one? [pavel@logachev.net](mailto:pavel@logachev.net) · [logachev.net](https://logachev.net/)
 

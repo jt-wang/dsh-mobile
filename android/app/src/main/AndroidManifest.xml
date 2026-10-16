@@ -19,6 +19,8 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
+        android:localeConfig="@xml/locales_config"
+        tools:targetApi="33"
         android:supportsRtl="true"
         android:theme="@style/Theme.DshMobile"
         android:usesCleartextTraffic="false">
@@ -26,6 +28,12 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-enabled continuous monitoring of a paired local AI desktop for answer completion and approval/question attention; no platform push service; persistent notification with Stop control." />
         </service>
+        <receiver android:name=".locale.LanguageChangedReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.LOCALE_CHANGED" />
+                <action android:name="android.intent.action.APPLICATION_LOCALE_CHANGED" />
+            </intent-filter>
+        </receiver>
         <!-- The UI implementation supplies this Activity; no stub Kotlin is bundled. -->
         <activity
             android:name="dev.dshmobile.app.MainActivity"

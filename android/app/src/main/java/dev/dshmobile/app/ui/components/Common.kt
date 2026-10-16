@@ -28,8 +28,12 @@ internal fun executable(state: MobileState) = state.snapshot?.let { snapshot -> 
 // Staleness gates host actions, not local drafting; navigation/admission still pins the editor's chat.
 internal fun canEditDraft(state: MobileState, interactionBlocked: Boolean = false) = executable(state) && (state.snapshotStale || state.capabilities?.textPrompt == true) && (state.snapshotStale || (!state.busy && !interactionBlocked)) && state.pending == null
 internal fun canCancel(state: MobileState) = state.connection == ConnectionState.ONLINE && state.capabilities?.cancel == true && executable(state) && !state.busy && !state.snapshotStale && state.pending == null && state.snapshot?.activity == "running" && state.snapshot.session.running
-internal fun formattedTime(time: Long): String = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(time))
-internal fun shortTime(time: Long): String = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time))
+@Composable
+internal fun formattedTime(time: Long): String = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT,
+    androidx.compose.ui.platform.LocalConfiguration.current.locales[0]).format(Date(time))
+@Composable
+internal fun shortTime(time: Long): String = DateFormat.getTimeInstance(DateFormat.SHORT,
+    androidx.compose.ui.platform.LocalConfiguration.current.locales[0]).format(Date(time))
 
 @Composable
 internal fun workspaceName(state: MobileState, id: String) = state.workspaces.find { it.id == id }?.name ?: stringResource(R.string.mobile_workspace_unknown)

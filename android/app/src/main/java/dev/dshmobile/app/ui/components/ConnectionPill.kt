@@ -49,7 +49,7 @@ internal fun ConnectionPill(state: MobileState, onClick: () -> Unit, modifier: M
         .padding(horizontal = if (compact) 0.dp else 12.dp)
         .testTag("connection_state").semantics(mergeDescendants = true) {
             role = Role.Button
-            stateDescription = state.connection.name
+            stateDescription = label
             liveRegion = LiveRegionMode.Polite
             if (compact) contentDescription = label
         }, verticalAlignment = Alignment.CenterVertically,

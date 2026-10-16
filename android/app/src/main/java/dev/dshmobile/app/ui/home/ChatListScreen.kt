@@ -150,7 +150,7 @@ private fun HomeTitle(state: MobileState, onConnection: () -> Unit) {
     val label = connectionLabel(state.connection)
     Column(Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onConnection).heightIn(min = 48.dp).padding(horizontal = 12.dp)
         .testTag("connection_state").semantics(mergeDescendants = true) {
-            stateDescription = state.connection.name
+            stateDescription = label
             liveRegion = LiveRegionMode.Polite
         }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Text(stringResource(R.string.mobile_brand), style = MaterialTheme.typography.titleMedium)

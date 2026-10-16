@@ -62,8 +62,9 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text(header?.title?.ifBlank { stringResource(R.string.mobile_untitled) } ?: stringResource(R.string.mobile_chats),
                     Modifier.semantics { heading() }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                val connectionDescription = connectionLabel(state.connection)
                 Row(Modifier.testTag("connection_state").semantics(mergeDescendants = true) {
-                    stateDescription = state.connection.name
+                    stateDescription = connectionDescription
                     liveRegion = LiveRegionMode.Polite
                 }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     // Off-line the issue strip writes the label; the subtitle keeps the project and adds only the dot.

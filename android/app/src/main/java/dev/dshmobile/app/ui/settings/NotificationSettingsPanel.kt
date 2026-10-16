@@ -51,7 +51,7 @@ import kotlinx.coroutines.launch
                 }
                 context.stopService(Intent(context, NotificationService::class.java))
                 if (local.enabled) ContextCompat.startForegroundService(context, Intent(context, NotificationService::class.java))
-                else context.getSystemService(android.app.NotificationManager::class.java).cancelAll()
+                else NotificationPosting.cancelAll(context)
                 failed = false
                 runCatching { local = syncNotificationPreferences(context) }
             } catch (_: Exception) { failed = true; runCatching { local = store.update { it.copy(enabled = false, monitoringStatus = "blocked") } } }
@@ -63,7 +63,7 @@ import kotlinx.coroutines.launch
                 local = store.update { if (attention) it.copy(attentionMode = mode) else it.copy(answerMode = mode) }
                 val manager = context.getSystemService(android.app.NotificationManager::class.java)
                 manager.activeNotifications.filter { it.id == 2 && (it.tag?.endsWith(if (attention) ":attention" else ":answers") == true) }
-                    .forEach { manager.cancel(it.tag, it.id) }
+                    .forEach { NotificationPosting.cancel(context, it.tag, it.id) }
                 failed = false
             } catch (_: Exception) { failed = true }
         }

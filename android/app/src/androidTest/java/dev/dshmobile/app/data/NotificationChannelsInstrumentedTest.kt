@@ -13,18 +13,45 @@ import org.junit.runner.RunWith
 /** Synthetic content on disposable emulator only. Never run against the paired owner's phone. */
 @RunWith(AndroidJUnit4::class)
 class NotificationChannelsInstrumentedTest {
+    @Test fun languageRefreshPreservesExistingChannelSettings() = kotlinx.coroutines.runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val manager = context.getSystemService(NotificationManager::class.java)
+        ensureNotificationChannels(context)
+        val before = manager.getNotificationChannel("answers_silent_v2")
+        val localized = context.createConfigurationContext(android.content.res.Configuration(context.resources.configuration).apply {
+            setLocale(java.util.Locale.forLanguageTag("ru"))
+        })
+        refreshNotificationChannelNames(localized)
+        val after = manager.getNotificationChannel("answers_silent_v2")
+        assertEquals("Ответы агента · Без звука", after.name.toString())
+        assertEquals(before.id, after.id)
+        assertEquals(before.importance, after.importance)
+        assertEquals(before.sound, after.sound)
+        assertEquals(before.shouldVibrate(), after.shouldVibrate())
+        assertEquals(before.description, after.description)
+        assertEquals(before.lockscreenVisibility, after.lockscreenVisibility)
+        refreshNotificationChannelNames(context.createConfigurationContext(android.content.res.Configuration(context.resources.configuration).apply {
+            setLocale(java.util.Locale.ENGLISH)
+        }))
+        assertEquals("Agent answers · Silent", manager.getNotificationChannel("answers_silent_v2").name.toString())
+    }
+
     @Test fun migratedAlertAndSilentChannelsRespectPrivacyAndReplaceWithoutAnotherAlert() = kotlinx.coroutines.runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val manager = context.getSystemService(NotificationManager::class.java)
+        val existingAlert = manager.getNotificationChannel("answers_alert_v2")
+        val existingSilent = manager.getNotificationChannel("answers_silent_v2")
         NotificationStore(context).update { it.copy(channelModesMigrated = false) }
         manager.createNotificationChannel(NotificationChannel("answers", "Legacy", NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
         ensureNotificationChannels(context)
         assertEquals(AlertMode.SILENT, NotificationStore(context).read().answerMode)
         assertNull(manager.getNotificationChannel("answers"))
-        assertEquals(NotificationManager.IMPORTANCE_HIGH, manager.getNotificationChannel("answers_alert_v2").importance)
-        assertNotNull(manager.getNotificationChannel("answers_alert_v2").sound)
-        assertEquals(NotificationManager.IMPORTANCE_LOW, manager.getNotificationChannel("answers_silent_v2").importance)
-        assertNull(manager.getNotificationChannel("answers_silent_v2").sound)
+        val alert = manager.getNotificationChannel("answers_alert_v2")
+        val silent = manager.getNotificationChannel("answers_silent_v2")
+        assertEquals(existingAlert?.importance ?: NotificationManager.IMPORTANCE_HIGH, alert.importance)
+        if (existingAlert != null) assertEquals(existingAlert.sound, alert.sound) else assertNotNull(alert.sound)
+        assertEquals(existingSilent?.importance ?: NotificationManager.IMPORTANCE_LOW, silent.importance)
+        assertEquals(existingSilent?.sound, silent.sound) // Existing user overrides must survive migration too.
         val public = NotificationCompat.Builder(context, "answers_alert_v2").setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("DSH Mobile").setContentText("Synthetic answer ready").build()
         val first = NotificationCompat.Builder(context, "answers_alert_v2").setSmallIcon(R.drawable.ic_launcher_foreground)

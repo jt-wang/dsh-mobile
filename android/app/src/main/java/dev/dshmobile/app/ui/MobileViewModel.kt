@@ -195,7 +195,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val context = getApplication<Application>()
             context.stopService(android.content.Intent(context, dev.dshmobile.app.data.NotificationService::class.java))
-            context.getSystemService(android.app.NotificationManager::class.java).cancelAll()
+            dev.dshmobile.app.data.NotificationPosting.cancelAll(context)
             dev.dshmobile.app.data.NotificationStore(context).update { dev.dshmobile.app.data.NotificationLocal() }
             repository.forget()
         }

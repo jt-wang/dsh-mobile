@@ -21,6 +21,18 @@ class NotificationChannelsTest {
         migrateNotificationChannels(notificationChannels.map { it.id }.toSet(), create = { calls += it.id }, delete = { calls += "delete:$it" })
         assertEquals(listOf("delete:answers", "delete:attention"), calls)
     }
+    @Test fun `language refresh renames all existing channels including connection without migrating or creating missing channels`() {
+        val names = mutableMapOf<String, String>()
+        val existing = setOf("answers_alert_v2", "attention_silent_v2", "connection", "unrelated")
+        refreshChannelNames(existing, "Agent answers", "Your decision needed", "With sound", "Silent", "Connection to computer") { id, name -> names[id] = name }
+        assertEquals(mapOf("answers_alert_v2" to "Agent answers · With sound", "attention_silent_v2" to "Your decision needed · Silent", "connection" to "Connection to computer"), names)
+        refreshChannelNames(existing, "Ответы агента", "Нужно ваше решение", "Со звуком", "Без звука", "Связь с компьютером") { id, name -> names[id] = name }
+        assertEquals("Ответы агента · Со звуком", names["answers_alert_v2"])
+        assertEquals("Нужно ваше решение · Без звука", names["attention_silent_v2"])
+        assertEquals("Связь с компьютером", names["connection"])
+        assertEquals(3, names.size)
+    }
+
     @Test fun `open chat ingests without display while another chat can alert and updates stay silent`() {
         val local = NotificationLocal(settings = NotificationSettings(enabled = true))
         assertFalse(shouldDisplayNotification(event, local, "chat"))

@@ -183,6 +183,10 @@
     <string name="mobile_agent_days">Агент работает · ≈%1$d дн</string>
     <string name="mobile_agent_seconds">Агент работает · меньше минуты</string>
     <string name="mobile_waiting_desktop">Ждёт ответа на компьютере</string>
+    <string name="mobile_language">Язык</string>
+    <string name="mobile_language_system">Как в системе</string>
+    <string name="mobile_language_russian">Русский</string>
+    <string name="mobile_language_english">English</string>
     <string name="mobile_theme">Тема</string>
     <string name="mobile_theme_dark">Тёмная</string>
     <string name="mobile_theme_light">Светлая</string>

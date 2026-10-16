@@ -20,42 +20,50 @@ import kotlin.random.Random
 
 /** Read-only application transport, independent of Activity command admission/lifecycle. */
 class NotificationService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + NotificationPosting.errors)
     private var running: Job? = null
     private var api: HostApi? = null
+    @Volatile private var connectionStatus = "initializing"
     private val manager by lazy { getSystemService(NotificationManager::class.java) }
+    private fun localizedString(id: Int) = dev.dshmobile.app.locale.appLanguageContext(this).getString(id)
+    private fun refreshLanguage() = refreshNotificationLanguage(this)
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onCreate() {
         super.onCreate()
-        manager.createNotificationChannel(NotificationChannel(CONNECTION, getString(R.string.notif_connection_channel), NotificationManager.IMPORTANCE_LOW))
+        NotificationPosting.safely { manager.createNotificationChannel(NotificationChannel(CONNECTION, localizedString(R.string.notif_connection_channel), NotificationManager.IMPORTANCE_LOW)) }
+        refreshLanguage()
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Android's foreground-start obligation must be fulfilled before any cancellation/stop path.
+        try {
+            val notification = connectionNotification(connectionStatus)
+            if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            else startForeground(1, notification)
+            NotificationPosting.recordForegroundPost()
+        } catch (failure: Exception) { NotificationPosting.logFailure(failure); stopSelf(); return START_NOT_STICKY }
         if (intent?.action == STOP) {
             running?.cancel(); api?.close()
-            scope.launch { try { NotificationStore(this@NotificationService).update { it.copy(enabled = false, settings = it.settings.copy(enabled = false), dirty = true) }; runCatching { withTimeout(2000) { syncNotificationPreferences(this@NotificationService) } } } finally { manager.cancelAll(); stopSelf() } }
+            scope.launch { try { NotificationStore(this@NotificationService).update { it.copy(enabled = false, settings = it.settings.copy(enabled = false), dirty = true) }; runCatching { withTimeout(2000) { syncNotificationPreferences(this@NotificationService) } } } finally { NotificationPosting.cancelAll(this@NotificationService); stopSelf() } }
             return START_NOT_STICKY
         }
         if (!alertsAllowed()) { stopSelf(); return START_NOT_STICKY }
-        val notification = connectionNotification("initializing")
-        try {
-            if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-            else startForeground(1, notification)
-        } catch (_: SecurityException) { stopSelf(); return START_NOT_STICKY }
         if (running?.isActive != true) running = scope.launch { monitor() }
         return START_NOT_STICKY
     }
     private fun connectionNotification(status: String): android.app.Notification {
         val stop = PendingIntent.getService(this, 0, Intent(this, NotificationService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return NotificationCompat.Builder(this, CONNECTION).setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(getString(if (status == "ready") R.string.notif_connected else R.string.notif_monitoring))
-            .setContentText(getString(when (status) { "ready" -> R.string.notif_restart; "initializing" -> R.string.notif_initializing; "offline" -> R.string.notif_offline; else -> R.string.notif_degraded }))
+        return NotificationCompat.Builder(this, CONNECTION).addExtras(connectionLanguageExtras(status)).setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(localizedString(if (status == "ready") R.string.notif_connected else R.string.notif_monitoring))
+            .setContentText(localizedString(when (status) { "ready" -> R.string.notif_restart; "initializing" -> R.string.notif_initializing; "offline" -> R.string.notif_offline; else -> R.string.notif_degraded }))
             .setOngoing(true).setOnlyAlertOnce(true).setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .addAction(0, getString(R.string.notif_disable), stop).build()
+            .addAction(0, localizedString(R.string.notif_disable), stop).build()
     }
-    private fun alertsAllowed() = manager.areNotificationsEnabled() && (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
+    private fun alertsAllowed() = try {
+        manager.areNotificationsEnabled() && (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
+    } catch (failure: Exception) { NotificationPosting.logFailure(failure); false }
     private suspend fun monitor() {
         val store = NotificationStore(this)
-        ensureNotificationChannels(this)
+        ensureNotificationChannels(dev.dshmobile.app.locale.appLanguageContext(this))
         var attempt = 0
         while (currentCoroutineContext().isActive) {
             var retryAfter = 0L
@@ -102,16 +110,17 @@ class NotificationService : Service() {
                     }
                     val result = applied!!
                     if (result.reset) {
-                        for (chat in local.attention.keys) manager.cancel(tag(host.deviceId, chat, ATTENTION), 2)
+                        for (chat in local.attention.keys) NotificationPosting.cancel(this, tag(host.deviceId, chat, ATTENTION), 2)
                         // Current pending attention is restored silently after reset.
                         for (pending in page.pending) show(host.deviceId, NotificationEvent(1, pending.attentionId, 0, 0, Long.MAX_VALUE, pending.workspaceId, pending.sessionId, "attention-needed", -1, attentionId = pending.attentionId), updated, workspaces, sessions, true)
                     }
                     for (event in result.display) show(host.deviceId, event, updated, workspaces, sessions, false)
                     for (chat in updated.attention.keys) {
                         if (sessions.none { it.id == chat } || updated.settings.chats.find { it.sessionId == chat }?.enabled == false)
-                            manager.cancel(tag(host.deviceId, chat, ATTENTION), 2)
+                            NotificationPosting.cancel(this, tag(host.deviceId, chat, ATTENTION), 2)
                     }
-                    manager.notify(1, connectionNotification(updated.monitoringStatus))
+                    connectionStatus = updated.monitoringStatus
+                    postNotification(this, null, 1, connectionNotification(connectionStatus))
                     local = updated; attempt = 0
                     if (page.hasMore && (++catchupPages >= 4 || System.currentTimeMillis() - passStarted >= 30000)) { retryAfter = 5000; break }
                     if (!page.hasMore) { catchupPages = 0; passStarted = System.currentTimeMillis() }
@@ -124,44 +133,72 @@ class NotificationService : Service() {
             }
             finally { observer?.cancel(); api?.close(); api = null }
             if (terminal) {
-                manager.cancelAll()
+                NotificationPosting.cancelAll(this@NotificationService)
                 runCatching { store.update { it.copy(enabled = false, monitoringStatus = "blocked") } }
                 break
             }
             runCatching { store.update { it.copy(monitoringStatus = "offline") } }
-            manager.notify(1, connectionNotification("offline"))
+            connectionStatus = "offline"
+            try { postNotification(this, null, 1, connectionNotification(connectionStatus)) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { NotificationPosting.logFailure(failure) }
             delay(notificationRetryDelay(attempt++, retryAfter, Random.nextDouble(0.5, 1.0)))
         }
         stopSelf()
     }
-    private fun show(device: String, event: NotificationEvent, local: NotificationLocal,
+    private suspend fun show(device: String, event: NotificationEvent, local: NotificationLocal,
         workspaces: List<dev.dshmobile.app.model.Workspace>, sessions: List<dev.dshmobile.app.model.SessionSummary>, silent: Boolean) {
         val kind = if (event.kind == "answer-finished") ANSWERS else ATTENTION
         val tag = tag(device, event.sessionId, kind) // Identity does not change with sound preference.
-        if (event.kind == "attention-cleared") { manager.cancel(tag, 2); return }
-        if (!shouldDisplayNotification(event, local, VisibleNotificationChat.sessionId, sessions) || !alertsAllowed()) {
-            manager.cancel(tag, 2); return
-        }
+        if (event.kind == "attention-cleared") { NotificationPosting.cancel(this, tag, 2); return }
+        val ticket = NotificationPosting.ticket(tag, 2)
+        try {
+            NotificationPosting.pacedSuspending {
+                val store = NotificationStore(this)
+                val revision = store.changes.value
+                val latest = store.read()
+                val host = EncryptedStateStore(this).read().host
+                if (host?.deviceId != device || !latest.enabled || latest.deviceId != device ||
+                    revision != store.changes.value || !shouldDisplayNotification(event, latest, VisibleNotificationChat.sessionId, sessions) || !alertsAllowed()) {
+                    NotificationPosting.cancel(this, tag, 2); return@pacedSuspending
+                }
+                deliverAlert(device, event, latest, workspaces, sessions, silent, kind, tag, ticket, revision)
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { NotificationPosting.logFailure(failure) }
+        finally { NotificationPosting.release(ticket) }
+    }
+    private fun deliverAlert(device: String, event: NotificationEvent, local: NotificationLocal,
+        workspaces: List<dev.dshmobile.app.model.Workspace>, sessions: List<dev.dshmobile.app.model.SessionSummary>,
+        silent: Boolean, kind: String, tag: String, ticket: NotificationPosting.Ticket, revision: Long) {
         if (silent && sessions.none { it.id == event.sessionId }) return
-        if (kind == ATTENTION) manager.cancel(tag(device, event.sessionId, ANSWERS), 2)
+        if (kind == ATTENTION) NotificationPosting.cancel(this, tag(device, event.sessionId, ANSWERS), 2)
         val alreadyShown = manager.activeNotifications.any { it.tag == tag && it.id == 2 }
         val quiet = notificationUpdateSilent(silent, alreadyShown)
         val channel = notificationChannel(event, local, quiet) ?: return
-        val title = getString(if (event.kind == "answer-finished") R.string.notif_answer_ready else R.string.notif_needs_decision)
+        val title = localizedString(if (event.kind == "answer-finished") R.string.notif_answer_ready else R.string.notif_needs_decision)
         val open = Intent(this, MainActivity::class.java).setAction("dev.dshmobile.OPEN_CHAT")
             .setData(android.net.Uri.Builder().scheme("dshmobile").authority("chat").appendPath(device).appendPath(event.sessionId).build())
             .putExtra("notificationDevice", device).putExtra("notificationChat", event.sessionId)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         val tap = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val public = NotificationCompat.Builder(this, channel).setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(getString(R.string.app_name)).setContentText(title).build()
+            .setContentTitle(localizedString(R.string.app_name)).setContentText(title).build()
+        val names = notificationNames(event, workspaces, sessions)
         val notification = NotificationCompat.Builder(this, channel).setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(title).setContentText(notificationNames(event, workspaces, sessions) ?: getString(R.string.notif_generic))
+            .addExtras(alertLanguageExtras(kind, names))
+            .setContentTitle(title).setContentText(names ?: localizedString(R.string.notif_generic))
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(public).setContentIntent(tap)
             .setOnlyAlertOnce(true).setAutoCancel(true).setPriority(NotificationCompat.PRIORITY_HIGH).setSilent(quiet).build()
-        try { manager.notify(tag, 2, notification) } catch (_: SecurityException) { stopSelf() }
+        NotificationPosting.commit(ticket) {
+            // No suspension between the final visibility/permission check and notify.
+            if (NotificationStore(this).changes.value == revision && shouldDisplayNotification(event, local, VisibleNotificationChat.sessionId, sessions) && alertsAllowed())
+                manager.notify(tag, 2, notification)
+        }
     }
-    override fun onDestroy() { running?.cancel(); api?.close(); scope.cancel(); super.onDestroy() }
+    override fun onDestroy() {
+        running?.cancel(); api?.close(); scope.cancel(); super.onDestroy()
+    }
     companion object {
         const val STOP = "dev.dshmobile.NOTIFICATIONS_STOP"
         const val CONNECTION = "connection"

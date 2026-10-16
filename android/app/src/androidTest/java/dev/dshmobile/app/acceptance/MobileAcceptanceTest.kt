@@ -341,7 +341,19 @@ class MobileAcceptanceTest {
     }
 
     private fun awaitState(value: String) = await(
-        hasTestTag("connection_state") and SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, value)
+        hasTestTag("connection_state") and SemanticsMatcher("localized connection state") { node ->
+            val context = dev.dshmobile.app.locale.appLanguageContext(instrumentation.targetContext)
+            val resource = when (value) {
+                "ONLINE" -> dev.dshmobile.app.R.string.mobile_pc_online
+                "CONNECTING" -> dev.dshmobile.app.R.string.mobile_connecting
+                "SYNCING" -> dev.dshmobile.app.R.string.mobile_short_syncing
+                "OFFLINE" -> dev.dshmobile.app.R.string.mobile_offline
+                "REVOKED" -> dev.dshmobile.app.R.string.mobile_revoked
+                "INCOMPATIBLE" -> dev.dshmobile.app.R.string.mobile_incompatible
+                else -> dev.dshmobile.app.R.string.mobile_disconnected
+            }
+            node.config.getOrElse(SemanticsProperties.StateDescription) { "" } == context.getString(resource)
+        }
     )
 
     private fun verifyCaptureConfiguration(name: String) {

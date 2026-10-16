@@ -25,6 +25,29 @@ internal fun migrateLegacyModes(local: NotificationLocal, appEnabled: Boolean, a
     }
     return local.copy(answerMode = mode(answers, local.answerMode), attentionMode = mode(attention, local.attentionMode), channelModesMigrated = true)
 }
+/** Refresh only names on existing IDs. Never delete/rebuild channels or touch user-controlled settings. */
+internal fun refreshChannelNames(existing: Set<String>, answers: String, attention: String, sound: String, silent: String,
+    connection: String, rename: (String, String) -> Unit) {
+    notificationChannels.filter { it.id in existing }.forEach { spec ->
+        rename(spec.id, (if (spec.attention) attention else answers) + " · " + (if (spec.alert) sound else silent))
+    }
+    if ("connection" in existing) rename("connection", connection)
+}
+
+internal fun refreshNotificationChannelNames(context: Context) {
+    val manager = context.getSystemService(NotificationManager::class.java)
+    refreshChannelNames(manager.notificationChannels.map { it.id }.toSet(),
+        context.getString(R.string.notif_answers_channel), context.getString(R.string.notif_attention_channel),
+        context.getString(R.string.notif_mode_sound), context.getString(R.string.notif_mode_silent),
+        context.getString(R.string.notif_connection_channel)) { id, name ->
+        manager.getNotificationChannel(id)?.let { channel ->
+            channel.name = name
+            // Re-register the existing object, preserving importance, sound, vibration and description.
+            manager.createNotificationChannel(channel)
+        }
+    }
+}
+
 internal suspend fun ensureNotificationChannels(context: Context) {
     val manager = context.getSystemService(NotificationManager::class.java)
     fun legacy(id: String) = manager.getNotificationChannel(id)?.let { LegacyAlert(it.importance, it.sound != null) }
@@ -38,6 +61,7 @@ internal suspend fun ensureNotificationChannels(context: Context) {
         if (!spec.alert) { channel.setSound(null, null); channel.enableVibration(false) }
         manager.createNotificationChannel(channel)
     }, delete = manager::deleteNotificationChannel)
+    refreshNotificationChannelNames(context)
 }
 internal fun notificationChannel(event: NotificationEvent, local: NotificationLocal, recovery: Boolean = false): String? {
     val mode = if (event.kind == "answer-finished") local.answerMode else local.attentionMode
@@ -53,4 +77,8 @@ internal fun notificationUpdateSilent(recovery: Boolean, alreadyShown: Boolean) 
 /** Exact Activity route visibility, memory only; an inactive UI never suppresses other chats. */
 internal object VisibleNotificationChat {
     @Volatile var sessionId: String? = null
+        set(value) {
+            if (value != null) NotificationPosting.invalidateChat(value)
+            field = value
+        }
 }

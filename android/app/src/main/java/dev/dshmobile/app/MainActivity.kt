@@ -12,6 +12,15 @@ import dev.dshmobile.app.ui.MobileTheme
 import dev.dshmobile.app.ui.MobileViewModel
 
 class MainActivity : ComponentActivity() {
+    override fun attachBaseContext(newBase: android.content.Context) {
+        super.attachBaseContext(if (android.os.Build.VERSION.SDK_INT < 33) dev.dshmobile.app.locale.appLanguageContext(newBase) else newBase)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        dev.dshmobile.app.data.refreshNotificationChannelNames(dev.dshmobile.app.locale.appLanguageContext(this))
+    }
+
     private var notificationIntent by androidx.compose.runtime.mutableStateOf<android.content.Intent?>(null)
     override fun onNewIntent(intent: android.content.Intent) { super.onNewIntent(intent); setIntent(intent); notificationIntent = intent }
     override fun onCreate(savedInstanceState: Bundle?) {
