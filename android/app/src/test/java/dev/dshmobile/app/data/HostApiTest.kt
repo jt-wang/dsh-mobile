@@ -12,6 +12,24 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 class HostApiTest {
+    @Test fun `transparent gzip decodes bounded JSON and sequential reads reuse the connection`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val bytes = java.io.ByteArrayOutputStream().also { output ->
+                java.util.zip.GZIPOutputStream(output).use { it.write("{\"items\":[]}".toByteArray()) }
+            }.toByteArray()
+            repeat(2) { server.enqueue(MockResponse().setHeader("Content-Type", "application/json")
+                .setHeader("Content-Encoding", "gzip").setBody(okio.Buffer().write(bytes))) }
+            val api = api(server)
+            try {
+                assertTrue(api.workspaces().isEmpty()); assertTrue(api.workspaces().isEmpty())
+                val first = server.takeRequest(); val second = server.takeRequest()
+                assertEquals("gzip", first.getHeader("Accept-Encoding"))
+                assertEquals(0, first.sequenceNumber); assertEquals(1, second.sequenceNumber)
+            } finally { api.close() }
+        }
+    }
+
     @Test fun `notification SSE authenticates explicit cursor and preserves bounded pages`() = runBlocking {
         MockWebServer().use { server ->
             server.start()

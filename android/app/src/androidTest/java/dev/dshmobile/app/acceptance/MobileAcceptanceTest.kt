@@ -409,7 +409,7 @@ class MobileAcceptanceTest {
     }
 
     private fun outputDirectory(): File {
-        val root = instrumentation.targetContext.getExternalFilesDir(null) ?: error("external app files unavailable")
+        val root = instrumentation.targetContext.filesDir
         return File(root, "acceptance").apply { check(isDirectory || mkdirs()) }
     }
 

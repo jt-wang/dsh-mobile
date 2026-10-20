@@ -13,6 +13,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -80,7 +82,11 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
             ConnectionIssueStrip(state, onRefresh)
             if (state.connection == ConnectionState.ONLINE) state.error?.let { ErrorText(it, Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
             pendingDelivery()
-            PullToRefreshBox(isRefreshing = state.busy && state.connection == ConnectionState.SYNCING, onRefresh = onRefresh,
+            val pull = rememberPullToRefreshState()
+            val refreshing = state.busy && state.connection == ConnectionState.SYNCING
+            PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, state = pull,
+                indicator = { PullToRefreshDefaults.Indicator(state = pull, isRefreshing = refreshing,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = if (searchOpen) 112.dp else 56.dp)) },
                 modifier = Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(state = list, modifier = Modifier.fillMaxSize().testTag("chat_list"), contentPadding = PaddingValues(bottom = 16.dp)) {
                     // Filters scroll with the list so large landscape text cannot consume the row viewport.
@@ -213,12 +219,12 @@ private fun SessionRow(session: SessionSummary, project: String, timestamp: Stri
             if (session.running || session.runningSubagents > 0) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else IdleRing()
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(session.title.ifBlank { stringResource(R.string.mobile_untitled) }, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
-                    color = if (enabled) MaterialTheme.colorScheme.onSurface else muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(timestamp, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall.tabular(), color = muted, maxLines = 1)
+            Text(session.title.ifBlank { stringResource(R.string.mobile_untitled) }, Modifier.fillMaxWidth(), style = MaterialTheme.typography.titleMedium,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(details, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(timestamp, style = MaterialTheme.typography.labelSmall.tabular(), color = muted, maxLines = 1)
             }
-            Text(details, style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }

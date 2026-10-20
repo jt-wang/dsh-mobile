@@ -1,6 +1,11 @@
+import { FileStaging } from './file-staging.ts';
+import { sessionModel, settledQuestions, mutationAnswer } from './phone-projection.ts';
+import { gzipSync } from 'node:zlib';
+import { HOST_VERSION, parseMutation, validateAnswer, UPLOAD_LIMIT, UPLOAD_MIMES, identifier, safeAttachmentRefs, safeQueue, questionsOf } from './phone.ts';
+import type { SessionMutation, PromptOptions, UploadedAttachment } from './phone.ts';
 import { NotificationFeed } from './notifications.ts';
 import { HISTORY_CUT_NOTICE } from './dsh-adapter.ts';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -11,7 +16,7 @@ import { HostState, hashSecret, allowsWorkspace } from './state.ts';
 import { createWorkspaceSource } from './workspace-source.ts';
 import type { WorkspaceSource } from './workspace-source.ts';
 import type { AuthorizedDevice, StoredCommand } from './state.ts';
-import type { HostAdapter, HostConfiguration, PreparedHostConfiguration, HostSession, HostSnapshot } from './types.ts';
+import type { FileUploadReservation, HostAdapter, HostConfiguration, PreparedHostConfiguration, HostSession, HostSnapshot } from './types.ts';
 import { isRequestId } from './state.ts';
 import { createRelayConnector } from './relay-connector.ts';
 import type { RelayConnector } from './relay-connector.ts';
@@ -56,8 +61,13 @@ class RateLimiter {
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
   if (res.destroyed || res.writableEnded) return;
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-  res.end(JSON.stringify(value));
+  const body = Buffer.from(JSON.stringify(value));
+  if (body.length > 2 * 1024 * 1024) throw new HostError('payload_too_large');
+  const gzip = (res.req.headers['accept-encoding'] ?? '').split(',').map(part => /^gzip(?:\s*;\s*q=(1(?:\.0{0,3})?|0(?:\.\d{0,3})?))?$/i.exec(part.trim())).filter(match => match !== null);
+  const accepted = gzip.length > 0 && gzip.every(match => Number(match![1] ?? 1) > 0);
+  const compressed = accepted && body.length >= 1024 ? gzipSync(body, { level: 1 }) : undefined;
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', Vary: 'Accept-Encoding', ...(compressed ? { 'Content-Encoding': 'gzip' } : {}), 'Content-Length': String((compressed ?? body).length) });
+  res.end(compressed ?? body);
 }
 function keys(body: Record<string, unknown>, allowed: string[], required = allowed): void {
   if (Object.keys(body).some(key => !allowed.includes(key)) || required.some(key => !(key in body))) throw new HostError('invalid_request');
@@ -102,7 +112,58 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
   let claimed = false;
 
   const dispatches = new Map<string, { deviceId: string; requestId: string; completion: Promise<StoredCommand | undefined> }>();
-  type Command = { operation: 'create'; workspaceId: string; presetId?: string; requestId: string } | { operation: 'prompt'; sessionId: string; text: string; requestId: string; workspaceId: string } | { operation: 'cancel'; sessionId: string; requestId: string; workspaceId: string; expectedCursor: number };
+  const files = new FileStaging(config.statePath);
+  type StagedUpload = { deviceId: string; sessionId: string; workspaceId: string; expiresAt: number; value: UploadedAttachment; filePath?: string; claimed?: boolean };
+  const uploads = new Map<string, StagedUpload>();
+  let claimedImageBytes = 0, attachmentDispatches = 0;
+  const cleanups = new Set<Promise<void>>();
+  function removeUpload(id: string): void {
+    const upload = uploads.get(id); if (!upload) return; uploads.delete(id);
+    if (upload.filePath && !upload.claimed) {
+      const cleanup = files.remove(upload.filePath); cleanups.add(cleanup);
+      void cleanup.catch(() => {}).finally(() => cleanups.delete(cleanup));
+    }
+  }
+  let activeUploads = 0, reservedImageBytes = 0, activeFileReads = 0, activeImageReads = 0;
+  const uploadsByDevice = new Map<string, number>();
+  const uploadWaiters: { deviceId: string; resolve: (release: () => void) => void; reject: (error: unknown) => void }[] = [];
+  function releaseUpload(deviceId: string): void {
+    activeUploads--; const count = (uploadsByDevice.get(deviceId) ?? 1) - 1;
+    if (count) uploadsByDevice.set(deviceId, count); else uploadsByDevice.delete(deviceId);
+    pumpUploads();
+  }
+  function pumpUploads(): void {
+    for (let i = 0; i < uploadWaiters.length;) {
+      const waiter = uploadWaiters[i]!;
+      if (closing) { uploadWaiters.splice(i, 1); waiter.reject(new HostError('unavailable')); continue; }
+      if (activeUploads >= 4) return;
+      if ((uploadsByDevice.get(waiter.deviceId) ?? 0) >= 2) { i++; continue; }
+      uploadWaiters.splice(i, 1); activeUploads++; uploadsByDevice.set(waiter.deviceId, (uploadsByDevice.get(waiter.deviceId) ?? 0) + 1);
+      waiter.resolve(() => releaseUpload(waiter.deviceId));
+    }
+  }
+  function acquireSendUpload(deviceId: string): Promise<() => void> {
+    return new Promise((resolve, reject) => { uploadWaiters.push({ deviceId, resolve, reject }); pumpUploads(); });
+  }
+  const imageReadsByDevice = new Map<string, number>();
+  function assertOpen(res: ServerResponse, signal: AbortSignal): void { signal.throwIfAborted(); if (res.destroyed || res.closed) throw new HostError('unavailable'); }
+  function sendBytes(res: ServerResponse, data: Uint8Array): Promise<void> {
+    return new Promise(resolve => {
+      const done = () => { res.off('finish', done); res.off('close', done); resolve(); };
+      res.once('finish', done); res.once('close', done);
+      if (res.destroyed || res.closed || res.writableFinished) { done(); return; }
+      res.end(data);
+    });
+  }
+  function pruneUploads(deviceId?: string): void { for (const [id, u] of uploads) if (u.expiresAt <= Date.now() || u.deviceId === deviceId || !state.getDevice(u.deviceId)) removeUpload(id); }
+  const uploadSweep = setInterval(() => pruneUploads(), 30_000); uploadSweep.unref();
+  type Command = { operation: 'create'; workspaceId: string; presetId?: string; requestId: string } | { operation: 'prompt'; sessionId: string; text: string; requestId: string; workspaceId: string; options?: PromptOptions; staged?: StagedUpload[]; fileReservation?: FileUploadReservation } | { operation: 'cancel'; sessionId: string; requestId: string; workspaceId: string; expectedCursor: number } | { operation: 'mutate'; sessionId: string; requestId: string; workspaceId: string; mutation: SessionMutation };
+  // RFC UUID-shaped deterministic identity: upstream dedup is per session, not
+  // per device. Mobile receipts and HTTP request IDs remain device-local.
+  function upstreamRequestId(deviceId: string, requestId: string): string {
+    const hash = createHash('sha256').update(JSON.stringify(['dsh-mobile-prompt-v1', deviceId, requestId])).digest('hex');
+    return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+  }
   function dispatch(deviceId: string, command: Command): Promise<StoredCommand | undefined> {
     const controller = new AbortController();
     return (async () => {
@@ -121,16 +182,44 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
         dispatched = true;
         let result: { sessionId?: string } | undefined;
         if (command.operation === 'create') result = await adapter.createSession({ workspaceId: command.workspaceId, requestId: command.requestId, ...(command.presetId ? { presetId: command.presetId } : {}) }, controller.signal, command.workspaceId);
-        else if (command.operation === 'prompt') await adapter.prompt(command.sessionId, command.text, command.requestId, controller.signal, command.workspaceId);
+        else if (command.operation === 'prompt') {
+          const attachments: UploadedAttachment[] = [];
+          for (const staged of command.staged ?? []) {
+            await checkScope(deviceId, command.workspaceId, true, true);
+            if (staged.filePath) {
+              if (!adapter.upload) throw new HostError('unavailable');
+              const release = await acquireSendUpload(deviceId);
+              try {
+                await checkScope(deviceId, command.workspaceId, true, true);
+                attachments.push(await adapter.upload(command.sessionId, { ...(command.fileReservation ? { reservation: command.fileReservation } : {}), data: files.read(staged.filePath, controller.signal), size: staged.value.ref.size, mime: staged.value.ref.mime, name: staged.value.ref.name }, controller.signal, command.workspaceId));
+              } finally { release(); }
+            } else attachments.push(staged.value);
+          }
+          await checkScope(deviceId, command.workspaceId, true, true);
+          await adapter.prompt(command.sessionId, command.text, upstreamRequestId(deviceId, command.requestId), controller.signal, command.workspaceId, { delivery: command.options?.delivery ?? 'queue', ...(attachments.length ? { attachments } : {}) });
+        }
+        else if (command.operation === 'mutate') {
+          if (!adapter.mutateSession) throw new HostError('unavailable');
+          await adapter.mutateSession(command.sessionId, command.mutation, controller.signal, command.workspaceId);
+        }
         else await adapter.cancel(command.sessionId, controller.signal, command.expectedCursor, command.workspaceId);
         if (closing) return undefined;
+        if (command.operation === 'prompt') await Promise.all((command.staged ?? []).flatMap(u => u.filePath ? [files.remove(u.filePath)] : []));
         return state.finishCommand(deviceId, command.requestId, 'accepted', { ...(result?.sessionId ? { result: { sessionId: result.sessionId } } : {}), httpStatus: command.operation === 'create' ? 201 : 200 });
       } catch (error) {
         if (closing) return undefined;
+        if (command.operation === 'prompt') await Promise.all((command.staged ?? []).flatMap(u => u.filePath ? [files.remove(u.filePath)] : [])).catch(() => {});
         if ((!dispatched || error instanceof HostError) && error instanceof HostError && error.status >= 400 && error.status < 500) {
           return state.finishCommand(deviceId, command.requestId, 'rejected', { error: { code: error.code, message: error.message }, httpStatus: error.status });
         }
         return state.finishCommand(deviceId, command.requestId, 'uncertain', { error: { code: 'delivery_uncertain', message: 'Delivery could not be confirmed. Do not automatically resend this action.' }, httpStatus: 202 });
+      } finally {
+        if (command.operation === 'prompt') command.fileReservation?.release();
+        if (command.operation === 'prompt') await Promise.all((command.staged ?? []).flatMap(u => u.filePath ? [files.remove(u.filePath)] : [])).catch(() => {});
+        if (command.operation === 'prompt' && command.staged?.length) {
+          attachmentDispatches--; claimedImageBytes -= command.staged.reduce((n, u) => n + (u.value.ref.kind === 'image' ? u.value.ref.size : 0), 0);
+          command.staged = [];
+        }
       }
     })();
   }
@@ -167,18 +256,31 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     const device = checkKnownScope(deviceId, session.workspaceId, ids, false, true);
     if (typeof session.id !== 'string' || typeof session.title !== 'string' || !Number.isFinite(session.updatedAt) || typeof session.running !== 'boolean') throw new HostError('internal_error');
     const runningSubagents = childCount(session.runningSubagents);
-    return { id: session.id, title: session.title.slice(0, 256), workspaceId: session.workspaceId, updatedAt: session.updatedAt, running: session.running, ...(runningSubagents !== undefined ? { runningSubagents } : {}), canExecute: allowsWorkspace(device.grants.executeWorkspaceIds, session.workspaceId) };
+    return { ...(session.model !== undefined ? { model: sessionModel(session.model) } : {}), id: session.id, title: session.title.slice(0, 256), workspaceId: session.workspaceId, updatedAt: session.updatedAt, running: session.running, ...(runningSubagents !== undefined ? { runningSubagents } : {}), canExecute: allowsWorkspace(device.grants.executeWorkspaceIds, session.workspaceId) };
+  }
+  const correlationCache = new Map<string, Map<string, string>>();
+  function correlationForDevice(deviceId: string): Map<string, string> {
+    let map = correlationCache.get(deviceId);
+    if (!map) {
+      map = new Map(state.promptCommandIds(deviceId).map(id => [upstreamRequestId(deviceId, id), id]));
+      if (correlationCache.size >= 64) correlationCache.delete(correlationCache.keys().next().value!);
+      correlationCache.set(deviceId, map);
+    }
+    return map;
   }
   async function snapshotForDevice(snapshot: HostSnapshot, deviceId: string, expectedId: string) {
     if (!snapshot || snapshot.session.id !== expectedId || !Array.isArray(snapshot.messages) || !Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < -1 || !['idle', 'running', 'waiting', 'unknown'].includes(snapshot.activity)) throw new HostError('internal_error');
     const ids = await workspaceIds();
     if (workspaceSource.archivedSessionIds().has(expectedId)) throw new HostError('not_found');
     const session = sessionForDevice(snapshot.session, deviceId, ids);
+    const correlation = correlationForDevice(deviceId);
+    const mobileId = (id: string): string => correlation.get(id) ?? id;
     const messages = snapshot.messages.slice(-100).map(message => {
       if (!message || typeof message.id !== 'string' || typeof message.text !== 'string' || !['user', 'assistant', 'system'].includes(message.role) || !Number.isFinite(message.createdAt)) throw new HostError('internal_error');
       if ((message.kind !== undefined && !['message', 'agent_event', 'context'].includes(message.kind)) ||
           (message.serviceText !== undefined && typeof message.serviceText !== 'string')) throw new HostError('internal_error');
-      return { ...(message.kind !== undefined ? { kind: message.kind } : {}), ...(message.serviceText !== undefined ? { serviceText: message.serviceText } : {}), id: message.id, role: message.role, text: message.text, createdAt: message.createdAt, ...(message.requestId && isRequestId(message.requestId) ? { requestId: message.requestId } : {}), ...(message.provisional === true ? { provisional: true } : {}) };
+      if (message.delivery !== undefined && !['queue', 'steer'].includes(message.delivery)) throw new HostError('internal_error');
+      return { ...(message.delivery !== undefined ? { delivery: message.delivery } : {}), ...(message.attachments ? { attachments: safeAttachmentRefs(message.attachments) } : {}), ...(message.kind !== undefined ? { kind: message.kind } : {}), ...(message.serviceText !== undefined ? { serviceText: message.serviceText } : {}), id: message.id, role: message.role, text: message.text, createdAt: message.createdAt, ...(message.requestId && isRequestId(message.requestId) ? { requestId: mobileId(message.requestId) } : {}), ...(message.provisional === true ? { provisional: true } : {}) };
     });
     const detail = snapshot.activityDetail;
     if (detail !== undefined && (!detail || !Number.isSafeInteger(detail.turnStartedAt) || detail.turnStartedAt < 0 ||
@@ -188,7 +290,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     const runningSubagents = childCount(snapshot.runningSubagents);
     if (runningSubagents !== undefined && session.runningSubagents !== undefined && runningSubagents !== session.runningSubagents) throw new HostError('internal_error');
     const count = runningSubagents ?? session.runningSubagents;
-    const result = { ...(count !== undefined ? { runningSubagents: count } : {}), ...(activityDetail ? { activityDetail } : {}), session, messages, cursor: snapshot.cursor, hasMore: snapshot.hasMore === true || snapshot.messages.length > 100, activity: snapshot.activity, ...(snapshot.notice === HISTORY_CUT_NOTICE ? { notice: HISTORY_CUT_NOTICE } : snapshot.activity === 'waiting' || snapshot.activity === 'unknown' ? { notice: 'Return to the desktop to check this task.' } : {}) };
+    const result = { ...(snapshot.model !== undefined ? { model: sessionModel(snapshot.model) } : {}), ...(snapshot.resolvedQuestions !== undefined ? { resolvedQuestions: settledQuestions(snapshot.resolvedQuestions) } : {}), ...(snapshot.pendingQueue ? { pendingQueue: safeQueue(snapshot.pendingQueue).map(q => ({ ...q, ...(q.requestId ? { requestId: mobileId(q.requestId) } : {}) })) } : {}), ...(snapshot.pendingQuestions ? { pendingQuestions: questionsOf(snapshot.pendingQuestions) } : {}), ...(count !== undefined ? { runningSubagents: count } : {}), ...(activityDetail ? { activityDetail } : {}), session, messages, cursor: snapshot.cursor, hasMore: snapshot.hasMore === true || snapshot.messages.length > 100, activity: snapshot.activity, ...(snapshot.notice === HISTORY_CUT_NOTICE ? { notice: HISTORY_CUT_NOTICE } : snapshot.activity === 'unknown' || (snapshot.activity === 'waiting' && !snapshot.pendingQuestions?.length) ? { notice: 'Return to the desktop to check this task.' } : {}) };
     // Keep complete messages and Unicode intact. Observation is a bounded latest-history view.
     while (Buffer.byteLength(JSON.stringify(result), 'utf8') > 2 * 1024 * 1024) {
       if (result.messages.length <= 1) throw new HostError('payload_too_large');
@@ -245,7 +347,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
 
   const streams = new Set<{ deviceId: string; stop: () => void }>();
   const streamCounts = new Map<string, number>();
-  const onRevoke = state.onRevoke(deviceId => { for (const stream of streams) if (stream.deviceId === deviceId) stream.stop(); });
+  const onRevoke = state.onRevoke(deviceId => { pruneUploads(deviceId); for (const stream of streams) if (stream.deviceId === deviceId) stream.stop(); });
   async function streamSnapshots(sessionId: string, deviceId: string, res: ServerResponse, requestSignal: AbortSignal): Promise<void> {
     if ((streamCounts.get(deviceId) ?? 0) >= 3 || streams.size >= 32) throw new HostError('rate_limited');
     streamCounts.set(deviceId, (streamCounts.get(deviceId) ?? 0) + 1);
@@ -394,6 +496,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
   }
 
   async function route(req: IncomingMessage, res: ServerResponse, signal: AbortSignal): Promise<void> {
+    pruneUploads(); await Promise.all([...cleanups]);
     if (closing) throw new HostError('unavailable');
     // No browser surface, cookies, CORS or query credentials. A native client has no Origin.
     if (req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined) throw new HostError('forbidden');
@@ -469,7 +572,12 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       sendJson(res, 200, { items: workspaces.filter(workspace => allowsWorkspace(current.grants.readWorkspaceIds, workspace.id)).map(workspace => ({ id: workspace.id, name: workspace.name, canExecute: allowsWorkspace(current.grants.executeWorkspaceIds, workspace.id) })) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/v1/capabilities') {
-      sendJson(res, 200, { protocolVersion: 1, hostName: config.hostName, upstreamVersion: adapter.upstreamVersion, capabilities: { sessions: true, textPrompt: true, cancel: true, liveSnapshots: true, attachments: false, questions: false, approvals: false, push: false, notifications: !!notifications }, notificationCapabilities: { version: 1, coverage: notifications?.coverage ?? 'degraded', feed: !!notifications, unifiedPush: false, retentionMs: 604800000 } }); return;
+      sendJson(res, 200, { protocolVersion: 1, hostVersion: HOST_VERSION, hostName: config.hostName, upstreamVersion: adapter.upstreamVersion, capabilities: { sessions: true, textPrompt: true, cancel: true, liveSnapshots: true, questionSkip: false, fileDownload: false, ...(adapter.phoneCapabilities?.() ?? { attachments: false, questions: false, steer: false, queue: false, rename: false, models: false }), approvals: false, push: false, notifications: !!notifications }, notificationCapabilities: { version: 1, coverage: notifications?.coverage ?? 'degraded', feed: !!notifications, unifiedPush: false, retentionMs: 604800000 } }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/models') {
+      if (!adapter.models) throw new HostError('unavailable');
+      const catalog = await adapter.models(signal); signal.throwIfAborted(); freshDevice(device.deviceId);
+      sendJson(res, 200, catalog); return;
     }
     if (req.method === 'GET' && url.pathname === '/v1/presets') {
       const presets = await adapter.listPresets(signal); signal.throwIfAborted(); freshDevice(device.deviceId);
@@ -501,6 +609,94 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       }
       sendJson(res, 200, { items, nextCursor }); return;
     }
+    if (req.method === 'DELETE' && segments[0] === 'sessions' && segments.length === 4 && segments[2] === 'uploads') {
+      const upload = uploads.get(segments[3]!);
+      if (!upload || upload.deviceId !== device.deviceId || upload.sessionId !== segments[1]) throw new HostError('not_found');
+      await checkScope(device.deviceId, upload.workspaceId, true, true);
+      removeUpload(segments[3]!); await Promise.all([...cleanups]);
+      res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end(); return;
+    }
+    if (req.method === 'POST' && segments[0] === 'sessions' && segments.length === 3 && segments[2] === 'uploads') {
+      if (!adapter.upload || !adapter.phoneCapabilities?.().attachments) throw new HostError('unavailable');
+      limits.take(`upload:${device.deviceId}`, 12);
+      const snapshot = await sessionSnapshot(segments[1]!, device.deviceId, signal);
+      await checkScope(device.deviceId, snapshot.session.workspaceId, true, true);
+      const mime = req.headers['content-type'] ?? '', length = req.headers['content-length'];
+      if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new HostError('unsupported_media_type');
+      if (!UPLOAD_MIMES.includes(mime)) throw new HostError('unsupported_media_type');
+      if (!length || !/^[1-9][0-9]{0,8}$/.test(length)) throw new HostError('invalid_request');
+      const size = Number(length); if (size > UPLOAD_LIMIT) throw new HostError('payload_too_large');
+      let name: string; try { name = decodeURIComponent(String(req.headers['x-file-name'] ?? 'upload')); } catch { throw new HostError('invalid_request'); }
+      if (!name || Buffer.byteLength(name) > 256 || /[\\/\x00-\x1f\x7f]/.test(name) || name === '.' || name === '..') throw new HostError('invalid_request');
+      pruneUploads(); await Promise.all([...cleanups]);
+      // Images retain validated base64; files stay private on disk until send.
+      // Reserve image bytes synchronously before concurrent intake.
+      const imageBytes = UPLOAD_MIMES.slice(0, 4).includes(mime) ? size : 0;
+      const deviceUploads = uploadsByDevice.get(device.deviceId) ?? 0;
+      if (activeUploads >= 4 || deviceUploads >= 2 || uploads.size + activeUploads >= 64 || [...uploads.values()].filter(u => u.deviceId === device.deviceId).length + deviceUploads >= 20 || [...uploads.values()].reduce((n, u) => n + (u.value.ref.kind === 'image' ? u.value.ref.size : 0), 0) + reservedImageBytes + claimedImageBytes + imageBytes > 200 * 1024 * 1024) throw new HostError('rate_limited');
+      activeUploads++; uploadsByDevice.set(device.deviceId, deviceUploads + 1); reservedImageBytes += imageBytes;
+      let filePath: string | undefined, staged = false;
+      try {
+        let received = 0;
+        const data = (async function* () {
+          for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+            signal.throwIfAborted(); await checkScope(device.deviceId, snapshot.session.workspaceId, true, true);
+            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string); received += bytes.length;
+            if (received > size || received > UPLOAD_LIMIT) throw new HostError('payload_too_large');
+            yield bytes;
+          }
+          if (received !== size) throw new HostError('invalid_request');
+        })();
+        let value: UploadedAttachment;
+        if (imageBytes) value = await adapter.upload(segments[1]!, { data, size, mime, name }, signal, snapshot.session.workspaceId);
+        else {
+          files.assertOutside(await workspaceSource.list()); signal.throwIfAborted();
+          filePath = await files.save(data, size, signal);
+          value = { ref: { id: randomBytes(24).toString('hex'), name, size, mime, kind: 'file' }, upstream: { type: 'file', receiptId: '' } };
+        }
+        signal.throwIfAborted(); await checkScope(device.deviceId, snapshot.session.workspaceId, true, true); signal.throwIfAborted();
+        const uploadId = randomBytes(24).toString('base64url'), expiresAt = Date.now() + 10 * 60_000;
+        const ref = safeAttachmentRefs([value.ref])[0]!;
+        if (ref.size !== size || ref.mime !== mime) throw new HostError('internal_error');
+        uploads.set(uploadId, { deviceId: device.deviceId, sessionId: segments[1]!, workspaceId: snapshot.session.workspaceId, value: { ref, upstream: value.upstream }, ...(filePath ? { filePath } : {}), expiresAt }); staged = true;
+        sendJson(res, 201, { uploadId, expiresAt, attachment: ref }); return;
+      } finally { if (filePath && !staged) await files.remove(filePath); reservedImageBytes -= imageBytes; releaseUpload(device.deviceId); }
+    }
+    if (req.method === 'GET' && segments[0] === 'sessions' && segments.length === 4 && segments[2] === 'files') {
+      if (!adapter.file || !adapter.phoneCapabilities?.().fileDownload) throw new HostError('unavailable');
+      if (activeFileReads >= 2) throw new HostError('rate_limited');
+      limits.take(`file:${device.deviceId}`, 30); activeFileReads++;
+      try {
+        const visible = await snapshotForDevice(await sessionSnapshot(segments[1]!, device.deviceId, signal), device.deviceId, segments[1]!); assertOpen(res, signal);
+        if (!visible.messages.some(m => m.attachments?.some(a => a.kind === 'file' && a.id === segments[3]))) throw new HostError('not_found');
+        const session = visible.session;
+        const value = await adapter.file(session.id, segments[3]!, signal, session.workspaceId); assertOpen(res, signal);
+        await checkScope(device.deviceId, session.workspaceId, false, true); assertOpen(res, signal);
+        const ref = safeAttachmentRefs([value.ref])[0]!;
+        if (ref.kind !== 'file' || ref.id !== segments[3] || value.data.length !== ref.size || ref.size > UPLOAD_LIMIT) throw new HostError('payload_too_large');
+        const name = encodeURIComponent(ref.name).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(ref.size), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${name}` });
+        await sendBytes(res, value.data); return;
+      } finally { activeFileReads--; }
+    }
+    if (req.method === 'GET' && segments[0] === 'sessions' && segments.length === 4 && segments[2] === 'attachments') {
+      if (!adapter.image) throw new HostError('unavailable');
+      const deviceReads = imageReadsByDevice.get(device.deviceId) ?? 0;
+      if (activeImageReads >= 4 || deviceReads >= 2) throw new HostError('rate_limited');
+      activeImageReads++; imageReadsByDevice.set(device.deviceId, deviceReads + 1);
+      try {
+        const visible = await snapshotForDevice(await sessionSnapshot(segments[1]!, device.deviceId, signal), device.deviceId, segments[1]!); assertOpen(res, signal);
+        if (!visible.messages.some(m => m.attachments?.some(a => a.kind === 'image' && a.id === segments[3]))) throw new HostError('not_found');
+        const session = visible.session;
+        const value = await adapter.image(session.id, segments[3]!, signal, session.workspaceId); assertOpen(res, signal);
+        await checkScope(device.deviceId, session.workspaceId, false, true); assertOpen(res, signal);
+        if (value.data.length > UPLOAD_LIMIT || value.data.length !== value.ref.size || value.ref.id !== segments[3] || !UPLOAD_MIMES.slice(0, 4).includes(value.ref.mime) || value.ref.kind !== 'image') throw new HostError('payload_too_large');
+        res.writeHead(200, { 'Content-Type': value.ref.mime, 'Content-Length': String(value.data.length), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' }); await sendBytes(res, value.data); return;
+      } finally {
+        activeImageReads--; const count = (imageReadsByDevice.get(device.deviceId) ?? 1) - 1;
+        if (count) imageReadsByDevice.set(device.deviceId, count); else imageReadsByDevice.delete(device.deviceId);
+      }
+    }
     if (req.method === 'GET' && segments[0] === 'sessions' && segments.length === 3 && segments[2] === 'events') {
       await streamSnapshots(segments[1]!, device.deviceId, res, signal); return;
     }
@@ -520,42 +716,57 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       if (!isRequestId(body.requestId)) throw new HostError('invalid_request');
       const requestId = body.requestId.toLowerCase();
       let operation: Command['operation'], canonicalPayload: Record<string, unknown>;
+      let mutation: SessionMutation | undefined;
       if (segments.length === 1) {
         keys(body, ['requestId', 'workspaceId', 'presetId'], ['requestId', 'workspaceId']);
         if (typeof body.workspaceId !== 'string' || (body.presetId !== undefined && (typeof body.presetId !== 'string' || !body.presetId || body.presetId.length > 256 || /[\x00-\x1f\x7f]/.test(body.presetId)))) throw new HostError('invalid_request');
         operation = 'create'; canonicalPayload = { workspaceId: body.workspaceId, presetId: body.presetId ?? null };
       } else if (segments.length === 3 && segments[2] === 'messages') {
-        keys(body, ['requestId', 'text']);
-        if (typeof body.text !== 'string' || !body.text.trim() || Buffer.byteLength(body.text, 'utf8') > 32768 || /\x00/.test(body.text)) throw new HostError(typeof body.text === 'string' && Buffer.byteLength(body.text, 'utf8') > 32768 ? 'payload_too_large' : 'invalid_request');
-        operation = 'prompt'; canonicalPayload = { sessionId: segments[1], text: body.text };
+        keys(body, ['requestId', 'text', 'delivery', 'uploadIds'], ['requestId', 'text']);
+        if (typeof body.text !== 'string' || (!body.text.trim() && !(Array.isArray(body.uploadIds) && body.uploadIds.length)) || Buffer.byteLength(body.text, 'utf8') > 32768 || /\x00/.test(body.text) || (body.delivery !== undefined && !['queue', 'steer'].includes(body.delivery as string)) || (body.uploadIds !== undefined && (!Array.isArray(body.uploadIds) || body.uploadIds.length > 20 || body.uploadIds.some(id => !identifier(id)) || new Set(body.uploadIds).size !== body.uploadIds.length))) throw new HostError(typeof body.text === 'string' && Buffer.byteLength(body.text, 'utf8') > 32768 ? 'payload_too_large' : 'invalid_request');
+        operation = 'prompt'; canonicalPayload = { sessionId: segments[1], text: body.text, ...(body.delivery && body.delivery !== 'queue' ? { delivery: body.delivery } : {}), ...(Array.isArray(body.uploadIds) && body.uploadIds.length ? { uploadIds: body.uploadIds } : {}) };
       } else if (segments.length === 3 && segments[2] === 'cancellations') {
         keys(body, ['requestId', 'expectedCursor']);
         if (!Number.isSafeInteger(body.expectedCursor) || (body.expectedCursor as number) < -1) throw new HostError('invalid_request');
         operation = 'cancel'; canonicalPayload = { sessionId: segments[1], expectedCursor: body.expectedCursor };
+      } else if (segments.length === 3) {
+        mutation = parseMutation(segments[2]!, body); operation = 'mutate';
+        canonicalPayload = { sessionId: segments[1], mutation };
       } else throw new HostError('not_found');
       const payloadHash = hashSecret(JSON.stringify(canonicalPayload));
-      const prior = state.getCommand(device.deviceId, requestId);
-      if (prior) {
+      const replay = async (): Promise<void> => {
+        const prior = state.getCommand(device.deviceId, requestId)!;
         const repeated = state.admitCommand(device.deviceId, requestId, operation, payloadHash);
         // A receipt replay never calls upstream, even if the session vanished or DSH is offline.
         // Its internal admission scope still has to be configured/readable/executable now.
         if (!prior.workspaceId) throw new HostError('forbidden');
         await checkScope(device.deviceId, prior.workspaceId, true, operation !== 'create');
-        sendJson(res, repeated.httpStatus, repeated.receipt); return;
-      }
+        sendJson(res, repeated.httpStatus, repeated.receipt);
+      };
+      if (state.getCommand(device.deviceId, requestId)) { await replay(); return; }
+      let admittedHere = false;
+      try {
+      if (body.delivery === 'steer' && !adapter.phoneCapabilities?.().steer) throw new HostError('unavailable');
+      if (mutation) { const capability = mutation.kind === 'answer' ? 'questions' : mutation.kind === 'model' ? 'models' : mutation.kind; if (!adapter.phoneCapabilities?.()[capability] || (mutation.kind === 'answer' && mutation.skip && !adapter.phoneCapabilities?.().questionSkip)) throw new HostError('unavailable'); }
       let command: Command;
       if (segments.length === 1) {
         keys(body, ['requestId', 'workspaceId', 'presetId'], ['requestId', 'workspaceId']);
         if (typeof body.workspaceId !== 'string' || (body.presetId !== undefined && (typeof body.presetId !== 'string' || !body.presetId || body.presetId.length > 256 || /[\x00-\x1f\x7f]/.test(body.presetId)))) throw new HostError('invalid_request');
         command = { operation: 'create', requestId, workspaceId: body.workspaceId, ...(body.presetId !== undefined ? { presetId: body.presetId as string } : {}) };
-      } else if (segments.length === 3 && (segments[2] === 'messages' || segments[2] === 'cancellations')) {
-        keys(body, segments[2] === 'messages' ? ['requestId', 'text'] : ['requestId', 'expectedCursor']);
-        if (segments[2] === 'cancellations' && (!Number.isSafeInteger(body.expectedCursor) || (body.expectedCursor as number) < -1)) throw new HostError('invalid_request');
-        if (segments[2] === 'messages' && (typeof body.text !== 'string' || !body.text.trim() || Buffer.byteLength(body.text, 'utf8') > 32768 || /\x00/.test(body.text))) throw new HostError(typeof body.text === 'string' && Buffer.byteLength(body.text, 'utf8') > 32768 ? 'payload_too_large' : 'invalid_request');
-        // Authorize before admission and again immediately before dispatch.
+      } else if (segments.length === 3) {
         const snapshot = await sessionSnapshot(segments[1]!, device.deviceId, signal);
         await checkScope(device.deviceId, snapshot.session.workspaceId, true, true);
-        command = segments[2] === 'messages' ? { operation: 'prompt', requestId, sessionId: segments[1]!, text: body.text as string, workspaceId: snapshot.session.workspaceId } : { operation: 'cancel', requestId, sessionId: segments[1]!, workspaceId: snapshot.session.workspaceId, expectedCursor: body.expectedCursor as number };
+        if (state.getCommand(device.deviceId, requestId)) { await replay(); return; }
+        const base = { requestId, sessionId: segments[1]!, workspaceId: snapshot.session.workspaceId };
+        if (mutation) {
+          if (mutation.kind === 'answer') { const pending = snapshot.pendingQuestions?.find(q => q.callId === mutation!.callId); if (!pending) throw new HostError('question_expired'); validateAnswer(pending, mutationAnswer(mutation, pending)); }
+          command = { ...base, operation: 'mutate', mutation };
+        } else if (operation === 'prompt') {
+          if (body.delivery === 'steer' && !snapshot.session.running) throw new HostError('conflict');
+          const attachments = ((body.uploadIds ?? []) as string[]).map(id => { const u = uploads.get(id); if (!u || u.expiresAt <= Date.now() || u.deviceId !== device.deviceId || u.sessionId !== base.sessionId || u.workspaceId !== base.workspaceId) throw new HostError('not_found'); if (u.claimed) throw new HostError('conflict'); return u; });
+          if (attachments.reduce((sum, a) => sum + a.value.ref.size, 0) > 200 * 1024 * 1024) throw new HostError('payload_too_large');
+          command = { ...base, operation: 'prompt', text: body.text as string, staged: attachments, options: { delivery: body.delivery === 'steer' ? 'steer' : 'queue' } };
+        } else command = { ...base, operation: 'cancel', expectedCursor: body.expectedCursor as number };
       } else throw new HostError('not_found');
       await checkScope(device.deviceId, command.workspaceId, true, command.operation !== 'create');
       if (command.operation === 'create' && command.presetId) {
@@ -564,8 +775,26 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       }
       signal.throwIfAborted();
       await checkScope(device.deviceId, command.workspaceId, true, command.operation !== 'create');
+      let reservation: FileUploadReservation | undefined, transferred = false;
+      try {
+      if (!state.getCommand(device.deviceId, requestId) && command.operation === 'prompt') {
+        const count = command.staged?.filter(u => u.filePath).length ?? 0;
+        if (count && adapter.reserveFileUploads) {
+          reservation = await adapter.reserveFileUploads(command.sessionId, count, signal, command.workspaceId);
+          command.fileReservation = reservation;
+          signal.throwIfAborted(); await checkScope(device.deviceId, command.workspaceId, true, true);
+        }
+      }
+      if (state.getCommand(device.deviceId, requestId)) { await replay(); return; }
+      if (command.operation === 'prompt' && command.staged?.length && attachmentDispatches >= 16) throw new HostError('rate_limited');
+      if (command.operation === 'prompt' && command.staged?.some(u => u.claimed || ![...uploads.values()].includes(u) || u.expiresAt <= Date.now())) throw new HostError('conflict');
       const admitted = state.admitCommand(device.deviceId, requestId, command.operation, payloadHash, command.workspaceId);
       if (!admitted.fresh) { sendJson(res, admitted.httpStatus, admitted.receipt); return; }
+      admittedHere = true;
+      if (command.operation === 'prompt') correlationCache.delete(device.deviceId);
+      if (command.operation === 'prompt' && command.staged?.length) { attachmentDispatches++; claimedImageBytes += command.staged.reduce((n, u) => n + (u.value.ref.kind === 'image' ? u.value.ref.size : 0), 0); }
+      if (command.operation === 'prompt') for (const u of command.staged ?? []) { u.claimed = true; for (const [id, candidate] of uploads) if (candidate === u) uploads.delete(id); }
+      transferred = true;
       const completion = dispatch(device.deviceId, command);
       const key = `${device.deviceId}:${requestId}`;
       dispatches.set(key, { deviceId: device.deviceId, requestId, completion });
@@ -573,9 +802,17 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       const receipt = await responseReceipt(device.deviceId, requestId, completion);
       freshDevice(device.deviceId);
       sendJson(res, receipt.httpStatus, receipt.receipt); return;
+      } finally { if (!transferred) reservation?.release(); }
+      } catch (error) {
+        // Another exact POST can win admission while this one awaits scope or
+        // quota. Its durable result wins over any stale pre-admission failure;
+        // admitCommand still detects operation/payload mismatch as conflict.
+        if (!admittedHere && state.getCommand(device.deviceId, requestId)) { await replay(); return; }
+        throw error;
+      }
     }
     if (req.method === 'DELETE' && url.pathname === '/v1/device') {
-      state.revokeDevice(device.deviceId); res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end(); return;
+      state.revokeDevice(device.deviceId); await Promise.all([...cleanups]); res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end(); return;
     }
     throw new HostError('not_found');
   }
@@ -601,9 +838,10 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     });
   }
   const server = prepared.tls ? createHttpsServer(prepared.tls, handle) : createHttpServer(handle);
-  server.requestTimeout = 15_000;
-  server.headersTimeout = 10_000;
-  server.keepAliveTimeout = 5_000;
+  // Reuse authenticated TLS connections on mobile; still bound slow headers and upload lifetime.
+  server.requestTimeout = 120_000;
+  server.headersTimeout = 65_000;
+  server.keepAliveTimeout = 60_000;
   server.maxHeadersCount = 32;
   server.on('clientError', (_error, socket) => { if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); });
   const host: MobileHostServer = {
@@ -612,6 +850,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       if (closing) return Promise.reject(new HostError('unavailable'));
       started ??= (async () => {
         state.claimRuntime(); claimed = true;
+        await files.startup(await workspaceSource.list());
         if (relay) state.recoverPendingRelayPublications();
         const sources = adapter.notifications?.();
         if (sources) { notifications = new NotificationFeed(state, sources); await notifications.start(); }
@@ -629,7 +868,8 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     },
     async close() {
       if (closing) return;
-      closing = true; shutdown.abort();
+      closing = true; pumpUploads(); shutdown.abort(); clearInterval(uploadSweep); for (const id of uploads.keys()) removeUpload(id);
+      await Promise.all([...cleanups]).catch(() => {}); await files.close().catch(() => {});
       await notifications?.close();
       await relay?.close();
       for (const stream of streams) stream.stop();

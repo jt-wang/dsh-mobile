@@ -49,6 +49,8 @@ class RepositoryTest {
         var otherSnapshot: (() -> MockResponse)? = null
         var chatSnapshot: (() -> MockResponse)? = null
         var create: ((RecordedRequest) -> MockResponse)? = null
+        val deletedUploads = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var uploadCount = 0
         var failIndex = false
         var metadataDelayMs = 0L
         var metadataGate: (() -> Unit)? = null
@@ -58,6 +60,10 @@ class RepositoryTest {
         var receipt: (String) -> MockResponse = { json("""{"error":{"code":"not_found","message":"Synthetic","retryable":false}}""", 404) }
         override fun dispatch(request: RecordedRequest): MockResponse {
             requests += request
+            if (request.method == "DELETE" && request.requestUrl!!.encodedPath.startsWith("/v1/sessions/chat/uploads/")) {
+                deletedUploads += request.requestUrl!!.encodedPath.substringAfterLast('/')
+                return MockResponse().setResponseCode(404)
+            }
             if (request.requestUrl?.encodedPath in setOf("/v1/capabilities", "/v1/workspaces", "/v1/presets")) metadataGate?.invoke()
             return when (request.requestUrl?.encodedPath) {
             "/v1/pairings" -> json("""{"deviceId":"device-synthetic","deviceToken":"synthetic-device-token-for-tests","hostName":"Synthetic host","protocolVersion":1}""", 201)
@@ -68,9 +74,10 @@ class RepositoryTest {
                 else if (failIndex) MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else json(index)
             "/v1/sessions/other" -> otherSnapshot?.invoke() ?: json(snapshot().replace("\"id\":\"chat\"", "\"id\":\"other\""))
             "/v1/sessions/chat" -> chatSnapshot?.invoke() ?: json(snapshotText)
+            "/v1/sessions/chat/uploads" -> { uploadCount++; json("""{"uploadId":"fresh-$uploadCount","expiresAt":9999999999999,"attachment":{"id":"ref","name":"test.txt","size":4,"mime":"text/plain","kind":"file"}}""", 201) }
             "/v1/sessions/chat/events" -> events()
             "/v1/sessions/chat/messages", "/v1/sessions/other/messages" -> { mutations += request; message(request) }
-            "/v1/sessions/chat/cancellations" -> { mutations += request; message(request) }
+            "/v1/sessions/chat/cancellations", "/v1/sessions/chat/queue", "/v1/sessions/chat/title", "/v1/sessions/chat/model", "/v1/sessions/chat/answers" -> { mutations += request; message(request) }
             else -> if (request.requestUrl?.encodedPath?.startsWith("/v1/commands/") == true)
                 receipt(request.requestUrl!!.pathSegments.last()) else json("{}", 404)
             }
@@ -132,6 +139,38 @@ class RepositoryTest {
         }
     }
 
+    @Test fun `host is online before history while cached commands remain gated`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            val requested = CompletableDeferred<Unit>()
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = { requested.complete(Unit); release.await(5, TimeUnit.SECONDS); json(snapshot()) }
+            val refresh = scope.async { repo.refresh() }
+            try {
+                withTimeout(5000) { requested.await() }
+                assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+                assertTrue(repo.state.value.busy)
+                assertTrue(repo.state.value.snapshotStale)
+                assertFalse(dev.dshmobile.app.model.MobileReducer.canSend(repo.state.value, "Synthetic"))
+                assertFalse(dev.dshmobile.app.ui.components.canCancel(repo.state.value))
+            } finally { release.countDown(); refresh.await() }
+        }
+    }
+    @Test fun `session index starts before capability negotiation completes and unsupported results are discarded`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.capabilities = fixture.capabilities.replace("\"sessions\":true", "\"sessions\":false")
+            fixture.metadataGate = { release.await(5, TimeUnit.SECONDS) }
+            val before = fixture.requests.count { it.requestUrl?.encodedPath == "/v1/sessions" }
+            val refresh = scope.async { repo.refresh() }
+            try {
+                withTimeout(1500) {
+                    while (fixture.requests.count { it.requestUrl?.encodedPath == "/v1/sessions" } == before) kotlinx.coroutines.delay(10)
+                }
+            } finally { release.countDown(); refresh.await() }
+            assertTrue(repo.state.value.sessions.isEmpty())
+            assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+        }
+    }
     @Test fun `list refresh does not serialize independent metadata round trips`() = runBlocking {
         withRepository { repo, _, fixture, _ ->
             fixture.metadataDelayMs = 500
@@ -1037,6 +1076,134 @@ class RepositoryTest {
             } finally { release.countDown(); prefetching.close() }
         }
     }
+    @Test fun `phone commands with absent capability or read only authority never POST`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            repo.rename("Synthetic title")
+            repo.selectModel(dev.dshmobile.app.model.ModelSelection("fixture", "vision"))
+            assertTrue(fixture.mutations.isEmpty())
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":true,\"rename\":true,\"models\":true,\"queue\":true")
+            fixture.snapshotText = snapshot().replace("\"canExecute\":true", "\"canExecute\":false")
+            repo.refresh(); repo.rename("Synthetic title"); repo.selectModel(dev.dshmobile.app.model.ModelSelection("fixture", "vision"))
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
+    @Test fun `uncertain phone mutation survives restore and lookup without another POST`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":false,\"rename\":true")
+            repo.refresh(); repo.rename("Synthetic title")
+            assertEquals(1, fixture.mutations.size)
+            val pending = store.value.pending!!
+            repo.close()
+            val restored = NetworkMobileRepository(store, scope, debug = true)
+            try {
+                restored.restore(); restored.setForeground(true); restored.resolvePending()
+                assertEquals(pending.requestId, store.value.pending?.requestId)
+                assertEquals("Synthetic title", store.value.pending?.title)
+                assertEquals(1, fixture.mutations.size)
+            } finally { restored.close() }
+        }
+    }
+    @Test fun `expired question rejection releases pending and refreshes without replay`() = runBlocking {
+        withRepository { repo, store, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"questions\":false", "\"questions\":true")
+            fixture.snapshotText = snapshot().dropLast(1) + """, "pendingQuestions":[{"callId":"call","state":"open","questions":[{"id":"q","question":"Synthetic?","options":[{"label":"Yes"}],"multiSelect":false,"allowFreeText":false}]}]}"""
+            fixture.message = { fixture.snapshotText = snapshot(); json("""{"error":{"code":"question_expired","message":"Synthetic","retryable":false}}""", 409) }
+            repo.refresh(); repo.answer("call", dev.dshmobile.app.model.QuestionAnswer(listOf(dev.dshmobile.app.model.AnswerItem("q", listOf("Yes")))))
+            assertNull(store.value.pending); assertTrue(repo.state.value.snapshot!!.pendingQuestions.isEmpty())
+            repo.refresh(); assertEquals(1, fixture.mutations.size)
+        }
+    }
+    @Test fun `skip capability is opt in continued questions cannot answer and payload is exclusive`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"questions\":false", "\"questions\":true")
+            fixture.snapshotText = snapshot().dropLast(1) + """, "pendingQuestions":[{"callId":"call","state":"continued","questions":[{"id":"q","question":"Synthetic?","options":[{"label":"Yes"}]}]}]}"""
+            repo.refresh(); repo.answer("call", dev.dshmobile.app.model.QuestionAnswer(listOf(dev.dshmobile.app.model.AnswerItem("q", listOf("Yes")))))
+            assertTrue(fixture.mutations.isEmpty())
+            repo.skipQuestion("call"); assertTrue(fixture.mutations.isEmpty())
+            fixture.capabilities = fixture.capabilities.replace("\"questions\":true", "\"questions\":true,\"questionSkip\":true")
+            fixture.snapshotText = fixture.snapshotText.replace("\"continued\"", "\"open\"")
+            repo.refresh(); repo.skipQuestion("call")
+            assertEquals(1, fixture.mutations.size)
+            val body = fixture.mutations.single().body.clone().readUtf8()
+            assertTrue(body.contains("\"skip\":true")); assertFalse(body.contains("\"answer\""))
+        }
+    }
+    @Test fun `accepted local prompts survive partial host queue and reconcile matching request only`() = runBlocking {
+        withRepository { repo, store, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":false,\"queue\":true")
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":20}""") }
+            fixture.snapshotText = snapshot(running = true)
+            repo.refresh(); repo.updateDraft("First synthetic"); repo.sendMessage("First synthetic")
+            val first = store.value.acceptedPrompts.single().requestId
+            repo.updateDraft("Second synthetic"); repo.sendMessage("Second synthetic")
+            assertEquals(2, store.value.acceptedPrompts.size)
+            fixture.snapshotText = snapshot().dropLast(1) + """, "pendingQueue":[{"id":"host-item","text":"First synthetic","delivery":"queue","requestId":"$first"}]}"""
+            repo.refresh()
+            assertEquals(listOf("Second synthetic"), store.value.acceptedPrompts.map { it.text })
+            assertEquals(1, repo.state.value.snapshot!!.pendingQueue.size)
+        }
+    }
+    @Test fun `conflicting request id never creates a replacement mutation`() = runBlocking {
+        withRepository { repo, store, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":false,\"rename\":true")
+            fixture.message = { json("""{"error":{"code":"request_conflict","message":"Synthetic","retryable":false}}""", 409) }
+            repo.refresh(); repo.rename("Synthetic title"); val id = store.value.pending?.requestId
+            repo.resolvePending(); repo.refresh()
+            assertNotNull(id); assertEquals(id, store.value.pending?.requestId); assertEquals(1, fixture.mutations.size)
+        }
+    }
+    @Test fun `discard staged uploads best effort but never delete admitted sources`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":true")
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":20}""") }
+            repo.refresh()
+            val source = dev.dshmobile.app.model.DraftAttachment("local", "content://synthetic/source", "test.txt", 4, "text/plain", "remove", Long.MAX_VALUE)
+            repo.saveAttachments("chat", listOf(source)); repo.saveAttachments("chat", emptyList())
+            kotlinx.coroutines.withTimeout(5000) { while (fixture.deletedUploads.isEmpty()) kotlinx.coroutines.delay(10) }
+            assertEquals(listOf("remove"), fixture.deletedUploads.toList())
+            repo.saveAttachments("chat", listOf(source.copy(uploadId = "admitted")))
+            repo.sendMessage("", null, listOf("admitted"))
+            repo.saveAttachments("chat", emptyList())
+            assertEquals(listOf("remove"), fixture.deletedUploads.toList())
+        }
+    }
+    @Test fun `missing staging refreshes once with same requestId and preserves payload`() = runBlocking {
+        withRepository { repo, store, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":true")
+            repo.refresh()
+            val source = dev.dshmobile.app.model.DraftAttachment("local", "content://synthetic/source", "test.txt", 4, "text/plain", "old", Long.MAX_VALUE)
+            repo.saveAttachments("chat", listOf(source))
+            fixture.message = { request ->
+                if (request.body.clone().readUtf8().contains("\"old\"")) json("""{"error":{"code":"not_found","message":"Synthetic","retryable":false}}""", 404)
+                else json("""{"requestId":"${requestId(request)}","status":"accepted","updatedAt":20}""")
+            }
+            repo.sendMessage("", "queue", listOf("old"))
+            assertEquals(2, fixture.mutations.size)
+            assertEquals(1, fixture.uploadCount)
+            assertEquals(1, fixture.mutations.map(::requestId).distinct().size)
+            assertTrue(fixture.mutations.last().body.clone().readUtf8().contains("\"fresh-1\""))
+            assertNull(store.value.pending)
+            assertTrue(store.value.attachmentDrafts.isEmpty())
+            repo.refresh(); assertEquals(2, fixture.mutations.size)
+        }
+    }
+    @Test fun `explicit attachment only resend preserves uploads delivery and refreshes expired sources`() = runBlocking {
+        withRepository { repo, store, fixture, _ ->
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":true")
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":20}""") }
+            repo.refresh()
+            repo.saveAttachments("chat", listOf(dev.dshmobile.app.model.DraftAttachment("local", "content://synthetic/source", "test.txt", 4, "text/plain", "old", 1)))
+            repo.sendMessage("", "queue", listOf("old"))
+            val original = store.value.acceptedPrompts.single().requestId
+            repo.state.value.localPromptActions!!.resend(original)
+            assertEquals(2, fixture.mutations.size)
+            assertEquals(1, fixture.uploadCount)
+            assertEquals(2, fixture.mutations.map(::requestId).distinct().size)
+            val body = fixture.mutations.last().body.clone().readUtf8()
+            assertTrue(body.contains("\"delivery\":\"queue\"")); assertTrue(body.contains("\"fresh-1\""))
+            assertTrue(body.contains("\"text\":\"\""))
+        }
+    }
     private suspend fun withRepository(now: () -> Long = System::currentTimeMillis, block: suspend (NetworkMobileRepository, MemoryStore, Fixture, CoroutineScope) -> Unit) {
         val scope = CoroutineScope(kotlin.coroutines.coroutineContext + SupervisorJob())
         val store = MemoryStore()
@@ -1044,7 +1211,7 @@ class RepositoryTest {
         MockWebServer().use { server ->
             server.dispatcher = fixture
             server.start()
-            val repo = NetworkMobileRepository(store, scope, debug = true, now = now)
+            val repo = NetworkMobileRepository(store, scope, debug = true, now = now, openAttachment = { "test".byteInputStream() })
             try {
                 repo.setForeground(true)
                 // Bind the URL to this fixture's IPv4 listener, not localhost's unrelated IPv6 route.

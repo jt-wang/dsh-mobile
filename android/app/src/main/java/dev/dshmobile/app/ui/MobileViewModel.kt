@@ -19,6 +19,52 @@ import kotlinx.coroutines.sync.withLock
 class MobileViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = createMobileRepository(application, viewModelScope)
     val state = repository.state
+    internal val phone = dev.dshmobile.app.ui.chat.PhoneEditor(application, repository, viewModelScope)
+    var modelCatalog by mutableStateOf<dev.dshmobile.app.model.ModelCatalog?>(null); private set
+    var modelsLoading by mutableStateOf(false); private set
+    var modelsFailed by mutableStateOf(false); private set
+    var selectedModels by mutableStateOf<Map<String, dev.dshmobile.app.model.ModelSelection>>(emptyMap()); private set
+    var phoneAction by mutableStateOf<String?>(null); private set
+    var phoneError by mutableStateOf<String?>(null); private set
+    var phoneErrorAction by mutableStateOf<String?>(null); private set
+    var answeredQuestions by mutableStateOf<Map<String, dev.dshmobile.app.model.QuestionAnswer>>(emptyMap()); private set
+    fun loadModels() {
+        if (modelsLoading) return
+        modelsLoading = true; modelsFailed = false
+        viewModelScope.launch {
+            try { modelCatalog = repository.models() }
+            catch (_: Exception) { modelsFailed = true }
+            finally { modelsLoading = false }
+        }
+    }
+    private fun phoneMutation(key: String, operation: suspend () -> Unit, accepted: () -> Unit = {}) {
+        if (interactionBlocked || !dev.dshmobile.app.model.PhoneRules.canMutate(state.value)) return
+        interactionBlocked = true; phoneAction = key; phoneError = null; phoneErrorAction = null
+        viewModelScope.launch {
+            try {
+                editorActions.withLock { operation() }
+                if (state.value.pending == null && state.value.error == null) accepted() else phoneError = state.value.error ?: "command_uncertain"
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { phoneError = "host_error" }
+            finally { if (phoneError != null) phoneErrorAction = key; interactionBlocked = false; phoneAction = null }
+        }
+    }
+    fun rename(title: String, accepted: () -> Unit) = phoneMutation("rename", { repository.rename(title) }, accepted)
+    fun queueAction(id: String, action: String) = phoneMutation("queue:$id:$action", { repository.queueAction(id, action) })
+    fun selectModel(selection: dev.dshmobile.app.model.ModelSelection, accepted: () -> Unit) {
+        val session = state.value.snapshot?.session?.id ?: return
+        phoneMutation("model", { repository.selectModel(selection) }) { selectedModels = selectedModels + (session to selection); accepted() }
+    }
+    fun answer(callId: String, answer: dev.dshmobile.app.model.QuestionAnswer) {
+        val session = state.value.snapshot?.session?.id ?: return
+        phoneMutation("answer:$callId", { repository.answer(callId, answer) }) {
+            answeredQuestions = answeredQuestions + (dev.dshmobile.app.model.questionDraftKey(session, callId) to answer)
+        }
+    }
+    fun saveAnswer(sessionId: String, callId: String, answer: dev.dshmobile.app.model.QuestionAnswer) { viewModelScope.launch { repository.saveAnswerDraft(sessionId, callId, answer) } }
+    fun skipQuestion(callId: String) = phoneMutation("answer:$callId", { repository.skipQuestion(callId) }) {}
+    suspend fun loadImage(session: String, id: String) = repository.image(session, id)
+    suspend fun loadFile(session: String, id: String) = repository.file(session, id)
 
     // Memory-only: invitation secrets never enter SavedState, logs, or Compose saveable state.
     private val pairingInput = PairingInput(viewModelScope, repository::pair)
@@ -40,6 +86,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             state.collect {
                 if (it.paired) pairingInput.edit("")
+                phone.restore(it)
                 // A first task whose delivery was uncertain is settled by its receipt: only a trustworthy
                 // rejection proves "not sent"; acceptance or explicit local abandonment just ends tracking.
                 awaitingTaskIn?.let { (created, task) -> if (it.pending == null) {
@@ -159,8 +206,10 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             } finally { pendingDraftWrites-- }
         }
     }
-    fun sendMessage(onAccepted: () -> Unit = {}) {
-        if (interactionBlocked || !dev.dshmobile.app.model.MobileReducer.canSend(state.value, editorDraft)) return
+    fun sendMessage(onAccepted: () -> Unit = {}) = sendMessageWithDelivery(null, onAccepted)
+    fun sendMessageWithDelivery(delivery: String?, onAccepted: () -> Unit = {}) {
+        val attachments = phone.inSession(state.value.snapshot?.session?.id)
+        if (interactionBlocked || !dev.dshmobile.app.model.MobileReducer.canSend(state.value, editorDraft, attachments.isNotEmpty())) return
         val origin = state.value.snapshot?.session?.id ?: return
         if (origin != editorSessionId) return
         val text = editorDraft // Exact visible text, not a possibly delayed repository draft.
@@ -168,10 +217,12 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             try {
                 editorActions.withLock {
-                    if (state.value.snapshot?.session?.id == origin) {
+                    if (state.value.snapshot?.session?.id == origin && phone.prepareSend(origin, attachments.map { it.attachment.localId })) {
                         val before = state.value
-                        repository.sendMessage(text)
-                        if (dev.dshmobile.app.ui.chat.sendWasAccepted(before, state.value, text)) {
+                        // Upload refresh precedes admission: exactly one send command/requestId is created.
+                        repository.sendMessage(text, delivery, phone.inSession(origin).mapNotNull { it.attachment.uploadId })
+                        if (dev.dshmobile.app.ui.chat.sendWasAccepted(before, state.value, text) || (state.value.pending == null && state.value.error == null && attachments.isNotEmpty())) {
+                            phone.restore(state.value)
                             onAccepted()
                         }
                     }
@@ -200,20 +251,34 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             repository.forget()
         }
     }
+    var notificationSettings by mutableStateOf(false); private set
+    fun openNotificationSettings() { notificationSettings = true }
+    fun consumeNotificationSettings() { notificationSettings = false }
+    var notificationChatList by mutableStateOf(false); private set
+    fun openNotificationChatList() { notificationChat = null; notificationQuestion = null; notificationChatList = true }
+    fun consumeNotificationChatList() { notificationChatList = false }
     var notificationChat by mutableStateOf<String?>(null)
         private set
-    fun openNotificationChat(device: String?, chat: String?) {
+    var notificationQuestion by mutableStateOf<String?>(null); private set
+    fun openNotificationChat(device: String?, chat: String?, question: String? = null) {
         viewModelScope.launch {
             val host = dev.dshmobile.app.data.EncryptedStateStore(getApplication()).read().host
-            if (host != null && host.deviceId == device && chat != null && dev.dshmobile.app.data.validId(chat)) notificationChat = chat
+            if (host != null && host.deviceId == device && chat != null && dev.dshmobile.app.data.validId(chat)) {
+                dev.dshmobile.app.data.notificationTrace("target_validated restored=${state.value.draftsRestored}")
+                notificationChat = chat; notificationQuestion = question?.takeIf { dev.dshmobile.app.data.validId(it) }
+            }
         }
     }
     fun selectNotificationChat(target: String) {
         if (interactionBlocked || state.value.busy) return
         interactionBlocked = true
         viewModelScope.launch {
+            dev.dshmobile.app.data.notificationTrace("target_select_begin")
             try { editorActions.withLock { repository.selectSession(target) } }
-            finally { interactionBlocked = false }
+            finally {
+                dev.dshmobile.app.data.notificationTrace("target_select_end selected=${notificationTargetSelected(target, state.value)}")
+                interactionBlocked = false
+            }
         }
     }
     fun consumeNotificationChat(target: String) {

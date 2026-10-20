@@ -10,6 +10,16 @@ import androidx.compose.ui.unit.dp
 
 /** Small authored outline set; no icon-font or material-icons dependency. */
 object MobileIcons {
+    val Attach = outline("Attach") { moveTo(8f, 13f); lineTo(15f, 6f); curveTo(18f, 3f, 22f, 7f, 19f, 10f); lineTo(10f, 19f); curveTo(5f, 24f, 1f, 17f, 5f, 13f); lineTo(14f, 4f) }
+    val Image = outline("Image") { moveTo(3f, 4f); lineTo(21f, 4f); lineTo(21f, 20f); lineTo(3f, 20f); close(); moveTo(3f, 16f); lineTo(9f, 10f); lineTo(15f, 16f); lineTo(18f, 13f); lineTo(21f, 16f); moveTo(16f, 8f); lineTo(16.1f, 8f) }
+    val File = outline("File") { moveTo(5f, 2f); lineTo(14f, 2f); lineTo(20f, 8f); lineTo(20f, 22f); lineTo(5f, 22f); close(); moveTo(14f, 2f); lineTo(14f, 8f); lineTo(20f, 8f) }
+    val Camera = outline("Camera") { moveTo(3f, 6f); lineTo(7f, 6f); lineTo(9f, 3f); lineTo(15f, 3f); lineTo(17f, 6f); lineTo(21f, 6f); lineTo(21f, 21f); lineTo(3f, 21f); close(); moveTo(16f, 13f); curveTo(16f, 19f, 8f, 19f, 8f, 13f); curveTo(8f, 7f, 16f, 7f, 16f, 13f) }
+    val Steer = outline("Steer") { moveTo(5f, 3f); lineTo(5f, 12f); curveTo(5f, 16f, 7f, 17f, 10f, 17f); lineTo(21f, 17f); moveTo(16f, 12f); lineTo(21f, 17f); lineTo(16f, 22f) }
+    val Clock = outline("Clock") { moveTo(21f, 12f); curveTo(21f, 24f, 3f, 24f, 3f, 12f); curveTo(3f, 0f, 21f, 0f, 21f, 12f); moveTo(12f, 6f); lineTo(12f, 12f); lineTo(16f, 15f) }
+    val Question = outline("Question") { moveTo(21f, 12f); curveTo(21f, 24f, 3f, 24f, 3f, 12f); curveTo(3f, 0f, 21f, 0f, 21f, 12f); moveTo(9f, 8f); curveTo(9f, 4f, 17f, 6f, 14f, 10f); lineTo(12f, 12f); lineTo(12f, 14f); moveTo(12f, 17f); lineTo(12.1f, 17f) }
+    val Model = outline("Model") { moveTo(5f, 5f); lineTo(19f, 5f); lineTo(19f, 19f); lineTo(5f, 19f); close(); moveTo(9f, 9f); lineTo(15f, 9f); lineTo(15f, 15f); lineTo(9f, 15f); close(); moveTo(9f, 2f); lineTo(9f, 5f); moveTo(15f, 2f); lineTo(15f, 5f); moveTo(9f, 19f); lineTo(9f, 22f); moveTo(15f, 19f); lineTo(15f, 22f) }
+    val Share = outline("Share") { moveTo(12f, 16f); lineTo(12f, 2f); moveTo(7f, 7f); lineTo(12f, 2f); lineTo(17f, 7f); moveTo(5f, 11f); lineTo(5f, 22f); lineTo(19f, 22f); lineTo(19f, 11f) }
+    val Download = outline("Download") { moveTo(12f, 2f); lineTo(12f, 16f); moveTo(7f, 11f); lineTo(12f, 16f); lineTo(17f, 11f); moveTo(4f, 18f); lineTo(4f, 22f); lineTo(20f, 22f); lineTo(20f, 18f) }
     val Menu = outline("Menu") {
         moveTo(4f, 6f); lineTo(20f, 6f)
         moveTo(4f, 12f); lineTo(20f, 12f)

@@ -30,6 +30,41 @@ async function fixture(t: any) {
   return { state, feed, device, head, event, proof, source, listed: (rows: typeof listed) => { listed = rows; } };
 }
 
+test('coverage recovers from a sequence gap only after a successful authoritative reconcile', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t); await f.feed.idle(); assert.equal(f.feed.coverage, 'ready');
+  await f.event(0, 'tool/call'); await f.event(2, 'tool/call'); assert.equal(f.feed.coverage, 'degraded');
+  t.mock.timers.tick(60000); await f.feed.idle(); assert.equal(f.feed.coverage, 'ready');
+});
+
+test('coverage stays degraded across partial and failed recovery', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t); await f.feed.idle();
+  await f.event(0, 'tool/call'); await f.event(2, 'tool/call');
+  f.listed(Array.from({ length: 12 }, (_, i) => ({ id: i ? 'idle-' + i : 'chat', workspaceId: 'alpha' })));
+  let broken = true;
+  (f.source as any).evidence = async (id: string) => { if (id === 'idle-1' && broken) throw new Error('Synthetic unavailable'); return { ...f.proof, sessionId: id }; };
+  t.mock.timers.tick(60000); await f.feed.idle(); assert.equal(f.feed.coverage, 'degraded');
+  broken = false;
+  t.mock.timers.tick(60000); await f.feed.idle(); assert.equal(f.feed.coverage, 'degraded', 'retry backoff is not a successful proof');
+  for (let pass = 0; pass < 4; pass++) { t.mock.timers.tick(60000); await f.feed.idle(); }
+  assert.equal(f.feed.coverage, 'ready');
+});
+
+test('a new invalid source during reconciliation prevents a false ready publication', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] }); const f = await fixture(t); await f.feed.idle();
+  await f.event(0, 'tool/call'); await f.event(2, 'tool/call');
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(r => { release = r; }), entry = new Promise<void>(r => { entered = r; });
+  f.source.evidence = async () => { entered(); await gate; return structuredClone(f.proof); };
+  t.mock.timers.tick(60000); await entry;
+  // Bad source identity is rejected synchronously while the good proof is held.
+  const incoming = f.event(3, 'tool/call', {}, '../invalid');
+  release(); await incoming; assert.equal(f.feed.coverage, 'degraded');
+  f.source.evidence = async () => structuredClone(f.proof);
+  t.mock.timers.tick(60000); await f.feed.idle(); assert.equal(f.feed.coverage, 'ready');
+});
+
 for (const failure of ['excluded', 'not_found', 'invalid', 'budget'] as const) test(`lazy idle recovery retries ${failure} and does not abandon unprobed peers`, async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const dir = mkdtempSync(join(tmpdir(), 'dsh-lazy-retry-')); const state = new HostState(join(dir, 'state.sqlite'));

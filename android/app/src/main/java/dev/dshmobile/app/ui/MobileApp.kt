@@ -86,8 +86,15 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
     LaunchedEffect(model.notificationChat, state.snapshot?.session?.id, state.busy, state.observingSession, state.snapshotStale, model.interactionBlocked, state.error) {
         val target = model.notificationChat
         if (target != null && !model.interactionBlocked && notificationTargetSelected(target, state)) {
+            dev.dshmobile.app.data.notificationTrace("target_route_chat")
             sessionId = target; route = "chat"; model.consumeNotificationChat(target)
         }
+    }
+    LaunchedEffect(model.notificationChatList) {
+        if (model.notificationChatList) { route = "home"; sessionId = null; project = null; search = ""; model.consumeNotificationChatList() }
+    }
+    LaunchedEffect(model.notificationSettings) {
+        if (model.notificationSettings) { previousRoute = route; route = "settings"; model.consumeNotificationSettings() }
     }
     // Native predictive Back commits only on completion; a canceled gesture keeps the screen.
     PredictiveBackHandler(enabled = route != "home" && !newChat && !connection) { events ->

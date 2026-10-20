@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-host",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Native mobile companion host plugin for an existing DeepSeek Harness runtime",
   "private": true,
   "type": "module",
@@ -52,6 +52,7 @@
     "build": "tsc -p tsconfig.json && node ../tools/build-host.mjs",
     "demo": "node dist/demo.js",
     "test": "node --test test/*.test.ts",
+    "test:phone-canary": "node test/phone-real-canary.mjs",
     "check": "npm run build && npm test"
   },
   "devDependencies": {

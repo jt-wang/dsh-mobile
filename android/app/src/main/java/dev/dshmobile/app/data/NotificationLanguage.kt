@@ -20,6 +20,13 @@ internal fun alertLanguageExtras(kind: String, names: String?) = Bundle().apply 
     putString(ALERT_NAMES, names)
 }
 internal fun connectionLanguageExtras(status: String) = Bundle().apply { putString(CONNECTION_STATUS, status) }
+internal fun connectionTitleResource(status: String) = when (status) {
+    "offline" -> R.string.notif_ongoing_title_offline
+    "initializing" -> R.string.notif_ongoing_title_connecting
+    else -> R.string.notif_ongoing_title_online
+}
+internal fun connectionBodyResource(status: String) = R.string.notif_ongoing_ready
+internal fun connectionBody(context: Context, status: String): String? = if (status in setOf("offline", "initializing")) null else context.getString(R.string.notif_ongoing_ready)
 
 /** Nonblocking entry point. A new request cancels/coalesces the old pass, not ordinary alert posting. */
 internal fun refreshNotificationLanguage(context: Context): Job = NotificationPosting.refresh(context)
@@ -61,6 +68,8 @@ private suspend fun refreshNotificationLanguagePassChecked(context: Context) {
 }
 
 private fun legacyConnectionStatus(context: Context, body: String?): String {
+    if (body in setOf("Connection interrupted. Reconnecting; alerts may be delayed.",
+            "Связь прервана. Переподключение; уведомления могут задерживаться.")) return "offline"
     val resources = listOf("en", "ru").map { tag ->
         context.createConfigurationContext(Configuration(context.resources.configuration).apply { setLocale(Locale.forLanguageTag(tag)) })
     }
@@ -71,7 +80,13 @@ private fun legacyConnectionStatus(context: Context, body: String?): String {
 
 /** null means an unrelated or already translated notification. Does not post or change identity/channel. */
 internal fun translatedNotification(context: Context, id: Int, tag: String?, old: Notification, silent: Boolean = true): Notification? {
-    if (old.flags and Notification.FLAG_GROUP_SUMMARY != 0) return null
+    if (old.flags and Notification.FLAG_GROUP_SUMMARY != 0) {
+        if (id != 3 || tag != SUMMARY_TAG || old.group != ALERT_GROUP) return null
+        val localized = appLanguageContext(context)
+        val title = localized.getString(R.string.app_name); val body = localized.getString(R.string.notif_generic)
+        if (old.extras.getString(Notification.EXTRA_TITLE) == title && old.extras.getString(Notification.EXTRA_TEXT) == body) return null
+        return Notification.Builder.recoverBuilder(context, old).setContentTitle(title).setContentText(body).setOnlyAlertOnce(true).build()
+    }
     val localized = appLanguageContext(context)
     // recoverBuilder can share extras with its input: capture old rendering BEFORE any mutation.
     val previousTitle = old.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
@@ -82,15 +97,10 @@ internal fun translatedNotification(context: Context, id: Int, tag: String?, old
     if (id == 1 && tag == null && old.channelId == NotificationService.CONNECTION) {
         val status = old.extras.getString(CONNECTION_STATUS) ?: legacyConnectionStatus(context, previousBody)
         builder.addExtras(connectionLanguageExtras(status))
-            .setContentTitle(localized.getString(if (status == "ready") R.string.notif_connected else R.string.notif_monitoring))
-            .setContentText(localized.getString(when (status) {
-                "ready" -> R.string.notif_restart
-                "initializing" -> R.string.notif_initializing
-                "offline" -> R.string.notif_offline
-                else -> R.string.notif_degraded
-            }))
-        builder.setActions(*old.actions.orEmpty().map { action ->
-            Notification.Action.Builder(action.getIcon(), localized.getString(R.string.notif_disable), action.actionIntent)
+            .setContentTitle(localized.getString(connectionTitleResource(status)))
+            .setContentText(connectionBody(localized, status))
+        builder.setActions(*old.actions.orEmpty().mapIndexed { index, action ->
+            Notification.Action.Builder(action.getIcon(), localized.getString(if (index == 0) R.string.notif_disable else R.string.notif_open_settings), action.actionIntent)
                 .addExtras(action.extras).build()
         }.toTypedArray())
     } else if (id == 2 && old.channelId in notificationChannels.map { it.id }) {
@@ -110,7 +120,9 @@ internal fun translatedNotification(context: Context, id: Int, tag: String?, old
         }
         val public = old.publicVersion?.let { Notification.Builder.recoverBuilder(context, it) }
             ?: Notification.Builder(context, old.channelId).setSmallIcon(old.smallIcon)
-        builder.setContentTitle(title).setContentText(names ?: localized.getString(R.string.notif_generic))
+        if (old.extras.getBoolean("dev.dshmobile.questionAlert", false)) {
+            builder.setActions(*old.actions.orEmpty().map { action -> Notification.Action.Builder(action.getIcon(), localized.getString(R.string.notif_answer), action.actionIntent).build() }.toTypedArray())
+        } else builder.setContentTitle(title).setContentText(names ?: localized.getString(R.string.notif_generic))
             .setPublicVersion(public.setContentTitle(localized.getString(R.string.app_name)).setContentText(title).build())
             .addExtras(alertLanguageExtras(kind, names))
     } else return null

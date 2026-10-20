@@ -105,8 +105,8 @@ class NotificationLanguageTest {
             if (Build.VERSION.SDK_INT >= 33) context.getSystemService(LocaleManager::class.java).applicationLocales = LocaleList.forLanguageTags("ru")
             else preferences.edit().putString(LANGUAGE_KEY, "ru").commit()
             refreshNotificationLanguage(context)
-            await { manager.activeNotifications.find { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == "DSH Mobile: мониторинг" }
-            assertEquals(appLanguageContext(context).getString(R.string.notif_offline), manager.activeNotifications.single { it.id == 1 && it.tag == null }.notification.extras.getString(Notification.EXTRA_TEXT))
+            await { manager.activeNotifications.find { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == appLanguageContext(context).getString(R.string.notif_ongoing_title_offline) }
+            assertNull(manager.activeNotifications.single { it.id == 1 && it.tag == null }.notification.extras.getString(Notification.EXTRA_TEXT))
         } finally {
             manager.cancel(1)
             if (Build.VERSION.SDK_INT >= 33) context.getSystemService(LocaleManager::class.java).applicationLocales = LocaleList.forLanguageTags(old.orEmpty())
@@ -128,13 +128,14 @@ class NotificationLanguageTest {
                 "synthetic-language-device", "synthetic-language-token-0000000000000000", "Synthetic computer")))
             store.update { it.copy(enabled = true, deviceId = "synthetic-language-device", settings = it.settings.copy(enabled = true)) }
             scenario.onActivity { it.startForegroundService(intent) }
-            val offline = appLanguageContext(context).getString(R.string.notif_offline)
-            await { connection()?.notification?.extras?.getString(Notification.EXTRA_TEXT) == offline }
+            val offline = appLanguageContext(context).getString(R.string.notif_ongoing_title_offline)
+            await { connection()?.notification?.extras?.getString(Notification.EXTRA_TITLE) == offline }
             repeat(5) {
                 val previous = connection()!!.postTime
                 scenario.onActivity { it.startForegroundService(intent) }
                 await { (connection()?.postTime ?: 0) > previous }
-                assertEquals(offline, connection()!!.notification.extras.getString(Notification.EXTRA_TEXT))
+                assertEquals(offline, connection()!!.notification.extras.getString(Notification.EXTRA_TITLE))
+                assertNull(connection()!!.notification.extras.getString(Notification.EXTRA_TEXT))
                 assertEquals("offline", connection()!!.notification.extras.getString("dev.dshmobile.connectionStatus"))
                 kotlinx.coroutines.delay(300)
             }
@@ -268,8 +269,8 @@ class NotificationLanguageTest {
                 scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
             }
             for ((choice, title, generic, channel, monitoring) in listOf(
-                listOf("ru", "Ответ готов", "Откройте чат на компьютере", "Ответы агента · Со звуком", "DSH Mobile: мониторинг"),
-                listOf("en", "Answer ready", "Open the chat on your computer", "Agent answers · With sound", "DSH Mobile monitoring"))) {
+                listOf("ru", "Ответ готов", "Откройте чат на компьютере", "Ответы агента · Со звуком", "Ответы с компьютера"),
+                listOf("en", "Answer ready", "Open the chat on your computer", "Agent answers · With sound", "Answers from your computer"))) {
                 if (stopped && Build.VERSION.SDK_INT >= 33) {
                     context.getSystemService(LocaleManager::class.java).applicationLocales = LocaleList.forLanguageTags(choice)
                 } else {
@@ -286,7 +287,7 @@ class NotificationLanguageTest {
                 assertTrue(alert.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
                 assertNull(alert.sound)
                 assertNull(alert.vibrate)
-                if (!stopped) await { manager.activeNotifications.singleOrNull { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == monitoring }
+                if (!stopped) await { manager.activeNotifications.singleOrNull { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == appLanguageContext(context).getString(R.string.notif_ongoing_title_offline) }
                 else assertTrue(manager.activeNotifications.none { it.id == 1 && it.tag == null })
             }
         } finally {

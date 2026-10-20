@@ -24,10 +24,14 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.DshMobile"
         android:usesCleartextTraffic="false">
+        <provider android:name=".ui.chat.ExpiringMediaProvider" android:authorities="${applicationId}.media" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/media_paths" />
+        </provider>
         <service android:name=".data.NotificationService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-enabled continuous monitoring of a paired local AI desktop for answer completion and approval/question attention; no platform push service; persistent notification with Stop control." />
         </service>
+        <receiver android:name=".data.NotificationDismissedReceiver" android:exported="false" />
         <receiver android:name=".locale.LanguageChangedReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.LOCALE_CHANGED" />

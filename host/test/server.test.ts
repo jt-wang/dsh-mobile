@@ -223,18 +223,20 @@ test('runningSubagents is an additive validated summary and snapshot field, inde
   }
 });
 
-test('a partial history notice survives GET and SSE even when newest activity is known', async t => {
+test('a partial history notice and its certain messages survive GET and SSE even when newest activity is known', async t => {
   const adapter = new TestAdapter(), value = adapter.snapshots.get('s-alpha')!;
-  value.messages = []; value.hasMore = true;
+  value.hasMore = true;
   value.notice = 'This bounded history crosses a DSH surface replacement. Open the desktop to view the authoritative conversation.';
   const { request, pair } = await setup(t, adapter); const { deviceToken } = await pair();
   const get = await (await request('/sessions/s-alpha', deviceToken)).json();
   assert.equal(get.activity, 'idle'); assert.equal(get.notice, value.notice);
+  assert.deepEqual(get.messages, value.messages); assert.equal(get.hasMore, true);
   const sse = await request('/sessions/s-alpha/events', deviceToken); const reader = sse.body!.getReader();
   try {
     let text = ''; while (!text.includes('\n\n')) text += new TextDecoder().decode((await reader.read()).value);
     const event = JSON.parse(text.split('\n').find(line => line.startsWith('data: '))!.slice(6));
     assert.equal(event.activity, 'idle'); assert.equal(event.notice, value.notice);
+    assert.deepEqual(event.messages, value.messages); assert.equal(event.hasMore, true);
   } finally { await reader.cancel(); }
   value.notice = 'PRIVATE ADAPTER DIAGNOSTIC';
   assert.equal((await (await request('/sessions/s-alpha', deviceToken)).json()).notice, undefined, 'never export arbitrary adapter diagnostics');

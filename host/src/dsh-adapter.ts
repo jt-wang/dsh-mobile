@@ -1,10 +1,15 @@
+import { PhoneProjection, sessionModel, mutationAnswer } from './phone-projection.ts';
+import { createHash } from 'node:crypto';
+import { attachmentRefs, questionsOf, queueOf, record, validateAnswer, UPLOAD_LIMIT, IMAGE_MIMES } from './phone.ts';
+import type { PendingQuestion, SessionMutation, ModelCatalog, ModelSelection, PromptOptions, UploadedAttachment, AttachmentRef, ImageMime } from './phone.ts';
+import type { QuestionBridge } from './question-bridge.ts';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { createWorkspaceSource, workspacePathKey } from './workspace-source.ts';
 import type { WorkspaceSource } from './workspace-source.ts';
 import { HostError } from './errors.ts';
 import { presentUserText } from './message-presentation.ts';
-import type { ChatMessage, HostAdapter, HostSession, HostSnapshot, Preset, WorkspaceConfig } from './types.ts';
+import type { ChatMessage, FileUploadReservation, HostAdapter, HostSession, HostSnapshot, Preset, WorkspaceConfig } from './types.ts';
 
 import type { NotificationEvidence, NotificationSource, NotificationSources } from './notifications.ts';
 import { isCompatibleDshVersion } from './compatibility.ts';
@@ -46,7 +51,13 @@ export interface DshSessionController {
   page(request: { address: { kind: 'session'; sessionId: string }; throughSeq: number; beforeSeq: number; maxMessages: number }, signal: AbortSignal): Promise<unknown>;
   projections(request: { sessionId: string }, signal: AbortSignal): Promise<unknown>;
   create(request: ({ cwd: string; workspaceId?: never } | { workspaceId: string; cwd?: never }) & { sessionId: string; agentPreset?: string }): Promise<{ sessionId: string }>;
-  prompt(request: { requestId: string; sessionId: string; mode: 'queue'; content: readonly { type: 'text'; text: string }[] }, signal: AbortSignal): Promise<unknown>;
+  prompt(request: { requestId: string; sessionId: string; mode: 'queue' | 'steer'; content: readonly ({ type: 'text'; text: string } | { type: 'image'; mediaType: ImageMime; data: string; name?: string } | { type: 'file'; receiptId: string })[] }, signal: AbortSignal): Promise<unknown>;
+  resolveAgent?(sessionId: string): Promise<{ agent: unknown } | { error: unknown }>;
+  rename?(request: { sessionId: string; title: string }): Promise<unknown>;
+  updateQueue?(request: { sessionId: string; itemId: string; action: { kind: 'remove' | 'steer' } }): Promise<unknown>;
+  modelCatalog?(): Promise<{ default: ModelSelection; groups: readonly { id: string; models: readonly { id: string; name: string; reasoning?: { efforts: readonly { id: string; name: string }[] } }[] }[] }>;
+  selectModel?(request: ModelSelection & { sessionId: string }): Promise<unknown>;
+  attachment?(request: { sessionId: string; attachmentId: string }): Promise<{ attachment: { attachmentId: string; mediaType: ImageMime; bytes: number; name?: string }; data: string }>;
   cancel(request: { sessionId: string }): unknown;
 }
 export interface DshAgentPresets {
@@ -65,6 +76,11 @@ export interface DshAdapterOptions {
   dshVersion: string;
   sessionController: DshSessionController;
   agentPresets?: DshAgentPresets;
+  questionBridge?: QuestionBridge;
+  answerContinued?: (sessionId: string, callId: string, answer: import('./phone.ts').QuestionAnswer) => Promise<boolean>;
+  modelInfo?: (provider: string, model: string, signal: AbortSignal) => Promise<{ inputModalities?: readonly string[] }>;
+  fileUploads?: { resolve?(agent: unknown, receiptId: string): unknown; uploadStream(input: { sessionId: string; data: AsyncIterable<Uint8Array>; signal?: AbortSignal; name?: string }): Promise<{ receiptId: string; file: { attachmentId: string; name: string; bytes: number } }> };
+  attachments?: { readImage?(ref: { attachmentId: string; mediaType: ImageMime; bytes: number; width: number; height: number; name?: string }, signal?: AbortSignal): Promise<{ data: Uint8Array }>; validateImage(input: { data: Uint8Array; mediaType: ImageMime; name?: string }): Promise<void>; readFileStream?(ref: { attachmentId: string; name: string; bytes: number }, signal?: AbortSignal): AsyncIterable<Uint8Array> };
   /** Legacy factory input; do not combine with workspaceSource. */
   workspaces?: readonly WorkspaceConfig[];
   workspaceSource?: WorkspaceSource;
@@ -87,6 +103,10 @@ export interface DshAdapterOptions {
   pollIntervalMs?: number;
   throttleMs?: number;
 }
+const phoneProjections = new WeakMap<Transcript, PhoneProjection>();
+// No upstream API discards an unbound receipt. Keep a service-lifetime budget,
+// including mobile-expired/revoked receipts and uncertain upload failures.
+const receiptBudgets = new WeakMap<object, Map<object, { sessionId: string; receiptId?: string }>>();
 interface CanonicalWorkspace extends WorkspaceConfig { key: string }
 interface WireEvent { type: string; seq: number; time: number; data: unknown; ignorable?: true; surfaceOp?: unknown }
 interface SurfaceNode { seq: number; message?: ChatMessage; answerTurn?: number }
@@ -109,6 +129,13 @@ const UNKNOWN_NOTICE = 'This DSH history contains an unsupported event. Open the
 const GAP_NOTICE = 'Live observation was interrupted. Refreshing the authoritative DSH snapshot.';
 export const HISTORY_CUT_NOTICE = 'This bounded history crosses a DSH surface replacement. Open the desktop to view the authoritative conversation.';
 
+function phoneError(error: unknown): unknown {
+  const code = record(error)?.code;
+  if (['session/queue-item-not-found', 'session/steer-unavailable', 'REPLY_QUEUED'].includes(code as string)) return new HostError('conflict');
+  if (['session/not-found', 'CALLER_NOT_LIVE', 'DELEGATED_CALLER'].includes(code as string)) return new HostError('not_found');
+  if (['session/model-unavailable', 'session/attachment-invalid', 'gateway/bad-request', 'BAD_ANSWER', 'TOO_MANY_IMAGES', 'IMAGES_TOO_LARGE', 'UNSUPPORTED_IMAGE_TYPE', 'INVALID_IMAGE_BASE64', 'INVALID_IMAGE', 'IMAGE_TYPE_MISMATCH', 'IMAGE_TOO_LARGE', 'IMAGE_TOO_MANY_PIXELS', 'IMAGE_DIMENSION_TOO_LARGE'].includes(code as string)) return new HostError('invalid_request');
+  return error;
+}
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -130,10 +157,11 @@ function messageOf(event: WireEvent): ChatMessage | undefined {
   const message = event.type === 'user/message' ? data : event.type === 'assistant/message' ? object(data?.message) : undefined;
   if (!message || typeof message.id !== 'string') return undefined;
   const text = textContent(message.content);
-  if (!text) return undefined;
+  const attachments = attachmentRefs(message.content);
+  if (!text && !attachments.length) return undefined;
   const source = object(message.source);
   return {
-    id: message.id, role: event.type === 'user/message' ? 'user' : 'assistant',
+    id: message.id, role: event.type === 'user/message' ? 'user' : 'assistant', ...(attachments.length ? { attachments } : {}),
     ...(event.type === 'user/message' ? presentUserText(text, typeof source?.kind === 'string' ? source.kind : undefined) : { text }), createdAt: event.time,
     ...(event.type === 'user/message' && source?.kind === 'user' && typeof source.rpcId === 'string' ? { requestId: source.rpcId } : {}),
   };
@@ -149,10 +177,15 @@ function applySurface(nodes: SurfaceNode[], event: WireEvent): boolean {
   if (op?.op !== 'replace' || !Number.isSafeInteger(op.startSeq) || !Number.isSafeInteger(op.endSeq)) throw new HostError('unavailable');
   const start = nodes.findIndex((entry) => entry.seq === op.startSeq);
   const end = nodes.findIndex((entry) => entry.seq === op.endSeq);
-  // Endpoints identify current surface POSITIONS, not a numeric seq range.
-  // A bounded cut cannot reconstruct missing endpoints: suppress the ambiguous
-  // conversation rather than leave old answers that a later rewrite shadowed.
-  if (start < 0 || end < 0) return false;
+  // nodes is a certain SUFFIX of the current surface, not a numeric seq range.
+  // Missing endpoints belong to its omitted prefix. If the end is known, drop
+  // the affected prefix; if both are missing, never append the replacement copy
+  // at the tail. A known start with no end cannot prove any surviving suffix.
+  if (start < 0 || end < 0) {
+    if (end >= 0) nodes.splice(0, end + 1, node);
+    else if (start >= 0) nodes.splice(0);
+    return false;
+  }
   if (end < start) throw new HostError('unavailable');
   nodes.splice(start, end - start + 1, node);
   return true;
@@ -180,6 +213,13 @@ class Transcript {
   private attentionStopped = false;
   private activityEstablished = false;
   private retentionCut = false;
+  private phoneInbox: Record<string, unknown> = {};
+  private phoneQuestions: PendingQuestion[] = [];
+  phoneSnapshot(): HostSnapshot {
+    const snapshot = this.snapshot();
+    if (this.unsupported || this.gap || this.historyCut) return snapshot;
+    return { ...snapshot, pendingQueue: queueOf(this.phoneInbox), pendingQuestions: this.phoneQuestions, ...(this.phoneQuestions.length ? { activity: 'waiting' as const } : {}) };
+  }
   notificationEvidence(): NotificationEvidence {
     const ambiguous = this.unsupported || this.historyCut || this.gap;
     return { sessionId: this.session.id, workspaceId: this.session.workspaceId, cursor: this.cursor, valid: !ambiguous,
@@ -197,6 +237,8 @@ class Transcript {
     this.retentionCut = retentionCut;
     if (retentionCut) { this.historyCut = true; this.hasMore = true; }
     const values = object(object(frame.projections)?.values);
+    this.phoneInbox = retentionCut ? {} : structuredClone(object(values?.inbox) ?? {});
+    this.phoneQuestions = retentionCut ? [] : questionsOf(object(values?.userQuestions)?.active);
     if (typeof values?.title === 'string') this.session.title = retentionCut ? boundedTitle(values.title) : values.title;
     this.projectedQuestions = Array.isArray(object(values?.userQuestions)?.active) && (object(values?.userQuestions)!.active as unknown[]).length > 0;
     let previous: number | undefined;
@@ -262,10 +304,22 @@ class Transcript {
       return;
     }
     if (this.unsupported || this.gap) return;
-    if (!this.historyCut && !applySurface(this.nodes, event)) { this.historyCut = true; this.attempt = undefined; }
+    if (!this.retentionCut && !applySurface(this.nodes, event)) { this.historyCut = true; this.hasMore = true; }
     // Surface ancestry is independent of newest control events. Continue folding
     // turn/approval/question state even when an old replacement exceeds budget.
     const data = object(event.data);
+    if (live && event.type === 'agent/inbox/spliced' && ['next-turn', 'next-step'].includes(data?.target as string)) {
+      const target = data!.target as string;
+      if (Number.isSafeInteger(data?.start) && Array.isArray(data?.inserted)) {
+        const list = Array.isArray(this.phoneInbox[target]) ? this.phoneInbox[target] as unknown[] : [];
+        list.splice(data!.start as number, typeof data!.removedCount === 'number' ? data!.removedCount : 0, ...data!.inserted);
+        this.phoneInbox[target] = list;
+      }
+    }
+    if (live && (event.type === 'tool/result' || event.type === 'user/message')) {
+      const callId = event.type === 'tool/result' ? object(data?.message)?.toolCallId : object(data?.source)?.kind === 'user-question-reply' ? object(data?.source)?.callId : undefined;
+      if (typeof callId === 'string') this.phoneQuestions = this.phoneQuestions.filter(q => q.callId !== callId);
+    }
     if (event.type === 'turn/start') {
       this.activityEstablished = true;
       this.attentionStopped = false; this.approvals.clear(); this.questions.clear(); this.openProjectedQuestions = false;
@@ -309,7 +363,7 @@ class Transcript {
   }
   private stream(value: unknown): void {
     const frame = object(value);
-    if (!frame || typeof frame.revision !== 'number' || typeof frame.attemptId !== 'string' || this.unsupported || this.historyCut || this.gap) return;
+    if (!frame || typeof frame.revision !== 'number' || typeof frame.attemptId !== 'string' || this.unsupported || this.retentionCut || this.gap) return;
     if (frame.type === 'start' && frame.revision === 1) this.revision = 0;
     if (frame.revision <= this.revision) return;
     if (frame.revision !== this.revision + 1) { this.markGap(); return; }
@@ -354,7 +408,7 @@ class Transcript {
     if (this.nodes.length > 1000) { this.nodes = this.nodes.slice(-1000); this.hasMore = true; }
   }
   snapshot(): HostSnapshot {
-    const ambiguous = this.unsupported || this.historyCut || this.gap;
+    const ambiguous = this.unsupported || this.retentionCut || this.gap;
     const messages = ambiguous ? [] : this.nodes.flatMap((node) => node.message ? [{ ...node.message }] : []);
     const provisionalText = this.attempt ? [...this.attempt.blocks].sort(([a], [b]) => a - b).map(([, text]) => text).join('') : '';
     if (this.attempt && provisionalText && !ambiguous) messages.push({ id: `provisional:${this.attempt.id}`, role: 'assistant', text: provisionalText, createdAt: this.attempt.createdAt, provisional: true });
@@ -473,7 +527,7 @@ export class DshAdapter implements HostAdapter {
     return key === undefined ? undefined : workspaces.get(key);
   }
   private toSession(row: DshSessionSummary, workspace: CanonicalWorkspace): HostSession {
-    return { id: row.sessionId, title: typeof row.projections?.values.title === 'string' ? row.projections.values.title : 'Untitled session', workspaceId: workspace.id, updatedAt: row.updatedAt, running: row.running };
+    return { id: row.sessionId, title: typeof row.projections?.values.title === 'string' ? row.projections.values.title : 'Untitled session', workspaceId: workspace.id, updatedAt: row.updatedAt, running: row.running, ...(row.projections?.values.modelSelection !== undefined ? { model: sessionModel(record(row.projections.values.modelSelection)?.next) } : {}) };
   }
   private async permitted(sessionId: string, signal: AbortSignal, expectedWorkspaceId?: string): Promise<{ row: DshSessionSummary; session: HostSession; view: readonly WorkspaceConfig[] }> {
     signal.throwIfAborted();
@@ -535,7 +589,7 @@ export class DshAdapter implements HostAdapter {
   async snapshot(sessionId: string, signal: AbortSignal): Promise<HostSnapshot> {
     const { transcript, view } = await this.open(sessionId, this.signal(signal));
     this.checkCurrent(view, sessionId);
-    return transcript.snapshot();
+    return this.phoneSnapshot(transcript);
   }
   private detachOpening(id: string, flight: OpeningFlight): void {
     if (this.openingFlights.get(id) === flight) this.openingFlights.delete(id);
@@ -630,6 +684,7 @@ export class DshAdapter implements HostAdapter {
     this.checkCurrent(view, sessionId); // Iterator cleanup itself may yield.
     if (transcript.needsHistory && !retentionCut) transcript = await this.recoverShared(session, frame, view, active);
     active.throwIfAborted(); this.checkCurrent(view, sessionId);
+    const phone = new PhoneProjection(); if (!retentionCut) phone.open(frame); phoneProjections.set(transcript, phone);
     return { transcript, view };
   }
   private joinHistory(id: string, flight: HistoryFlight, active: AbortSignal): Promise<void> {
@@ -748,7 +803,7 @@ export class DshAdapter implements HostAdapter {
       if (!transcript) {
         if (queue.length < 500) queue.push(observation); else resync = true;
       } else {
-        try { transcript.accept(observation); } catch { transcript.markGap(); }
+        try { const before = transcript.cursor; transcript.accept(observation); if (observation.type === 'event' && transcript.cursor > before) phoneProjections.get(transcript)?.event(observation.event); } catch { transcript.markGap(); }
         resync ||= transcript.needsResync;
         changed = true;
       }
@@ -762,11 +817,11 @@ export class DshAdapter implements HostAdapter {
       const initialView = await this.open(sessionId, active);
       this.checkCurrent(initialView.view, sessionId);
       transcript = initialView.transcript;
-      for (const observation of queue) { try { transcript.accept(observation); } catch { transcript.markGap(); } }
+      for (const observation of queue) { try { const before = transcript.cursor; transcript.accept(observation); if (observation.type === 'event' && transcript.cursor > before) phoneProjections.get(transcript)?.event(observation.event); } catch { transcript.markGap(); } }
       queue = [];
       resync ||= transcript.needsResync;
       lastOpened = Date.now(); nextPoll = lastOpened + pollMs;
-      const initial = transcript.snapshot();
+      const initial = this.phoneSnapshot(transcript);
       lastValue = JSON.stringify(initial);
       lastPublished = Date.now();
       yield initial;
@@ -779,14 +834,14 @@ export class DshAdapter implements HostAdapter {
           const fresh = await this.open(sessionId, active);
           this.checkCurrent(fresh.view, sessionId);
           transcript = fresh.transcript;
-          for (const observation of queue) { try { transcript.accept(observation); } catch { transcript.markGap(); } }
+          for (const observation of queue) { try { const before = transcript.cursor; transcript.accept(observation); if (observation.type === 'event' && transcript.cursor > before) phoneProjections.get(transcript)?.event(observation.event); } catch { transcript.markGap(); } }
           queue = [];
           resync = transcript.needsResync;
           lastOpened = Date.now(); nextPoll = lastOpened + pollMs;
           changed = true;
         }
         if (changed && Date.now() - lastPublished >= throttleMs) {
-          const snapshot = transcript.snapshot();
+          const snapshot = this.phoneSnapshot(transcript);
           const serialized = JSON.stringify(snapshot);
           changed = false;
           if (serialized !== lastValue) {
@@ -822,15 +877,182 @@ export class DshAdapter implements HostAdapter {
     const target = this.source.kind === 'dsh-registry' ? { workspaceId: workspace.id } : { cwd: workspace.path };
     return this.options.sessionController.create({ ...target, sessionId: `session-${input.requestId.toLowerCase()}`, ...(input.presetId !== undefined ? { agentPreset: input.presetId } : {}) });
   }
-  async prompt(sessionId: string, text: string, requestId: string, signal: AbortSignal, expectedWorkspaceId: string): Promise<void> {
+  private phoneSnapshot(transcript: Transcript): HostSnapshot {
+    const snapshot = transcript.phoneSnapshot();
+    const phone = phoneProjections.get(transcript);
+    snapshot.model = phone?.model ?? null; snapshot.resolvedQuestions = phone?.resolvedQuestions ?? [];
+    snapshot.session = { ...snapshot.session, model: snapshot.model };
+    snapshot.messages = snapshot.messages.map(m => { const delivery = m.role === 'user' ? phone?.delivery(m.id) : undefined; return delivery ? { ...m, delivery } : m; });
+    const live = this.options.questionBridge?.pending(snapshot.session.id) ?? [];
+    if (snapshot.pendingQuestions && live.length) { snapshot.pendingQuestions = [...snapshot.pendingQuestions.filter(q => !live.some(p => p.callId === q.callId)), ...live]; snapshot.activity = 'waiting'; }
+    return snapshot;
+  }
+  phoneCapabilities() {
+    const c = this.options.sessionController;
+    return { steer: true, queue: !!c.updateQueue, rename: !!c.rename, models: !!c.modelCatalog && !!c.selectModel, questions: !!this.options.questionBridge && !!this.options.answerContinued, questionSkip: !!this.options.questionBridge && !!this.options.answerContinued, fileDownload: !!this.options.attachments?.readFileStream, attachments: !!this.options.fileUploads && !!this.options.attachments && !!c.attachment };
+  }
+  async models(signal: AbortSignal): Promise<ModelCatalog> {
+    const active = this.signal(signal), c = this.options.sessionController;
+    if (!c.modelCatalog) throw new HostError('unavailable');
+    const catalog = await c.modelCatalog(); active.throwIfAborted();
+    const items: ModelCatalog['items'] = [];
+    for (const group of catalog.groups) for (const model of group.models) {
+      if (items.length >= 1000) throw new HostError('payload_too_large');
+      let supportsImages: boolean | null = null;
+      if (this.options.modelInfo) { try { const info = await this.options.modelInfo(group.id, model.id, active); supportsImages = info.inputModalities ? info.inputModalities.includes('image') : null; } catch { active.throwIfAborted(); } }
+      items.push({ provider: group.id, id: model.id, name: model.name, supportsImages, ...(model.reasoning ? { reasoningEfforts: model.reasoning.efforts.map(e => ({ id: e.id, name: e.name })) } : {}) });
+    }
+    return { items, default: catalog.default };
+  }
+  async mutateSession(sessionId: string, mutation: SessionMutation, signal: AbortSignal, expectedWorkspaceId: string): Promise<void> {
+    const active = this.signal(signal), c = this.options.sessionController;
+    const { view } = await this.permitted(sessionId, active, expectedWorkspaceId);
+    active.throwIfAborted(); this.checkCurrent(view, sessionId);
+    try {
+      switch (mutation.kind) {
+        case 'queue': if (!c.updateQueue) throw new HostError('unavailable'); await c.updateQueue({ sessionId, itemId: mutation.itemId, action: { kind: mutation.action } }); break;
+        case 'rename': if (!c.rename) throw new HostError('unavailable'); await c.rename({ sessionId, title: mutation.title }); break;
+        case 'model': {
+          if (!c.selectModel) throw new HostError('unavailable');
+          const catalog = await this.models(active), model = catalog.items.find(m => m.id === mutation.model && m.provider === mutation.provider);
+          if (!model || (mutation.reasoningEffort !== undefined && !model.reasoningEfforts?.some(e => e.id === mutation.reasoningEffort))) throw new HostError('invalid_request');
+          await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+          await c.selectModel({ sessionId, provider: mutation.provider, model: mutation.model, ...(mutation.reasoningEffort ? { reasoningEffort: mutation.reasoningEffort } : {}) }); break;
+        }
+        case 'answer': {
+          const snapshot = await this.snapshot(sessionId, active), pending = snapshot.pendingQuestions?.find(q => q.callId === mutation.callId);
+          if (!pending) throw new HostError('question_expired'); const answer = mutationAnswer(mutation, pending); validateAnswer(pending, answer);
+          await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+          if (this.options.questionBridge?.answer(sessionId, mutation.callId, answer)) return;
+          if (pending.state !== 'continued' || !await this.options.answerContinued?.(sessionId, mutation.callId, answer)) throw new HostError('question_expired');
+        }
+      }
+    } catch (error) { throw phoneError(error); }
+  }
+  private readonly fileReservations = new WeakMap<FileUploadReservation, { sessionId: string; slots: object[]; budget: Map<object, { sessionId: string; receiptId?: string }> }>();
+  async reserveFileUploads(sessionId: string, count: number, signal: AbortSignal, expectedWorkspaceId: string): Promise<FileUploadReservation> {
+    const active = this.signal(signal), service = this.options.fileUploads;
+    if (!service || !Number.isSafeInteger(count) || count < 1 || count > 20) throw new HostError('invalid_request');
+    await this.permitted(sessionId, active, expectedWorkspaceId);
+    const identity = (Reflect.get(service, Symbol.for('cordis.original')) ?? service) as object;
+    let budget = receiptBudgets.get(identity); if (!budget) { budget = new Map(); receiptBudgets.set(identity, budget); }
+    // At most 64 reservations and 64 scopes. Unknown/failed resolve never
+    // proves retirement, so retain its quota; never refresh transcript history.
+    if (service.resolve && this.options.sessionController.resolveAgent) {
+      for (const id of new Set([...budget.values()].filter(e => e.receiptId).map(e => e.sessionId))) {
+        active.throwIfAborted();
+        try {
+          const resolved = await this.options.sessionController.resolveAgent(id);
+          if ('error' in resolved) continue;
+          for (const [key, entry] of budget) if (entry.sessionId === id && entry.receiptId && service.resolve(resolved.agent, entry.receiptId) === undefined) budget.delete(key);
+        } catch { active.throwIfAborted(); }
+      }
+    }
+    active.throwIfAborted(); await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted();
+    if (budget.size + count > 64 || [...budget.values()].filter(e => e.sessionId === sessionId).length + count > 20) throw new HostError('rate_limited');
+    const slots = Array.from({ length: count }, () => { const slot = { sessionId }; budget!.set(slot, slot); return slot; });
+    const token: FileUploadReservation = { release: () => { for (const slot of slots) budget!.delete(slot); slots.length = 0; this.fileReservations.delete(token); } };
+    this.fileReservations.set(token, { sessionId, slots, budget }); return token;
+  }
+  async upload(sessionId: string, input: { data: AsyncIterable<Uint8Array>; size: number; mime: string; name: string; reservation?: FileUploadReservation }, signal: AbortSignal, expectedWorkspaceId: string): Promise<UploadedAttachment> {
     const active = this.signal(signal);
-    if (!isUuid(requestId) || typeof text !== 'string' || !text.trim()) throw new HostError('invalid_request');
+    if (!this.phoneCapabilities().attachments || input.size > UPLOAD_LIMIT) throw new HostError('payload_too_large');
+    const { view } = await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+    try {
+      if (IMAGE_MIMES.includes(input.mime as ImageMime)) {
+        const chunks: Buffer[] = []; let size = 0;
+        for await (const chunk of input.data) { active.throwIfAborted(); size += chunk.length; if (size > input.size || size > UPLOAD_LIMIT) throw new HostError('payload_too_large'); chunks.push(Buffer.from(chunk)); }
+        if (size !== input.size) throw new HostError('invalid_request');
+        const data = Buffer.concat(chunks);
+        await this.options.attachments!.validateImage({ data, mediaType: input.mime as ImageMime, name: input.name });
+        await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+        return { ref: { id: createHash('sha256').update(data).digest('hex'), name: input.name, size, mime: input.mime, kind: 'image' }, upstream: { type: 'image', mediaType: input.mime as ImageMime, data: data.toString('base64'), name: input.name } };
+      }
+      const service = this.options.fileUploads!;
+      const token = input.reservation ?? await this.reserveFileUploads(sessionId, 1, active, expectedWorkspaceId);
+      const reserved = this.fileReservations.get(token);
+      if (!reserved || reserved.sessionId !== sessionId || !reserved.slots.length) throw new HostError('invalid_request');
+      const key = reserved.slots.shift()!, budget = reserved.budget;
+      const reservation = budget.get(key)!;
+      if (!input.reservation) token.release();
+      // Once uploadStream starts this slot is uncertain on failure and must not
+      // be released with the remaining pre-admission reservations.
+      const result = await service.uploadStream({ sessionId, data: input.data, signal: active, name: input.name });
+      reservation.receiptId = result.receiptId;
+      return { ref: { id: result.file.attachmentId, name: result.file.name, size: result.file.bytes, mime: input.mime, kind: 'file' }, upstream: { type: 'file', receiptId: result.receiptId } };
+    } catch (error) { throw phoneError(error); }
+  }
+  async file(sessionId: string, attachmentId: string, signal: AbortSignal, expectedWorkspaceId: string): Promise<{ data: Uint8Array; ref: AttachmentRef }> {
+    const active = this.signal(signal);
+    if (!this.options.attachments?.readFileStream) throw new HostError('unavailable');
+    const { view } = await this.permitted(sessionId, active, expectedWorkspaceId);
+    // Only a journal-owned message reference is authority, never an upload ID,
+    // a queue occurrence, a supplied filename, or a guessed content hash.
+    const snapshot = await this.snapshot(sessionId, active);
+    const ref = snapshot.messages.slice(-100).flatMap(m => m.attachments ?? []).find(a => a.kind === 'file' && a.id === attachmentId);
+    if (!ref) throw new HostError('not_found');
+    if (!Number.isSafeInteger(ref.size) || ref.size < 0 || ref.size > UPLOAD_LIMIT || !ref.name || /[\\/\x00-\x1f\x7f]/.test(ref.name)) throw new HostError('payload_too_large');
+    const chunks: Buffer[] = []; let size = 0;
+    try {
+      for await (const chunk of this.options.attachments.readFileStream({ attachmentId: ref.id, name: ref.name, bytes: ref.size }, active)) {
+        active.throwIfAborted(); size += chunk.length;
+        if (size > ref.size || size > UPLOAD_LIMIT) throw new HostError('payload_too_large');
+        chunks.push(Buffer.from(chunk));
+      }
+      if (size !== ref.size) throw new HostError('unavailable');
+      await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+      return { data: Buffer.concat(chunks), ref: { ...ref, mime: 'application/octet-stream' } };
+    } catch (error) { throw phoneError(error); }
+  }
+  async image(sessionId: string, attachmentId: string, signal: AbortSignal, expectedWorkspaceId: string): Promise<{ data: Uint8Array; ref: AttachmentRef }> {
+    const active = this.signal(signal), c = this.options.sessionController;
+    if (!c.attachment) throw new HostError('unavailable');
+    const { view } = await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+    const opened = await this.open(sessionId, active); this.checkCurrent(opened.view, sessionId);
+    const visible = this.phoneSnapshot(opened.transcript).messages.slice(-100).flatMap(m => m.attachments ?? []).find(a => a.kind === 'image' && a.id === attachmentId);
+    if (!visible) throw new HostError('not_found');
+    if (visible.size > UPLOAD_LIMIT) throw new HostError('payload_too_large');
+    try {
+      const storedRef = phoneProjections.get(opened.transcript)?.imageRef(attachmentId);
+      if (storedRef && this.options.attachments?.readImage) {
+        if (storedRef.bytes !== visible.size || storedRef.mediaType !== visible.mime) throw new HostError('unavailable');
+        const result = await this.options.attachments.readImage(storedRef, active); active.throwIfAborted();
+        if (result.data.byteLength !== visible.size) throw new HostError('unavailable');
+        await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+        return { data: result.data, ref: visible };
+      }
+      const result = await c.attachment({ sessionId, attachmentId }); active.throwIfAborted();
+      const a = result.attachment;
+      if (a.attachmentId !== visible.id || a.bytes !== visible.size || a.mediaType !== visible.mime) throw new HostError('unavailable');
+      if (a.bytes > UPLOAD_LIMIT || result.data.length > Math.ceil(UPLOAD_LIMIT / 3) * 4 || !IMAGE_MIMES.includes(a.mediaType)) throw new HostError('payload_too_large');
+      const data = Buffer.from(result.data, 'base64'); if (data.length !== a.bytes) throw new HostError('unavailable');
+      await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
+      return { data, ref: { id: a.attachmentId, name: a.name ?? 'image', size: a.bytes, mime: a.mediaType, kind: 'image' } };
+    } catch (error) { throw phoneError(error); }
+  }
+  async prompt(sessionId: string, text: string, requestId: string, signal: AbortSignal, expectedWorkspaceId: string, options?: PromptOptions): Promise<void> {
+    const active = this.signal(signal);
+    if (!isUuid(requestId) || typeof text !== 'string' || (!text.trim() && !options?.attachments?.length)) throw new HostError('invalid_request');
     if (Buffer.byteLength(text, 'utf8') > 32768) throw new HostError('payload_too_large');
     if (!expectedWorkspaceId) throw new HostError('not_found');
-    const { view } = await this.permitted(sessionId, active, expectedWorkspaceId);
+    const { view, row } = await this.permitted(sessionId, active, expectedWorkspaceId);
     active.throwIfAborted();
     this.checkCurrent(view, sessionId);
-    await this.options.sessionController.prompt({ requestId, sessionId, mode: 'queue', content: [{ type: 'text', text }] }, active);
+    if (options?.delivery === 'steer' && !row.running) throw new HostError('conflict');
+    const content = [{ type: 'text' as const, text }, ...(options?.attachments ?? []).map(a => a.upstream)];
+    try {
+      await this.options.sessionController.prompt({ requestId, sessionId, mode: options?.delivery ?? 'queue', content }, active);
+      // ACK can be a requestId dedup hit before attachment binding. Only public
+      // resolve proving retirement can release this conservative reservation.
+      const service = this.options.fileUploads;
+      if (service?.resolve && this.options.sessionController.resolveAgent) {
+        const resolved = await this.options.sessionController.resolveAgent(sessionId);
+        if ('error' in resolved) return;
+        const budget = receiptBudgets.get((Reflect.get(service, Symbol.for('cordis.original')) ?? service) as object);
+        const accepted = new Set((options?.attachments ?? []).flatMap(a => a.upstream.type === 'file' ? [a.upstream.receiptId] : []));
+        if (budget) for (const [key, entry] of budget) if (entry.sessionId === sessionId && entry.receiptId && accepted.has(entry.receiptId) && service.resolve(resolved.agent, entry.receiptId) === undefined) budget.delete(key);
+      }
+    } catch (error) { throw phoneError(error); }
   }
   async cancel(sessionId: string, signal: AbortSignal, expectedCursor: number, expectedWorkspaceId: string): Promise<void> {
     const active = this.signal(signal);

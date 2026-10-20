@@ -16,6 +16,7 @@ async function recovered(t: { after(fn: () => Promise<void>): void }, records: H
   let resumed = 0, closed = 0, observing = false;
   let notify: (id: string, event: import('../src/notifications.ts').NotificationSource) => void = () => {};
   let disposed: (id: string) => void = () => {};
+  let observe: (value: import('../src/dsh-adapter.ts').DshObservation) => void = () => {};
   const reads: { throughSeq: number; beforeSeq: number; maxMessages: number }[] = [];
   const values = { userQuestions: { active: [], settled: [] } };
   const controller = {
@@ -34,9 +35,9 @@ async function recovered(t: { after(fn: () => Promise<void>): void }, records: H
     async projections() { return { asOfSeq: cursor(), values }; },
     async create() { throw new Error('No mutations'); }, async prompt() { throw new Error('No mutations'); }, cancel() { throw new Error('No mutations'); },
   };
-  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: controller, pollIntervalMs, throttleMs: 1, workspaces: [{ id: 'synthetic-workspace', path: dir, name: 'Synthetic' }], events: { subscribeDisposed(listener) { disposed = listener; return () => { disposed = () => {}; }; }, subscribe() { return () => {}; }, subscribeNotifications(listener) { notify = listener; return () => { notify = () => {}; }; } } });
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', sessionController: controller, pollIntervalMs, throttleMs: 1, workspaces: [{ id: 'synthetic-workspace', path: dir, name: 'Synthetic' }], events: { subscribeDisposed(listener) { disposed = listener; return () => { disposed = () => {}; }; }, subscribe(_id, listener) { observe = listener; return () => { observe = () => {}; }; }, subscribeNotifications(listener) { notify = listener; return () => { notify = () => {}; }; } } });
   t.after(async () => { adapter.dispose(); await rm(dir, { recursive: true, force: true }); });
-  return { adapter, controller, reads, dir, disposeSession: () => disposed('synthetic-session'), notify: (event: import('../src/notifications.ts').NotificationSource) => notify('synthetic-session', event), cleanup: () => ({ resumed, closed }) };
+  return { adapter, controller, reads, dir, emit: (value: import('../src/dsh-adapter.ts').DshObservation) => observe(value), disposeSession: () => disposed('synthetic-session'), notify: (event: import('../src/notifications.ts').NotificationSource) => notify('synthetic-session', event), cleanup: () => ({ resumed, closed }) };
 }
 
 test('unchanged watch refresh reuses recovered ancestry without any extra backward reads', { timeout: 5000 }, async t => {
@@ -191,7 +192,9 @@ test('a byte-exhausted cut is retried when newer paging drops its oversized depe
   records[301]!.event.surfaceOp = { op: 'replace', startSeq: 200, endSeq: 200 };
   const h = await recovered(t, records, 201), follow = h.controller.follow;
   h.controller.follow = async function* (request, signal) { for await (const frame of follow(request, signal)) yield { ...frame, ...historyPage(records, frame.cursor, frame.cursor + 1, 100) }; };
-  assert.deepEqual((await h.adapter.snapshot('synthetic-session', new AbortController().signal)).messages, []);
+  const bounded = await h.adapter.snapshot('synthetic-session', new AbortController().signal);
+  assert.deepEqual(bounded.messages.map(m => m.id), Array.from({ length: 100 }, (_, n) => `message-${201 + n}`));
+  assert.equal(bounded.hasMore, true); assert.match(bounded.notice!, /bounded history crosses/);
   assert.equal(h.reads.length, 1);
   await h.adapter.snapshot('synthetic-session', new AbortController().signal); assert.equal(h.reads.length, 1, 'unchanged genuinely exhausted cut does not retry');
   for (let seq = 302; seq <= 400; seq++) records.push({ type: 'event', event: { seq, time: 1700000000000 + seq, type: 'user/message', surfaceOp: 'append', data: { id: `message-${seq}`, content: [{ type: 'text', text: 'Synthetic' }] } } });
@@ -394,6 +397,56 @@ test('an old history cut without a newer control boundary does not invent an idl
   assert.match(snapshot.notice!, /bounded history crosses/);
 });
 
+test('an out-of-window replacement preserves the certain tail when backward recovery reaches its page budget', async t => {
+  const h = await recovered(t, overBudgetRecords(), 1702);
+  const snapshot = await h.adapter.snapshot('synthetic-session', new AbortController().signal);
+  assert.deepEqual(snapshot.messages.map(m => m.id), ['message-1701', ...Array.from({ length: 99 }, (_, n) => `message-${1703 + n}`)]);
+  assert.equal(snapshot.hasMore, true);
+  assert.match(snapshot.notice!, /bounded history crosses/);
+  assert.equal(h.reads.length, 15, 'keep the existing opening-plus-fifteen-pages security bound');
+  assert.equal(new Set(snapshot.messages.map(m => m.id)).size, 100, 'no replacement copy at the wrong surface position');
+});
+
+test('a missing start and a known end remove only the shadowed prefix in surface order, not numeric order', async t => {
+  const records: HistoryRecord[] = Array.from({ length: 8 }, (_, seq) => ({ type: 'event', event: { seq, time: 1700000000000 + seq, type: 'user/message', surfaceOp: 'append', data: { id: `message-${seq}`, content: [{ type: 'text', text: 'Synthetic' }] } } }));
+  records[0]!.event.type = 'system/message';
+  records[1]!.event.data = { text: 'x'.repeat(16 * 1024 * 1024) }; // Recovery cannot retain this dependency.
+  records[4]!.event.surfaceOp = { op: 'replace', startSeq: 1, endSeq: 1 };
+  records[5]!.event.surfaceOp = { op: 'replace', startSeq: 4, endSeq: 2 }; // Current order is [0, 4, 2, 3].
+  const h = await recovered(t, records, 2);
+  const snapshot = await h.adapter.snapshot('synthetic-session', new AbortController().signal);
+  assert.deepEqual(snapshot.messages.map(m => m.id), ['message-5', 'message-3', 'message-6', 'message-7']);
+  assert.equal(snapshot.hasMore, true); assert.match(snapshot.notice!, /bounded history crosses/);
+  assert.equal(h.reads.length, 1);
+});
+
+test('watch keeps provisional and durable tail updates after unresolved old ancestry, without duplicates or promotion', { timeout: 3000 }, async t => {
+  const records = overBudgetRecords(), h = await recovered(t, records, 1702, true, 60000);
+  const active = new AbortController(), watch = h.adapter.watch('synthetic-session', active.signal)[Symbol.asyncIterator]();
+  try {
+    assert.equal((await watch.next()).value!.messages.length, 100);
+    const pending = watch.next();
+    h.emit({ type: 'assistant-stream', frame: { type: 'start', revision: 1, attemptId: 'synthetic-live', turn: 900, step: 1 } });
+    h.emit({ type: 'assistant-stream', frame: { type: 'chunk', revision: 2, attemptId: 'synthetic-live', index: 0, time: 1700000001802, chunk: { type: 'text-delta', index: 0, text: 'Synthetic partial' } } });
+    const partial = (await pending).value!;
+    assert.equal(partial.messages.at(-1)!.id, 'provisional:synthetic-live');
+    assert.equal(partial.messages.at(-1)!.text, 'Synthetic partial');
+    const final = watch.next();
+    h.emit({ type: 'event', event: { seq: 1802, time: 1700000001802, type: 'assistant/message', surfaceOp: 'append', data: { turn: 900, step: 1, message: { id: 'synthetic-committed', content: [{ type: 'text', text: 'Synthetic final' }] } } } });
+    h.emit({ type: 'assistant-stream', frame: { type: 'end', revision: 3, attemptId: 'synthetic-live', index: 1, outcome: { kind: 'committed', seq: 1802 } } });
+    const settled = (await final).value!;
+    assert.equal(settled.messages.at(-1)!.id, 'synthetic-committed');
+    assert.equal(settled.messages.filter(m => m.provisional).length, 0);
+    assert.equal(new Set(settled.messages.map(m => m.id)).size, 100);
+    const rewrite = watch.next();
+    h.emit({ type: 'event', event: { seq: 1803, time: 1700000001803, type: 'user/message', surfaceOp: { op: 'replace', startSeq: 1702, endSeq: 1750 }, data: { id: 'synthetic-live-replacement', content: [{ type: 'text', text: 'Synthetic replacement' }] } } });
+    const rewritten = (await rewrite).value!;
+    assert.deepEqual(rewritten.messages.map(m => m.id), ['synthetic-live-replacement', ...Array.from({ length: 51 }, (_, n) => `message-${1751 + n}`), 'synthetic-committed']);
+    assert.equal(rewritten.hasMore, true); assert.match(rewritten.notice!, /bounded history crosses/);
+    assert.equal(h.reads.length, 15); assert.equal(h.cleanup().resumed, 0);
+  } finally { active.abort(); await watch.return?.(); }
+});
+
 test('page budget exhaustion still preserves a newest running turn and its activity detail', async t => {
   const records = overBudgetRecords();
   records[1799] = { type: 'event', event: { seq: 1799, time: 1700000001799, type: 'turn/start', data: { turn: 900 } } };
@@ -424,7 +477,7 @@ test('byte recovery bound retains no oversized dependency but still reports the 
   records[1800] = { type: 'event', event: { seq: 1800, time: 1700000001800, type: 'approval/asked', data: { id: 'synthetic-approval' } } };
   const h = await recovered(t, records, 1702, true);
   const snapshot = await h.adapter.snapshot('synthetic-session', new AbortController().signal);
-  assert.deepEqual(snapshot.messages, []);
+  assert.deepEqual(snapshot.messages.map(m => m.id), ['message-1699', 'message-1700', 'message-1701', ...Array.from({ length: 96 }, (_, n) => `message-${1703 + n}`), 'message-1801']);
   assert.equal(snapshot.activity, 'waiting');
   assert.match(snapshot.notice!, /bounded history crosses/);
   assert.equal(h.reads.length, 2, 'one oversized backward page must stop further recovery');
@@ -454,7 +507,7 @@ test('page recovery stops at the hard budget but still folds the newest proven a
   records[1800] = { type: 'event', event: { seq: 1800, time: 1700000001800, type: 'turn/end', data: { turn: 900, reason: { kind: 'completed' } } } };
   const h = await recovered(t, records, 1702);
   const snapshot = await h.adapter.snapshot('synthetic-session', new AbortController().signal);
-  assert.deepEqual(snapshot.messages, [], 'never publish obsolete answers from an unresolved surface');
+  assert.deepEqual(snapshot.messages.map(m => m.id), ['message-1699', 'message-1700', 'message-1701', ...Array.from({ length: 96 }, (_, n) => `message-${1703 + n}`), 'message-1801'], 'only the certain surface suffix survives the omitted replacement');
   assert.match(snapshot.notice!, /bounded history crosses/);
   assert.equal(snapshot.activity, 'idle', 'old surface ambiguity cannot hide the newest authoritative end');
   assert.equal(h.reads.length, 15, 'opening plus at most fifteen cold pages');

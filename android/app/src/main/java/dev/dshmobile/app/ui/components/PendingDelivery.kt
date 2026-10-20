@@ -53,7 +53,7 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
                         }, enabled = enabled && actions != null, modifier = Modifier.testTag("dismiss_prompt_${command.requestId}")) {
                             Text(stringResource(R.string.mobile_dismiss_local_prompt))
                         }
-                        TextButton(onClick = { confirmResend = true }, enabled = enabled && actions != null && MobileReducer.canSend(state, command.text.orEmpty()),
+                        TextButton(onClick = { confirmResend = true }, enabled = enabled && actions != null && MobileReducer.canSend(state, command.text.orEmpty(), command.attachmentCount > 0),
                             modifier = Modifier.testTag("resend_prompt_${command.requestId}")) { Text(stringResource(R.string.mobile_resend_prompt)) }
                     }
                 }
@@ -64,7 +64,7 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
                 confirmButton = { TextButton(onClick = {
                     confirmResend = false; acting = true
                     scope.launch { try { actions?.resend?.invoke(command.requestId) } finally { acting = false } }
-                }, enabled = enabled && MobileReducer.canSend(state, command.text.orEmpty()), modifier = Modifier.testTag("resend_prompt_confirm")) { Text(stringResource(R.string.mobile_resend_prompt)) } },
+                }, enabled = enabled && MobileReducer.canSend(state, command.text.orEmpty(), command.attachmentCount > 0), modifier = Modifier.testTag("resend_prompt_confirm")) { Text(stringResource(R.string.mobile_resend_prompt)) } },
                 dismissButton = { TextButton(onClick = { confirmResend = false }) { Text(stringResource(R.string.mobile_back)) } })
         }
     }

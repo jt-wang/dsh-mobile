@@ -1,3 +1,5 @@
+export type { SessionModel, ResolvedQuestion, PhoneCapabilities, Delivery, AttachmentRef, QuestionItem, PendingQuestion, QuestionAnswer, QueueItem, ModelSelection, ModelCatalog, SessionMutation, PromptOptions, UploadedAttachment } from './phone.ts';
+export { HOST_VERSION } from './phone.ts';
 export { createHostServer, startHostServer } from './server.ts';
 export type { HostServerOptions, MobileHostServer } from './server.ts';
 export { HostState, isRequestId, validateGrants, allowsWorkspace } from './state.ts';

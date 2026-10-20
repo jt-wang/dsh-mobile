@@ -70,7 +70,7 @@ internal class EncryptedStateStore internal constructor(private val file: Atomic
             if (sealed.size > MAX_STORED_BYTES) throw MobileFailure("storage_failed")
             try {
                 val plain = cipher.decrypt(sealed)
-                try { mobileJson.decodeFromString<StoredState>(plain.toString(Charsets.UTF_8)) }
+                try { decodeStoredState(plain.toString(Charsets.UTF_8)) }
                 finally { plain.fill(0) }
             } catch (_: Exception) { throw MobileFailure("storage_failed") }
         }

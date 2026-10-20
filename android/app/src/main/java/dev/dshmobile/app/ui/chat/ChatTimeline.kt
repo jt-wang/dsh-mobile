@@ -30,6 +30,9 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, onCopy: (String) -> Unit, modifier: Modifier = Modifier,
     searchQuery: String = "", selectedMatch: SearchMatch? = null,
+    questions: (@Composable () -> Unit)? = null,
+    media: (@Composable (ChatMessage) -> Unit)? = null,
+    questionTarget: String? = null,
     classify: suspend (List<ChatMessage>, List<ChatItem>) -> List<ChatItem> = { messages, previous ->
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { chatItems(messages, previous) }
     }) {
@@ -53,7 +56,7 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
     val loading = visible == null
     val timeline = visible.orEmpty()
     val messageCount = timeline.size + if (unconfirmed != null) 1 else 0
-    val totalItems = messageCount + if (snapshot.hasMore) 1 else 0
+    val totalItems = messageCount + (if (snapshot.hasMore) 1 else 0) + (if (questions != null) 1 else 0)
     LaunchedEffect(list, threshold) {
         snapshotFlow {
             val last = list.layoutInfo.visibleItemsInfo.lastOrNull()
@@ -63,7 +66,10 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
             if (scrolling) { following = nearBottom; if (nearBottom) unread = false }
         }
     }
-    LaunchedEffect(messageCount, timeline, loading) {
+    LaunchedEffect(questionTarget, questions != null, loading) {
+        if (questionTarget != null && questions != null && !loading) { following = true; list.scrollToItem((if (snapshot.hasMore) 1 else 0) + timeline.size) }
+    }
+    LaunchedEffect(messageCount, timeline, loading, questions != null) {
         if (loading || searchQuery.isNotBlank()) return@LaunchedEffect
         if (following && totalItems > 0) { list.scrollToItem(totalItems - 1); list.scrollBy(Float.MAX_VALUE) }
         else if (messageCount > 0) unread = true
@@ -97,11 +103,12 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
             items(timeline, key = { if (it is ChatItem.Activity) "activity:${it.id}" else LazyItemKeys.message(it.id) },
                 contentType = { if (it is ChatItem.Activity) "activity" else "message" }) { item ->
                 when (item) {
-                    is ChatItem.Message -> MessageItem(item.message, onCopy, searchQuery,
+                    is ChatItem.Message -> if (media != null && item.message.attachments.isNotEmpty()) media(item.message) else MessageItem(item.message, onCopy, searchQuery,
                         selectedMatch?.takeIf { it.messageId == item.id })
                     is ChatItem.Activity -> AgentActivityGroup(item, onCopy)
                 }
             }
+            if (questions != null) item(key = "phone-questions") { questions() }
             unconfirmed?.let { command -> item(key = LazyItemKeys.pending(command.requestId)) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(stringResource(R.string.mobile_unconfirmed_message), style = MaterialTheme.typography.labelMedium)

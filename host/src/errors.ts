@@ -5,6 +5,7 @@ export const ERROR_DEFINITIONS = {
   invalid_request: { status: 400, message: 'The request is invalid.', retryable: false },
   payload_too_large: { status: 413, message: 'The request exceeds the allowed size.', retryable: false },
   unsupported_media_type: { status: 415, message: 'Use UTF-8 application/json.', retryable: false },
+  question_expired: { status: 409, message: 'The question was already answered or is no longer available.', retryable: false },
   conflict: { status: 409, message: 'The request identity conflicts with an existing operation.', retryable: false },
   rate_limited: { status: 429, message: 'Too many requests. Try again later.', retryable: true },
   unavailable: { status: 503, message: 'The host is temporarily unavailable.', retryable: true },

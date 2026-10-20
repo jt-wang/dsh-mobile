@@ -276,6 +276,10 @@ export class HostState {
       return { fresh: true, receipt: { requestId, status: 'pending', updatedAt }, httpStatus: 202, workspaceId };
     });
   }
+  /** Bounded recent prompt identities; no text or foreign-device IDs are read. */
+  promptCommandIds(deviceId: string): string[] {
+    return this.db.prepare("SELECT request_id FROM commands WHERE device_id=? AND operation='prompt' ORDER BY rowid DESC LIMIT 1024").all(deviceId).map(row => String(row.request_id));
+  }
   getCommand(deviceId: string, requestId: string): StoredCommand | undefined {
     const row = this.db.prepare('SELECT * FROM commands WHERE device_id=? AND request_id=?').get(deviceId, requestId.toLowerCase());
     return row ? this.command(row) : undefined;

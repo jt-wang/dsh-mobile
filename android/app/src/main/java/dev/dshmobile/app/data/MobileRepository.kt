@@ -16,6 +16,21 @@ interface MobileRepository {
     suspend fun createSession(workspaceId: String, presetId: String? = null)
     suspend fun updateDraft(text: String)
     suspend fun sendMessage(text: String)
+    suspend fun sendMessage(text: String, delivery: String?, uploadIds: List<String>) { sendMessage(text) }
+    suspend fun queueAction(itemId: String, action: String) {}
+    suspend fun rename(title: String) {}
+    suspend fun selectModel(selection: dev.dshmobile.app.model.ModelSelection) {}
+    suspend fun answer(callId: String, answer: dev.dshmobile.app.model.QuestionAnswer) {}
+    suspend fun skipQuestion(callId: String) {}
+    suspend fun file(sessionId: String, attachmentId: String): ByteArray = byteArrayOf()
+    suspend fun models(): dev.dshmobile.app.model.ModelCatalog = dev.dshmobile.app.model.ModelCatalog(emptyList())
+    suspend fun upload(sessionId: String, attachment: dev.dshmobile.app.model.DraftAttachment, open: () -> java.io.InputStream, progress: (Int) -> Unit): dev.dshmobile.app.model.DraftAttachment = attachment
+    suspend fun image(sessionId: String, attachmentId: String): ByteArray = byteArrayOf()
+    suspend fun saveAttachments(sessionId: String, items: List<dev.dshmobile.app.model.DraftAttachment>) {}
+    /** Apply source operations to current state under the admission lock, never a captured editor list. */
+    suspend fun editAttachments(sessionId: String, add: List<dev.dshmobile.app.model.DraftAttachment> = emptyList(), remove: Set<String> = emptySet(),
+        replace: dev.dshmobile.app.model.DraftAttachment? = null, expectedUploadId: String? = null) {}
+    suspend fun saveAnswerDraft(sessionId: String, callId: String, answer: dev.dshmobile.app.model.QuestionAnswer) {}
     suspend fun cancelRun()
     suspend fun resolvePending()
     /** Confirmed local escape only: inspect the host first; never sends or cancels anything. */

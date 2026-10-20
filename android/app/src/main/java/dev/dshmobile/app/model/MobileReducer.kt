@@ -13,11 +13,11 @@ object MobileReducer {
     fun canAdmitPrompt(state: MobileState): Boolean =
         state.pending == null && blockingPromptCount(state) < MAX_ACCEPTED_PROMPTS
 
-    fun canSend(state: MobileState, draft: String): Boolean =
+    fun canSend(state: MobileState, draft: String, hasAttachments: Boolean = false): Boolean =
         state.connection == ConnectionState.ONLINE && state.capabilities?.textPrompt == true &&
-            !state.busy && !state.snapshotStale && canAdmitPrompt(state) && draft.isNotBlank() && draft.toByteArray(Charsets.UTF_8).size <= 32_768 &&
+            !state.busy && !state.snapshotStale && canAdmitPrompt(state) && (draft.isNotBlank() || (hasAttachments && state.capabilities?.attachments == true)) && draft.toByteArray(Charsets.UTF_8).size <= 32_768 &&
             state.snapshot?.let { snapshot ->
-                snapshot.activity in setOf("idle", "running") && snapshot.session.canExecute &&
+                (snapshot.activity in setOf("idle", "running") || (snapshot.activity == "waiting" && state.capabilities?.questions == true && snapshot.pendingQuestions.isNotEmpty())) && snapshot.session.canExecute &&
                     state.workspaces.any { it.id == snapshot.session.workspaceId && it.canExecute }
             } == true
 

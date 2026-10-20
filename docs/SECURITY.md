@@ -39,7 +39,7 @@ A timeout is not proof that a prompt or cancellation failed. The original reques
 
 ## Bounded history integrity
 
-A bounded snapshot may omit the endpoints needed to resolve message replacements. The adapter fails closed in that case instead of displaying potentially discarded or unverified history. Some compacted conversations require the desktop until paging is available. This is a deliberate integrity limitation, not evidence that the conversation is empty or that all history was synchronized.
+A bounded snapshot may omit the endpoints needed to resolve message replacements. With host plugin 0.6.0 and earlier, the adapter fails closed in that case instead of displaying potentially discarded or unverified history, so such compacted conversations open empty on mobile and require the desktop. Host plugin 0.7.0 instead returns the certain recent tail of messages with a fixed history-cut notice; unsupported events, sequence gaps and oversized openings still fail closed. This is a deliberate integrity limitation, not evidence that the conversation is empty or that all history was synchronized.
 
 ## Safe diagnostics
 
@@ -55,4 +55,4 @@ A useful private report includes affected versions, the trust boundary crossed, 
 
 ## Release prerequisites
 
-Independent security/correctness review, real DSH compatibility, public relay/native release acceptance and physical Wi-Fi/mobile transitions remain separate gates. Local tests do not prove deployment or a usable remote connection. Deployment requires operator authorization, reviewed rollback/preflight and a canary. Profile activation, certificate rotation and device rollout follow reviewed operator procedures. Attachments, questions, approvals and push remain unavailable. The project uses the MIT license; a dedicated private security contact has not yet been established.
+Independent security/correctness review, real DSH compatibility, public relay/native release acceptance and physical Wi-Fi/mobile transitions remain separate gates. Local tests do not prove deployment or a usable remote connection. Deployment requires operator authorization, reviewed rollback/preflight and a canary. Profile activation, certificate rotation and device rollout follow reviewed operator procedures. Approvals and push remain unavailable; attachments and answers to agent questions require app 0.8.0 with host plugin 0.7.0. The project uses the MIT license; a dedicated private security contact has not yet been established.

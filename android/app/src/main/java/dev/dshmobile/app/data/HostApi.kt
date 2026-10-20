@@ -85,6 +85,8 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                 try {
                     val result = response.use {
                         if (it.code in 300..399) throw MobileFailure("invalid_response")
+                        // Upload DELETE succeeds with an empty 204 and no JSON media type.
+                        if (request.method == "DELETE" && it.code == 204) return@use HttpResult(204, "", 0)
                         val body = it.body ?: throw MobileFailure("invalid_response")
                         val media = body.contentType()
                         if (media?.type != "application" || media.subtype != "json" ||
@@ -96,6 +98,7 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
                         HttpResult(it.code, text, retryAfterMillis(it.header("Retry-After")))
                     }
+                    if (token != null && result.status in 200..299) StartupPerf.mark("first_host_response")
                     if (continuation.isActive) continuation.resume(result)
                 } catch (failure: Exception) {
                     if (continuation.isActive) continuation.resumeWithException(
@@ -115,7 +118,7 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
         return MobileFailure(when (status) {
             401 -> if (error.code == "revoked") "revoked" else "unauthorized"
             403 -> "forbidden"
-            409 -> "request_conflict"
+            409 -> if (error.code == "question_expired") "question_expired" else "request_conflict"
             429 -> "rate_limited"
             else -> if (status in 400..599 && history) "chat_unavailable" else hostErrorKey(error.code)
         }, retryAfterMs)
@@ -177,8 +180,12 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
         val body: String
         when (value.kind) {
             "create" -> { builder = request("sessions"); body = mobileJson.encodeToString(CreateBody(value.requestId, requireNotNull(value.workspaceId), value.presetId)) }
-            "send" -> { builder = request("sessions", requireNotNull(value.sessionId), "messages"); body = mobileJson.encodeToString(MessageBody(value.requestId, requireNotNull(value.text))) }
+            "send" -> { builder = request("sessions", requireNotNull(value.sessionId), "messages"); body = mobileJson.encodeToString(MessageBody(value.requestId, requireNotNull(value.text), value.delivery, value.uploadIds)) }
             "cancel" -> { builder = request("sessions", requireNotNull(value.sessionId), "cancellations"); body = mobileJson.encodeToString(CancelBody(value.requestId, requireNotNull(value.expectedCursor))) }
+            "queue" -> { builder = request("sessions", requireNotNull(value.sessionId), "queue"); body = mobileJson.encodeToString(QueueBody(value.requestId, requireNotNull(value.itemId), requireNotNull(value.action))) }
+            "rename" -> { builder = request("sessions", requireNotNull(value.sessionId), "title"); body = mobileJson.encodeToString(TitleBody(value.requestId, requireNotNull(value.title))) }
+            "model" -> { builder = request("sessions", requireNotNull(value.sessionId), "model"); val s = requireNotNull(value.selection); body = mobileJson.encodeToString(ModelBody(value.requestId, s.provider, s.model, s.reasoningEffort)) }
+            "answer" -> { builder = request("sessions", requireNotNull(value.sessionId), "answers"); body = if (value.skip) mobileJson.encodeToString(SkipBody(value.requestId, requireNotNull(value.callId), true)) else mobileJson.encodeToString(AnswerBody(value.requestId, requireNotNull(value.callId), requireNotNull(value.answer))) }
             else -> throw MobileFailure("invalid_selection")
         }
         if (body.toByteArray().size > 64 * 1024) throw MobileFailure("invalid_text")
@@ -189,8 +196,74 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                 if (result.status !in 200..299 && it.status != "rejected") throw MobileFailure("invalid_response")
             }
         }
+        if (value.kind == "send" && !value.uploadIds.isNullOrEmpty() && result.status == 404 &&
+            runCatching { decodeWire<ErrorEnvelope>(result.text).error.code == "not_found" }.getOrDefault(false)) {
+            // Host resolves staging before admission; no receipt exists for this rejected payload.
+            throw MobileFailure("upload_missing")
+        }
         throw result.errorFailure()
     }
+    suspend fun models(): dev.dshmobile.app.model.ModelCatalog = decodeWire<dev.dshmobile.app.model.ModelCatalog>(execute(request("models").build(), SNAPSHOT_LIMIT).checked()).also { catalog ->
+        if (catalog.items.size > 1000 || catalog.items.any { !validId(it.provider) || !validId(it.id) || it.name.length > 1024 }) throw MobileFailure("invalid_response")
+    }
+
+    suspend fun discardUpload(sessionId: String, uploadId: String) {
+        val result = execute(request("sessions", sessionId, "uploads", uploadId).delete().build())
+        if (result.status !in setOf(204, 404)) result.checked()
+    }
+
+    suspend fun upload(sessionId: String, name: String, mime: String, size: Long, open: () -> java.io.InputStream, progress: (Int) -> Unit): UploadReceipt {
+        if (size !in 1..dev.dshmobile.app.model.PhoneRules.FILE_LIMIT) throw MobileFailure("invalid_selection")
+        val body = object : okhttp3.RequestBody() {
+            override fun contentType() = mime.toMediaType()
+            override fun contentLength() = size
+            override fun isOneShot() = true
+            override fun writeTo(sink: okio.BufferedSink) {
+                open().use { input ->
+                    val buffer = ByteArray(32 * 1024); var sent = 0L
+                    while (sent < size) {
+                        val count = input.read(buffer, 0, minOf(buffer.size.toLong(), size - sent).toInt())
+                        if (count < 0) throw IOException("short_upload")
+                        sink.write(buffer, 0, count); sent += count; progress((sent * 100 / size).toInt())
+                    }
+                    if (input.read() != -1) throw IOException("long_upload")
+                }
+            }
+        }
+        val result = execute(request("sessions", sessionId, "uploads").header("X-File-Name", java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20")).post(body).build())
+        if (result.status != 201) { result.checked(); throw MobileFailure("invalid_response") }
+        return decodeWire<UploadReceipt>(result.text).also {
+            if (!validId(it.uploadId) || it.expiresAt < 0 || it.attachment.size != size || it.attachment.mime != mime) throw MobileFailure("invalid_response")
+        }
+    }
+
+    /** Memory-only bounded response; no HTTP disk cache contains private chat images. */
+    suspend fun image(sessionId: String, attachmentId: String): ByteArray = binary(sessionId, attachmentId, false)
+    suspend fun file(sessionId: String, attachmentId: String): ByteArray = binary(sessionId, attachmentId, true)
+    private suspend fun binary(sessionId: String, attachmentId: String, file: Boolean): ByteArray = suspendCancellableCoroutine { continuation ->
+        synchronized(admission) {
+            if (retired.get()) { continuation.resumeWithException(MobileFailure("network_unavailable")); return@suspendCancellableCoroutine }
+            val call = client.newCall(request("sessions", sessionId, if (file) "files" else "attachments", attachmentId).header("Accept", if (file) "application/octet-stream" else "image/*").build())
+            continuation.invokeOnCancellation { cancelOnIo { call.cancel() } }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) { if (continuation.isActive) continuation.resumeWithException(MobileFailure("network_unavailable")) }
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val bytes = response.use {
+                            if (it.code !in 200..299 || (if (file) it.body?.contentType()?.toString() != "application/octet-stream" else it.body?.contentType()?.toString() !in dev.dshmobile.app.model.PhoneRules.imageMimes)) throw MobileFailure("chat_unavailable")
+                            val body = it.body ?: throw MobileFailure("invalid_response")
+                            if (body.contentLength() > dev.dshmobile.app.model.PhoneRules.FILE_LIMIT) throw MobileFailure("invalid_response")
+                            body.byteStream().use { input -> input.readAtMost(dev.dshmobile.app.model.PhoneRules.FILE_LIMIT.toInt() + 1) }.also { data ->
+                                if (data.size > dev.dshmobile.app.model.PhoneRules.FILE_LIMIT) throw MobileFailure("invalid_response")
+                            }
+                        }
+                        if (continuation.isActive) continuation.resume(bytes)
+                    } catch (_: Exception) { if (continuation.isActive) continuation.resumeWithException(MobileFailure("chat_unavailable")) }
+                }
+            })
+        }
+    }
+
     suspend fun receipt(requestId: String): CommandReceipt? {
         val result = execute(request("commands", requestId).build())
         if (result.status == 404) { decodeWire<ErrorEnvelope>(result.text); return null }

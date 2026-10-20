@@ -53,7 +53,7 @@
     <string name="mobile_revoked_help">Remove this connection in settings, then create a new invitation on your computer.</string>
     <string name="mobile_incompatible_help">Update the phone app or host plugin to compatible versions. Tasks remain on your computer.</string>
     <string name="mobile_demo_notice">Demo host — synthetic content, not connected to DSH.</string>
-    <string name="mobile_desktop_notice">This task needs attention on your computer. Questions and approvals cannot be answered on the phone yet.</string>
+    <string name="mobile_desktop_notice">This task needs your decision on the computer. Agent actions can’t be approved from the phone, and with an older host plugin questions can’t be answered here either.</string>
     <string name="mobile_unknown_activity">Task status could not be confirmed. Check it on your computer; sending is disabled.</string>
     <string name="mobile_message">Message your computer</string>
     <string name="mobile_send">Send message</string>
@@ -87,8 +87,8 @@
     <string name="mobile_workspace_scope">Projects match DSH on your computer.</string>
     <string name="mobile_create">Create chat</string>
     <string name="mobile_notifications_title">While the app is closed</string>
-    <string name="mobile_notifications_body">Background notifications are not available yet. Tasks continue on your computer; reopen the app to sync their results.</string>
-    <string name="mobile_phone_limits">Attachments, structured questions and approvals are not supported in this version. Use your computer for these actions.</string>
+    <string name="mobile_notifications_body">Tasks run on your computer. Turn on notifications to hear about finished answers and decision requests. The app then keeps a background connection to your computer with a persistent notification.</string>
+    <string name="mobile_phone_limits">Agent actions can only be approved on the computer.</string>
     <string name="mobile_forget">Remove connection from this phone</string>
     <string name="mobile_forget_help">Local removal does not revoke this device on your computer and does not stop its tasks. To revoke access, use the host device settings.</string>
     <string name="mobile_forget_title">Remove local connection?</string>
@@ -117,7 +117,7 @@
     <string name="mobile_error_command_uncertain">The command may have reached your computer. Check delivery; do not resend.</string>
     <string name="mobile_error_command_rejected">The computer rejected the command. Check its receipt and permissions.</string>
     <string name="mobile_error_request_conflict">The original command identity conflicts with its payload. Do not resend; check it on your computer.</string>
-    <string name="mobile_error_invalid_text">Enter a non-empty message no larger than 32 KB.</string>
+    <string name="mobile_error_invalid_text">Add text or at least one attachment. Text can be up to 32 KB.</string>
     <string name="mobile_error_invalid_selection">Choose an available executable project and host preset.</string>
     <string name="mobile_error_generic">The request could not be completed. Check the connection and task status on your computer before trying again.</string>
     <string name="mobile_history_unavailable">History is not available while disconnected. Reconnect to load the current conversation from your computer.</string>

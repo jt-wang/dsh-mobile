@@ -32,7 +32,7 @@ All other routes require `Authorization: Bearer <deviceToken>`. Device revoke is
 
 ## Reads
 
-- `GET /capabilities` → `{protocolVersion:1, hostName, upstreamVersion, capabilities:{sessions:true, textPrompt:true, cancel:true, liveSnapshots:true, attachments:false, questions:false, approvals:false, push:false}}`.
+- `GET /capabilities` → `{protocolVersion:1, hostVersion, hostName, upstreamVersion, capabilities:{sessions:true, textPrompt:true, cancel:true, liveSnapshots:true, steer, queue, rename, models, questions, questionSkip, attachments, fileDownload, approvals:false, push:false}}`. Host plugin 0.7.0 publishes `hostVersion:"0.7.0"` and the separate phone feature flags described in [Phone features](#phone-features-additive-v1-extension-host-plugin-070); `approvals` stays `false`.
 - `GET /workspaces` → `{items:[{id,name,canExecute}]}`. IDs map to owner-selected canonical roots: configured opaque IDs in legacy explicit-list mode, or DSH workspace UUIDs in live registry mode. Registry order matches the sidebar, names are sanitized, missing directories are omitted and the first 100 registrations bound the scope. No raw paths in client responses. Permission policy is host-local; wildcard `['*']` grants cover current/future source workspaces without any new mobile request field.
 - `GET /presets` → `{items:[{id,name}]}`. Empty list means host default only.
 - `GET /sessions?workspaceId=<optional>&limit=50&cursor=<optional>` → `{items:[Session],nextCursor:null|string}`. Maximum limit 100; nextCursor opaque validated cursor. Filter unauthorized sessions before pagination. Exclude subagent sessions and, in registry mode, archived sessions before pagination. Each request resolves distinct cwd bindings anew; no cross-request cached workspace identity may authorize metadata.
@@ -64,7 +64,7 @@ type Snapshot = {
 };
 ```
 
-History must respect DSH surface replacements; do not expose discarded intermediate assistant attempts as final answers. Replacement endpoints refer to current surface order, not numeric sequence ranges. If a bounded history cut lacks an endpoint and the surface cannot be proven, fail closed with activity `unknown`, an empty message surface and a desktop notice rather than retain potentially discarded answers. Some compacted/replaced histories may therefore require the desktop until full history reconstruction/paging is implemented. Hidden/tool/unknown event types are not dumped as raw JSON. Known-but-not-yet-supported question/approval states must show a neutral notice to return to the desktop, not silently present an idle task.
+History must respect DSH surface replacements; do not expose discarded intermediate assistant attempts as final answers. Replacement endpoints refer to current surface order, not numeric sequence ranges. If a long, compacted chat's bounded history window cannot resolve an older replacement record within the recovery bounds (16 pages / 16 MiB, see [the architecture](<ARCHITECTURE.md#delivery-and-recovery>)), host plugin 0.7.0 keeps and returns the certain recent tail of messages with `hasMore:true` and the fixed history-cut notice, instead of an empty message list; it does not retain potentially discarded answers. Earlier history of such chats may therefore still require the desktop until full history reconstruction/paging is implemented. Unsupported events, sequence gaps and oversized openings still fail closed. Hidden/tool/unknown event types are not dumped as raw JSON. Agent action approvals, and questions on a host without the `questions` flag, must show a neutral notice to return to the desktop, not silently present an idle task.
 
 ### Running subagents (additive v1 extension, host plugin 0.6.0)
 
@@ -92,7 +92,7 @@ Android defaults to ordinary user/assistant messages and groups adjacent service
 
 ## Background notifications — Phase 1 as built
 
-Additive API v1; existing command receipts, TLS pins, relay wire and `push:false` are unchanged. No UnifiedPush/FCM/WorkManager/boot receiver. Capabilities add `notifications:boolean` (feed implementation available; opt-in starts baseline asynchronously) and `notificationCapabilities:{version:1,feed:boolean,unifiedPush:false,coverage:"initializing"|"ready"|"degraded",retentionMs:604800000}`. Coverage is conservative: a source gap stays degraded until a new validated startup; this is not lossless replay.
+Additive API v1; existing command receipts, TLS pins, relay wire and `push:false` are unchanged. No UnifiedPush/FCM/WorkManager/boot receiver. Capabilities add `notifications:boolean` (feed implementation available; opt-in starts baseline asynchronously) and `notificationCapabilities:{version:1,feed:boolean,unifiedPush:false,coverage:"initializing"|"ready"|"degraded",retentionMs:604800000}`. Coverage is conservative: after a gap or overflow it reports `degraded`, and returns to `ready` only after confirmed full recovery of all affected sources — no pending retry, overflow, unprocessed events or new errors in that pass; this is not lossless replay.
 
 - `GET /notification-settings` returns `{revision,enabled,projects:[{workspaceId,enabled}],chats:[{sessionId,enabled}]}`. Default master off. Both alert kinds share one boolean: chat override > project override > true, gated by master and current read grants. GET prunes unauthorized/stale overrides and increases revision when changed.
 - `PUT /notification-settings` accepts the same resource with `expectedRevision` instead of `revision`. Full replacement, changed policy increases revision; identical retry at current/previous revision is idempotent; stale different policy is 409. Strict keys/booleans/unique IDs, ≤100 projects/256 chats/32 KiB. Unauthorized IDs are hidden 404. Preferences do not grant execution.
@@ -105,10 +105,10 @@ Additional limits: GET 60/min/device, stream opens 6/min/device, writes 6/min/de
 
 ## Mutations and durable receipts
 
-The wire bodies are unchanged. Internally the server binds each action to its authorized workspace ID; the adapter rechecks fresh scope and rejects a different workspace mapping before calling DSH. Registry-archived sessions are not valid prompt or cancellation targets. Grant revocation after adapter entry still does not retroactively cancel already-dispatched work.
+The original wire bodies are unchanged; host plugin 0.7.0 adds only optional message fields and new routes (see [Phone features](#phone-features-additive-v1-extension-host-plugin-070)). Internally the server binds each action to its authorized workspace ID; the adapter rechecks fresh scope and rejects a different workspace mapping before calling DSH. Registry-archived sessions are not valid prompt or cancellation targets. Grant revocation after adapter entry still does not retroactively cancel already-dispatched work.
 
 - `POST /sessions` body `{requestId, workspaceId, presetId?:string}` → CommandReceipt; accepted receipt result `{sessionId}`.
-- `POST /sessions/{id}/messages` body `{requestId, text}` → CommandReceipt. First slice sends in DSH queue mode; no hidden automatic steer. Reject empty/oversized text. DSH gets the original requestId for correlation.
+- `POST /sessions/{id}/messages` body `{requestId, text, delivery?:"queue"|"steer", uploadIds?:string[]}` → CommandReceipt. Without `delivery` the message is sent in DSH queue mode; steer happens only when the client explicitly sends `delivery:"steer"` (requires the `steer` flag), never automatically. Reject oversized text; empty text is allowed only when the message has attachments (`uploadIds`, requires the `attachments` flag). Host plugin 0.7.0 passes DSH a per-device id derived from the requestId for correlation, not the mobile requestId itself (see [Request IDs](#request-ids)).
 - `POST /sessions/{id}/cancellations` body `{requestId, expectedCursor}` → CommandReceipt. expectedCursor is the safe integer >= -1 from the client's last authoritative snapshot; server and adapter recheck it and running state before admission, rejecting stale state with 409. Cancellation requests a stop of the session's active turn at host admission, not an immutable historical run. DSH rc.2 exposes no atomic target-run conditional cancel, so the conservative cursor guard reduces stale requests but is not a run-identity guarantee. Never replay cancel automatically; refresh and require a new explicit action after conflict. Accepted means requested, not proof the task has already stopped.
 
 ```ts
@@ -123,11 +123,113 @@ type CommandReceipt = {
 
 Use UUID requestId. `pending` → HTTP202; accepted → HTTP200 (create may use 201); `uncertain` → HTTP202; a known rejection → appropriate 4xx with a persisted rejected receipt returned as `CommandReceipt`. Syntax/auth failures before command admission use the error envelope. Same device/requestId + same canonical action/payload returns original receipt without redispatch; same ID with different payload returns 409 error envelope. Persist dispatch intent before invoking upstream. Adapter resolution means DSH controller admission, never completion of the model/task; a later execution failure cannot retroactively make an accepted command rejected. Only a known pre-admission validation/domain rejection yields rejected. A generic error/abort after dispatch is uncertain because upstream side effects may already have occurred. A server-start-owned recovery converts abandoned dispatches to uncertain; merely opening the local admin database must not change active receipts. Never auto-resubmit uncertain upstream work.
 
-Mobile sends once per explicit user action, stores the ID/draft before sending, and queries the receipt on network failure/reconnect. It must not create a fresh ID merely because a response was lost. Show `uncertain` explicitly; keep its draft/receipt available across process recreation. Surface canonical user messages carrying requestId to reconcile accepted optimistic messages. If a receipt stays uncertain or 404, offer an explicit local abandonment after the owner checks the host: warn that work may already have run, clear the local pending record and associated send draft, and never resend or cancel as a side effect. Keep this distinct from a known rejection. No promise of exactly-once execution across unverified DSH persistence.
+Mobile sends once per explicit user action, stores the ID/draft before sending, and queries the receipt on network failure/reconnect. It must not create a fresh ID merely because a response was lost. Show `uncertain` explicitly; keep its draft/receipt available across process recreation. Surface canonical user messages carrying requestId to reconcile accepted optimistic messages; with host plugin 0.7.0 a phone sees its own requestId only for its last 1024 prompt commands (see [Request IDs](#request-ids)). If a receipt stays uncertain or 404, offer an explicit local abandonment after the owner checks the host: warn that work may already have run, clear the local pending record and associated send draft, and never resend or cancel as a side effect. Keep this distinct from a known rejection. No promise of exactly-once execution across unverified DSH persistence.
+
+## Phone features (additive v1 extension, host plugin 0.7.0)
+
+Host plugin 0.7.0 keeps protocol `/v1`. `GET /capabilities` adds `hostVersion:"0.7.0"` and separate boolean feature flags in `capabilities`: `steer`, `queue`, `rename`, `models`, `questions`, `questionSkip`, `attachments`, `fileDownload`. Older apps ignore them. Newer apps hide each feature whose flag is absent (or `false`); clients must not render fake controls for it.
+
+Every route requires the device bearer token. Mutations also require the execute grant for the session's workspace. JSON commands use the durable receipts described above: an exact replay of the same requestId with the same canonical payload returns the original receipt, also when replays arrive concurrently; a different payload returns 409, and uncertain delivery is never retried automatically.
+
+| Route | Payload / result | Flag |
+|---|---|---|
+| `POST /sessions/{id}/messages` | `{requestId, text, delivery?:"queue"\|"steer", uploadIds?:string[]}` → CommandReceipt; empty `text` is allowed when there are attachments | `steer` for `delivery:"steer"`; `attachments` for `uploadIds` |
+| `POST /sessions/{id}/queue` | `{requestId, itemId, action:"steer"\|"remove"}` → CommandReceipt; acts on a pending queued message | `queue` |
+| `POST /sessions/{id}/title` | `{requestId, title}` → CommandReceipt; `title` is non-empty, ≤256 bytes UTF-8, no control characters | `rename` |
+| `GET /models` | `{items:[{provider, id, name, supportsImages:boolean\|null, reasoningEfforts?:[{id, name}]}], default?}` | `models` |
+| `POST /sessions/{id}/model` | `{requestId, provider, model, reasoningEffort?}` → CommandReceipt | `models` |
+| `POST /sessions/{id}/answers` | Either `{requestId, callId, answer:{answers:[{id, selected:string[], custom?}]}}` or `{requestId, callId, skip:true}`, never both → CommandReceipt; an expired question returns 409 `question_expired` | `questions`; `questionSkip` for `skip:true` |
+| `POST /sessions/{id}/uploads` | Raw body with exact `Content-Length`, the file's MIME type and a URI-encoded `X-File-Name` header → 201 `{uploadId, expiresAt, attachment}` | `attachments` |
+| `DELETE /sessions/{id}/uploads/{uploadId}` | → 204; removes a staged upload. Only the device that owns the upload, with the execute grant; an upload already taken by an admitted send cannot be deleted | `attachments` |
+| `GET /sessions/{id}/attachments/{attachmentId}` | Authorized image download with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`; the read grant is enough | `attachments` |
+| `GET /sessions/{id}/files/{attachmentId}` | File download as `application/octet-stream` with `Content-Disposition: attachment` and a safe UTF-8 filename, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`; ≤20 MiB; the read grant is enough | `fileDownload` |
+
+Snapshots (GET and SSE) additionally carry:
+
+- `pendingQueue` — pending queued messages; their IDs are the `itemId` targets of the queue route;
+- `pendingQuestions` — open agent questions; their `callId` is the answer target. Each option in `pendingQuestions[].questions[].options[]` carries `recommended:boolean`;
+- `resolvedQuestions: [{callId, outcome:"answered"|"skipped", answers:[{id, selected, custom?}]}]` — the last 20 settled question calls;
+- `model: {provider, id, reasoningEffort?} | null` — also on `session`; on `GET /sessions` list items only when already available;
+- `messages[].attachments`;
+- `messages[].delivery?: "queue"|"steer"`.
+
+`messages[].delivery` is correlated with the inbox splice target recorded in the DSH journal: a next-turn target means `queue`, a next-step target means `steer`. The field is absent when this cannot be proven within the bounded history; absence does not mean `queue`.
+
+### Request IDs
+
+For message prompts (`POST /sessions/{id}/messages`) the host passes DSH a per-device id derived from the mobile requestId, so two devices that pick the same requestId cannot collide upstream. Other commands do not use a derived id:
+
+- session create keeps the original requestId;
+- cancel does not get a derived id;
+- rename, model, queue and answer commands pass no requestId to DSH at all; it is used only in the host's receipt ledger.
+
+In snapshots (GET and SSE) a phone sees its own mobile requestId restored in `messages[].requestId` and `pendingQueue[].requestId` for its last 1024 prompt commands. IDs on other devices' messages are opaque. Prompts admitted by host plugin 0.6.0 keep their original IDs.
+
+### Queue and steer
+
+`delivery:"queue"` uses DSH's own prompt mode `queue`: the message is delivered on the next turn, after the agent finishes the current one. This remains the default. `delivery:"steer"` uses DSH's prompt mode `steer`: the agent sees the message at its next step inside the current turn, without stopping. The queue route either steers a pending queued message now or removes it from the queue on the computer.
+
+### Chat title and model
+
+A rename changes the chat title on the host. A model change applies when the next model request is built, which may be the next step of the running turn; the request already running is not switched. Snapshot `model` is the model for that next model request; `null` means the chat has no durable model selection or request history, and the host does not substitute a default. `supportsImages` is `true` or `false` when known and `null` otherwise; images can be sent only if the chat's model accepts them. `reasoningEfforts` is optional and lists the model's reasoning efforts; `default` is optional.
+
+### Agent questions
+
+Questions come from DSH's `ask_user_question` and are answered through DSH's user-questions service. A question offers options (single or multiple choice) and may allow a free-text answer (`custom`). Each answer entry carries the question `id` and the `selected` option list. Option labels are sent back verbatim. To skip a single question inside a batch, send an empty `selected` without `custom` for it. With the `questionSkip` flag, `skip:true` skips the whole batch; upstream then receives an empty `selected` for each question. A request carries either `answer` or `skip:true`, never both.
+
+`recommended` follows DSH's desktop convention: an option label ending in a "(Recommended)" suffix, or "(推荐)", also with full-width parentheses, case-insensitive. The label itself is unchanged.
+
+A question may also be answered on the computer, or expire when the agent continues without the answer; answering an expired question returns 409 `question_expired`. `resolvedQuestions` reports only `answered` and `skipped` outcomes because DSH keeps no durable "expired" outcome. Legacy blocking questions without a call ID are not answerable from the phone. Devices without the execute grant cannot answer.
+
+Agent action approvals are not available to plugins and stay desktop-only; `approvals` remains `false`.
+
+### Uploads and attachments
+
+The app uploads files to the computer right after the user picks them; the message then references them by `uploadId`. When the user removes an attachment chip, the app deletes the staged upload with `DELETE /sessions/{id}/uploads/{uploadId}`.
+
+- Accepted types: PNG, JPEG, WebP, GIF, PDF, plain text and `application/octet-stream`.
+- An upload is bound to its device, session and workspace.
+- Images are validated by DSH's attachment service at upload time and held in host memory until the send completes. They count against the image staging budget for that whole time: while staged, while uploading and while claimed by a send.
+- Non-image files are written to the host plugin's private staging directory: outside any workspace, with random file names and owner-only access. They are uploaded to DSH's attachment store only when the message is sent, right before the prompt. The concurrent-upload limits (2 per device, 4 per host) also apply to this send-time upload; the send waits for a free slot instead of failing.
+- Abandoned or expired uploads never reach DSH. Staged files are deleted after the send (whether it succeeds or fails), on expiry, on plugin shutdown and by a sweep at startup. When a device is revoked from any host process, including the CLI, its staged uploads are removed within 30 seconds or at the device's next request.
+- Sent files go to DSH's own content-addressed attachment store, not into the project workspace.
+
+Send-time admission and unconfirmed receipts:
+
+- Every attachment uploaded to DSH at send time holds a receipt reservation, capped at 20 per session and 64 per host.
+- The caps are counted per running plugin instance. They reset when DSH restarts, which also clears DSH's own unbound receipts; plugin updates are activated by a DSH restart.
+- Slots reserved for a message but never used by an upload (for example, the send failed before uploading) are released immediately.
+- An upload that was started stays reserved until DSH's public API proves the receipt was retired, that is consumed or removed. An acknowledgement of the prompt alone does not release it.
+- Before reserving, the host checks the reservations of all sessions (at most 64) and frees those proven retired.
+- The reservation for all files of a message is made before the command is durably admitted. If it cannot be made, the request gets 429 and no receipt is created. The staged uploads stay available for a retry with the same requestId.
+- At most 16 message dispatches holding attachments run per host at a time. Beyond that the request also gets 429 before admission, with the same retry rules.
+- Nothing is resent automatically.
+
+Upload limits:
+
+| Limit | Value |
+|---|---|
+| Upload size | 20 MiB |
+| Staged uploads | 20 per device, 64 per host |
+| Non-image staging | ≤64 files and ≤512 MiB in total, including in-flight uploads |
+| Image staging | ≤200 MiB of raw image bytes host-wide, from upload until the send completes |
+| Staging TTL | 10 minutes; cleanup runs every 30 seconds |
+| Concurrent uploads | 2 per device, 4 per host; also applies to send-time uploads to DSH, where the send waits |
+| Upload rate | 12 per minute per device |
+| Per message | ≤20 attachments and ≤200 MiB |
+| Unconfirmed send-time receipts | 20 per session, 64 per host |
+| Dispatches with attachments | 16 per host at a time |
+
+Downloads:
+
+- Images and files can be downloaded only if the referencing message is present in the snapshot the device actually receives: within the last 100 messages and after the 2 MiB wire trimming.
+- Images (`attachments`): at most 2 concurrent downloads per device and 4 per host.
+- Files (`fileDownload`): ≤20 MiB per file and at most 2 concurrent downloads per host.
+- Attachment display names longer than 256 UTF-8 bytes are truncated at a code-point boundary instead of failing the snapshot.
 
 ## Limits and unsupported capabilities
 
-Set explicit limits: JSON request body 64 KiB, input prompt text 32 KiB, latest history 100 messages, complete serialized snapshot/SSE frame 2 MiB, streams 3/device, pairing attempt rate bound. Output message text is never silently byte-truncated. If needed, omit older whole messages and set hasMore with an explicit notice; if the newest single message cannot fit, report payload_too_large rather than corrupting its text. Android applies the same 2 MiB response/frame ceiling. Host state contains no transcript cache by default; normalized snapshots are ephemeral. Rich message rendering, history paging, attachment routes, question responses and push registration will extend this version only after their acceptance slices are implemented. Clients must not render fake controls for false capabilities.
+Set explicit limits: JSON request body 64 KiB, input prompt text 32 KiB, latest history 100 messages, complete serialized snapshot/SSE frame 2 MiB, streams 3/device, pairing attempt rate bound. Output message text is never silently byte-truncated. If needed, omit older whole messages and set hasMore with an explicit notice; if the newest single message cannot fit, report payload_too_large rather than corrupting its text. Android applies the same 2 MiB response/frame ceiling. JSON responses of 1024 bytes or more are gzip-compressed when the client sends `Accept-Encoding: gzip`; the 2 MiB JSON limit is unchanged and SSE is not compressed. The HTTP keep-alive timeout is 60 seconds. Upload bodies are raw, not JSON, and follow the separate upload, staging and download limits in [Uploads and attachments](#uploads-and-attachments). Host state contains no transcript cache by default; normalized snapshots are ephemeral. Attachment routes and question responses arrived in host plugin 0.7.0 behind their capability flags; rich message rendering, history paging and push registration will extend this version only after their acceptance slices are implemented. Clients must not render fake controls for false capabilities.
 
 Relay chunks are bounded transport units, not API bodies: a complete snapshot may span many chunks. The 2 MiB limit applies to each JSON response/SSE frame, **not** an SSE connection's cumulative lifetime. Transport close/error releases transient resources and quotas, not host device grants or running DSH work. No automatic byte replay/tunnel migration is provided; a lost final mutation response retains the original uncertain-receipt rules.
 

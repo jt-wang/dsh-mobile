@@ -1,12 +1,15 @@
 # Runs only against an already booted disposable emulator and an already running fixture.
 # This script never launches an emulator/server, runs Gradle, or reads production credentials.
+# Private config (not tracked): version=1, mode=fixture, invitation={version=1,baseUrl,pairingToken},
+# workspaceId, existingSessionId, existingMessage, createdSessionTitle, expectedAssistantText.
+# tools/phone08-legacy-fixture.mjs creates it under DSH_MOBILE_TEST_CACHE; do not print/copy its invitation.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$FixtureConfigPath,
     [Parameter(Mandatory)][string]$AppApk,
     [Parameter(Mandatory)][string]$TestApk,
     [string]$AdbPath = 'adb',
-    [ValidateSet('emulator-5580')][string]$Serial = 'emulator-5580',
+    [ValidateSet('emulator-5580', 'emulator-5582')][string]$Serial = 'emulator-5580',
     [switch]$AllowDeviceChanges,
     [switch]$SkipOffline,
     [string]$ArtifactsPath
@@ -18,7 +21,7 @@ $package = 'dev.dshmobile.app'
 $testPackage = 'dev.dshmobile.app.test'
 $component = "$testPackage/androidx.test.runner.AndroidJUnitRunner"
 $testClass = 'dev.dshmobile.app.acceptance.MobileAcceptanceTest#fixtureJourney'
-if (-not $AllowDeviceChanges) { throw 'Parent/operator go signal required: pass -AllowDeviceChanges for disposable emulator-5580 only.' }
+if (-not $AllowDeviceChanges) { throw 'Parent/operator go signal required: pass -AllowDeviceChanges for an approved disposable emulator only.' }
 foreach ($path in @($FixtureConfigPath, $AppApk, $TestApk)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Required fixture configuration or APK file is missing.' }
 }
@@ -149,9 +152,12 @@ try {
     $nightOutput = Invoke-Adb -Arguments @('shell', 'cmd', 'uimode', 'night')
     if ($nightOutput -notmatch 'Night mode:\s*(yes|no|auto|custom)') { throw 'Cannot read original night mode.' }
     $originalNight = $Matches[1]
-    $localeOutput = Invoke-Adb -Arguments @('shell', 'cmd', 'locale', 'get-app-locales', $package)
-    if ($localeOutput -notmatch 'Locales for dev\.dshmobile\.app for user \d+ are \[([a-zA-Z0-9,-]*)\]') { throw 'Cannot read original per-app locales.' }
-    $originalAppLocales = $Matches[1]
+    $sdk = [int](Invoke-Adb -Arguments @('shell', 'getprop', 'ro.build.version.sdk'))
+    if ($sdk -ge 33) {
+        $localeOutput = Invoke-Adb -Arguments @('shell', 'cmd', 'locale', 'get-app-locales', $package)
+        if ($localeOutput -notmatch 'Locales for dev\.dshmobile\.app for user \d+ are \[([a-zA-Z0-9,-]*)\]') { throw 'Cannot read original per-app locales.' }
+        $originalAppLocales = $Matches[1]
+    }
     $null = New-Item -ItemType Directory -Path $artifacts
     $receipt.appApkSha256 = (Get-FileHash -LiteralPath $AppApk -Algorithm SHA256).Hash
     $receipt.testApkSha256 = (Get-FileHash -LiteralPath $TestApk -Algorithm SHA256).Hash
@@ -193,11 +199,13 @@ try {
     $null = Invoke-Adb -Arguments @('shell', 'settings', 'put', 'system', 'font_scale', '1.3')
     Run-Stage 'capture' 'chat-font130'
     $null = Invoke-Adb -Arguments @('shell', 'settings', 'put', 'system', 'font_scale', '1.0')
-    $appLocalesChanged = $true
-    $null = Invoke-Adb -Arguments @('shell', 'cmd', 'locale', 'set-app-locales', $package, '--locales', 'en')
-    Run-Stage 'capture' 'chat-light-en'
-    $null = Invoke-Adb -Arguments @('shell', 'cmd', 'locale', 'set-app-locales', $package, '--locales', 'ru')
-    Run-Stage 'capture' 'chat-light-ru'
+    if ($sdk -ge 33) {
+        $appLocalesChanged = $true
+        $null = Invoke-Adb -Arguments @('shell', 'cmd', 'locale', 'set-app-locales', $package, '--locales', 'en')
+        Run-Stage 'capture' 'chat-light-en'
+        $null = Invoke-Adb -Arguments @('shell', 'cmd', 'locale', 'set-app-locales', $package, '--locales', 'ru')
+        Run-Stage 'capture' 'chat-light-ru'
+    }
     $receipt.passed = $true
 } catch {
     # Only our safe operation labels survive; no raw adb or JSON errors in logs/receipt.
@@ -207,8 +215,23 @@ try {
     $initialJson = $null; $config = $null; $invitation = $null
     if (Test-Path -LiteralPath $artifacts -PathType Container) {
         try {
-            $null = Invoke-Adb -Arguments @('pull', "/sdcard/Android/data/$package/files/acceptance", $artifacts)
-            $requiredCaptures = @('onboarding-empty', 'chat-initial', 'chat-reopened', 'chat-light', 'chat-dark', 'chat-font130', 'chat-light-en', 'chat-light-ru')
+            $captureDir = Join-Path $artifacts 'acceptance'
+            $null = New-Item -ItemType Directory -Path $captureDir -Force
+            $names = (Invoke-Adb -Arguments @('shell', 'run-as', $package, 'ls', 'files/acceptance')) -split '\r?\n'
+            foreach ($name in $names) {
+                if ($name -notmatch '^[a-z0-9-]+\.(png|json)$') { throw 'Invalid capture filename.' }
+                $destination = Join-Path $captureDir $name
+                $info = [Diagnostics.ProcessStartInfo]::new()
+                $info.FileName = $AdbPath; $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+                $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+                $info.Arguments = "-s $Serial exec-out run-as $package cat files/acceptance/$name"
+                $process = [Diagnostics.Process]::Start($info)
+                $stream = [IO.File]::Create($destination)
+                try { $stderr = $process.StandardError.ReadToEndAsync(); $process.StandardOutput.BaseStream.CopyTo($stream); $process.WaitForExit(); if ($process.ExitCode -ne 0) { throw 'Private capture copy failed.' } }
+                finally { $stream.Dispose(); $process.Dispose() }
+            }
+            $requiredCaptures = @('onboarding-empty', 'chat-initial', 'chat-reopened', 'chat-light', 'chat-dark', 'chat-font130')
+            if ($sdk -ge 33) { $requiredCaptures += @('chat-light-en', 'chat-light-ru') }
             if (-not $SkipOffline) { $requiredCaptures += @('chat-offline', 'chat-recovered') }
             foreach ($name in $requiredCaptures) {
                 $image = Join-Path $artifacts "acceptance/$name.png"

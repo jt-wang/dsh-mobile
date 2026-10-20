@@ -72,7 +72,9 @@ internal fun notificationChannel(event: NotificationEvent, local: NotificationLo
 @Suppress("UNUSED_PARAMETER")
 internal fun shouldDisplayNotification(event: NotificationEvent, local: NotificationLocal, visibleChat: String?, sessions: List<dev.dshmobile.app.model.SessionSummary> = emptyList()) =
     event.sessionId != visibleChat && local.settings.allows(event) && notificationChannel(event, local) != null
-internal fun notificationUpdateSilent(recovery: Boolean, alreadyShown: Boolean) = recovery || alreadyShown
+/** A new completion is a new alert even if the prior answer in this chat was not dismissed. */
+internal fun notificationUpdateSilent(recovery: Boolean, eventId: String, previousEventId: String?) =
+    recovery || eventId == previousEventId
 
 /** Exact Activity route visibility, memory only; an inactive UI never suppresses other chats. */
 internal object VisibleNotificationChat {

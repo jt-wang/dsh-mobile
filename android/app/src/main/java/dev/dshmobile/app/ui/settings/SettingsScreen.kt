@@ -74,7 +74,11 @@ internal fun SettingsScreen(state: MobileState, model: MobileViewModel, onBack: 
                 state.error?.let { ErrorText(it) }
                 if (state.connection == ConnectionState.REVOKED) Text(stringResource(R.string.mobile_revoked_help), style = MaterialTheme.typography.bodyMedium)
                 if (state.connection == ConnectionState.INCOMPATIBLE) Text(stringResource(R.string.mobile_incompatible_help), style = MaterialTheme.typography.bodyMedium)
-                if (state.connection !in listOf(ConnectionState.REVOKED, ConnectionState.INCOMPATIBLE)) OutlineAction(stringResource(R.string.mobile_refresh_connection), !state.busy, model::refresh)
+                if (state.connection !in listOf(ConnectionState.REVOKED, ConnectionState.INCOMPATIBLE)) OutlinedButton(onClick = { if (!state.busy) model.refresh() },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    if (state.busy) { Spinner(size = 16.dp); Spacer(Modifier.width(8.dp)) }
+                    Text(stringResource(if (state.busy) R.string.mobile_short_syncing else R.string.mobile_refresh_connection))
+                }
             }
 
             Section(stringResource(R.string.mobile_theme)) {

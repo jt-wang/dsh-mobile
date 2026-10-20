@@ -53,7 +53,7 @@
     <string name="mobile_revoked_help">Удалите подключение в настройках и создайте новое приглашение на компьютере.</string>
     <string name="mobile_incompatible_help">Обновите приложение или плагин компьютера до совместимых версий. Задачи остаются на компьютере.</string>
     <string name="mobile_demo_notice">Демонстрационный компьютер — данные вымышлены, подключения к DSH нет.</string>
-    <string name="mobile_desktop_notice">Задаче нужно ваше внимание на компьютере. Ответы на вопросы и подтверждения с телефона пока недоступны.</string>
+    <string name="mobile_desktop_notice">Задаче нужно ваше решение на компьютере. С телефона нельзя подтверждать действия агента, а со старой версией плагина на ПК — и отвечать на вопросы.</string>
     <string name="mobile_unknown_activity">Состояние задачи не подтверждено. Проверьте его на компьютере; отправка отключена.</string>
     <string name="mobile_message">Сообщение компьютеру</string>
     <string name="mobile_send">Отправить сообщение</string>
@@ -87,8 +87,8 @@
     <string name="mobile_workspace_scope">Список проектов совпадает с DSH на компьютере.</string>
     <string name="mobile_create">Создать чат</string>
     <string name="mobile_notifications_title">Когда приложение закрыто</string>
-    <string name="mobile_notifications_body">Фоновых уведомлений пока нет. Задачи продолжают выполняться на компьютере. Откройте приложение, чтобы получить результаты.</string>
-    <string name="mobile_phone_limits">Вложения, ответы на вопросы и подтверждения действий в этой версии недоступны. Используйте компьютер.</string>
+    <string name="mobile_notifications_body">Задачи выполняются на компьютере. Включите уведомления, чтобы узнавать о готовых ответах и запросах решения. Для этого приложение держит фоновое подключение к ПК с постоянным уведомлением.</string>
+    <string name="mobile_phone_limits">Подтверждать действия агента можно только на компьютере.</string>
     <string name="mobile_forget">Удалить подключение с телефона</string>
     <string name="mobile_forget_help">Удаление с телефона не отзывает его доступ на компьютере и не останавливает задачи. Чтобы отозвать доступ, используйте настройки устройств на компьютере.</string>
     <string name="mobile_forget_title">Удалить локальное подключение?</string>
@@ -117,7 +117,7 @@
     <string name="mobile_error_command_uncertain">Команда могла дойти до компьютера. Проверьте отправку; не отправляйте повторно.</string>
     <string name="mobile_error_command_rejected">Компьютер отклонил команду. Проверьте результат отправки и права доступа.</string>
     <string name="mobile_error_request_conflict">Идентификатор исходной команды не соответствует её содержимому. Не отправляйте повторно; проверьте задачу на компьютере.</string>
-    <string name="mobile_error_invalid_text">Введите непустое сообщение размером до 32 КБ.</string>
+    <string name="mobile_error_invalid_text">Добавьте текст или хотя бы одно вложение. Текст — до 32 КБ.</string>
     <string name="mobile_error_invalid_selection">Выберите доступный проект с правом запуска и настройку компьютера.</string>
     <string name="mobile_error_generic">Не удалось выполнить запрос. Перед повторной попыткой проверьте подключение и состояние задачи на компьютере.</string>
     <string name="mobile_history_unavailable">Без подключения история недоступна. Восстановите связь, чтобы загрузить актуальную переписку с компьютера.</string>

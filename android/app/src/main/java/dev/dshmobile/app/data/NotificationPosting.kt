@@ -27,12 +27,17 @@ internal object NotificationPosting {
     @Synchronized fun invalidateChat(chat: String) {
         pending.filter { it.tag?.endsWith(":$chat:answers") == true || it.tag?.endsWith(":$chat:attention") == true }.forEach { it.valid = false }
     }
+    @Synchronized fun invalidate(tag: String?, id: Int) { pending.filter { it.tag == tag && it.id == id }.forEach { it.valid = false } }
     @Synchronized fun cancel(context: Context, tag: String?, id: Int) {
-        pending.filter { it.tag == tag && it.id == id }.forEach { it.valid = false }
-        safely { context.getSystemService(NotificationManager::class.java).cancel(tag, id) }
+        invalidate(tag, id)
+        safely {
+            context.getSystemService(NotificationManager::class.java).cancel(tag, id)
+            if (id == 2) updateAlertSummary(context, removed = tag)
+        }
     }
     @Synchronized fun cancelAll(context: Context) {
         pending.forEach { it.valid = false }
+        clearAlertSummaryState()
         safely { context.getSystemService(NotificationManager::class.java).cancelAll() }
     }
     fun safely(block: () -> Unit) {

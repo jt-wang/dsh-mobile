@@ -1,5 +1,7 @@
 package dev.dshmobile.app.data
 
+import dev.dshmobile.app.model.AttachmentRef
+import dev.dshmobile.app.model.PhoneRules
 import dev.dshmobile.app.model.MobileCapabilities
 import dev.dshmobile.app.model.Preset
 import dev.dshmobile.app.model.SessionSnapshot
@@ -21,7 +23,7 @@ internal val mobileJson = Json {
     val deviceId: String, val deviceToken: String, val hostName: String, val protocolVersion: Int,
     val relayAccess: RelayAccess? = null,
 )
-@Serializable internal data class CapabilitiesResponse(val protocolVersion: Int, val hostName: String, val upstreamVersion: String, val capabilities: MobileCapabilities)
+@Serializable internal data class CapabilitiesResponse(val protocolVersion: Int, val hostName: String, val upstreamVersion: String, val capabilities: MobileCapabilities, val hostVersion: String? = null)
 @Serializable internal class WorkspaceResponse(val items: List<Workspace>)
 @Serializable internal class PresetResponse(val items: List<Preset>)
 @Serializable internal class SessionResponse(val items: List<SessionSummary>, val nextCursor: String?)
@@ -35,7 +37,13 @@ internal val mobileJson = Json {
 )
 @Serializable internal class PairingBody(val pairingToken: String, val deviceName: String)
 @Serializable internal class CreateBody(val requestId: String, val workspaceId: String, val presetId: String? = null)
-@Serializable internal class MessageBody(val requestId: String, val text: String)
+@Serializable internal class MessageBody(val requestId: String, val text: String, val delivery: String? = null, val uploadIds: List<String>? = null)
+@Serializable internal class QueueBody(val requestId: String, val itemId: String, val action: String)
+@Serializable internal class TitleBody(val requestId: String, val title: String)
+@Serializable internal class ModelBody(val requestId: String, val provider: String, val model: String, val reasoningEffort: String? = null)
+@Serializable internal class AnswerBody(val requestId: String, val callId: String, val answer: dev.dshmobile.app.model.QuestionAnswer)
+@Serializable internal class SkipBody(val requestId: String, val callId: String, val skip: Boolean)
+@Serializable internal class UploadReceipt(val uploadId: String, val expiresAt: Long, val attachment: dev.dshmobile.app.model.AttachmentRef)
 @Serializable internal class CancelBody(val requestId: String, val expectedCursor: Long)
 
 internal inline fun <reified T> decodeWire(text: String): T = try {
@@ -59,6 +67,21 @@ internal fun SessionSnapshot.checked(expectedId: String): SessionSnapshot {
             !validId(it.id) || it.createdAt < 0 ||
                 (it.requestId != null && !validRequestId(it.requestId))
         }) throw MobileFailure("invalid_response")
+    fun validAttachment(a: AttachmentRef) = validId(a.id) && a.name.toByteArray().size <= 256 &&
+        a.name.none { it.isISOControl() || it == '/' || it == '\\' } && a.size in 0..9_007_199_254_740_991L && a.mime in setOf("image/png", "image/jpeg", "image/webp", "image/gif", "application/octet-stream", "application/pdf", "text/plain") && a.kind in setOf("image", "file")
+    fun safeAttachments(items: List<AttachmentRef>) = items.take(100).filter(::validAttachment)
+    if (pendingQueue.size > 100 || pendingQueue.map { it.id }.distinct().size != pendingQueue.size ||
+        pendingQueue.any { !validId(it.id) || it.delivery !in setOf("queue", "steer") || it.text.toByteArray().size > 32768 } ||
+        pendingQuestions.size > 20 || pendingQuestions.map { it.callId }.distinct().size != pendingQuestions.size || pendingQuestions.any { p ->
+            !validId(p.callId) || p.state !in setOf("open", "continued") || p.questions.isEmpty() || p.questions.size > 20 || p.questions.map { it.id }.distinct().size != p.questions.size ||
+                p.questions.any { q -> !validId(q.id) || q.question.toByteArray().size > 32768 || q.options.size > 100 || q.options.map { it.label }.distinct().size != q.options.size ||
+                    q.options.any { it.label.isBlank() || it.label.toByteArray().size > 4096 || (it.description?.toByteArray()?.size ?: 0) > 32768 } }
+        }) throw MobileFailure("invalid_response")
+    fun validModel(value: dev.dshmobile.app.model.SessionModel?) = value == null || (validId(value.provider) && validId(value.id) && (value.reasoningEffort == null || validId(value.reasoningEffort)))
+    if (!validModel(model) || !validModel(session.model) || messages.any { it.delivery != null && it.delivery !in setOf("queue", "steer") } ||
+        resolvedQuestions.orEmpty().size > 20 || resolvedQuestions.orEmpty().map { it.callId }.distinct().size != resolvedQuestions.orEmpty().size || resolvedQuestions.orEmpty().any { r ->
+            !validId(r.callId) || r.outcome !in setOf("answered", "skipped") || r.answers.size > 20 || r.answers.any { a -> !validId(a.id) || a.selected.size > 100 || a.selected.any { it.toByteArray().size > 4096 } || (a.custom?.toByteArray()?.size ?: 0) > 32768 }
+        }) throw MobileFailure("invalid_response")
     // Unknown role/activity are NOT interpreted as idle/user; disable mutations for this snapshot.
     val unknown = activity !in setOf("idle", "running", "waiting", "unknown") ||
         messages.any { it.role !in setOf("user", "assistant", "system") }
@@ -66,7 +89,8 @@ internal fun SessionSnapshot.checked(expectedId: String): SessionSnapshot {
         session = session.checked().copy(canExecute = session.canExecute && !unknown,
             runningSubagents = maxOf(session.runningSubagents.coerceAtLeast(0), runningSubagents.coerceAtLeast(0))),
         runningSubagents = maxOf(session.runningSubagents.coerceAtLeast(0), runningSubagents.coerceAtLeast(0)),
-        messages = messages.map { if (it.role in setOf("user", "assistant", "system")) it else it.copy(role = "system", text = "") },
+        messages = messages.map { message -> (if (message.role in setOf("user", "assistant", "system")) message else message.copy(role = "system", text = "")).copy(attachments = safeAttachments(message.attachments)) },
+        pendingQueue = pendingQueue.map { it.copy(attachments = safeAttachments(it.attachments)) },
         activity = if (unknown) "unknown" else activity,
         notice = if (unknown) "unsupported" else notice,
         activityDetail = activityDetail?.takeIf { !unknown && activity in setOf("running", "waiting") }?.copy(
@@ -85,7 +109,7 @@ internal fun hostErrorKey(code: String): String = when (code) {
     "unauthorized" -> "unauthorized"
     "revoked" -> "revoked"
     "forbidden" -> "forbidden"
-    "rate_limited" -> "rate_limited"
+    "rate_limited", "staging_full" -> "rate_limited"
     "conflict", "request_conflict", "request_id_conflict", "idempotency_conflict" -> "request_conflict"
     "unsupported", "unsupported_operation" -> "unsupported"
     "invalid_text", "text_too_large" -> "invalid_text"

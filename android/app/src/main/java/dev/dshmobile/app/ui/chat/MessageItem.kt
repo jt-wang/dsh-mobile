@@ -74,6 +74,7 @@ internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQ
                 CopyButton(message, labels.getValue(MessageAction.Copy), onCopy)
                 MessageMenu(menu, { menu = false }, labels, ::perform)
             }
+            if (message.delivery == "steer") Text(stringResource(R.string.mobile_message_steered), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(shortTime(message.createdAt), style = MaterialTheme.typography.labelSmall.tabular(), color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (user) Box {
                 CopyButton(message, labels.getValue(MessageAction.Copy), onCopy)

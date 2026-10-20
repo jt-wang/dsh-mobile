@@ -29,7 +29,8 @@ import kotlin.random.Random
 
 fun createMobileRepository(context: Context, scope: CoroutineScope): MobileRepository =
     NetworkMobileRepository(EncryptedStateStore(context.applicationContext), scope, BuildConfig.DEBUG, observeRestoredSession = false,
-        historyStore = EncryptedHistoryStore(context.applicationContext), prefetchEnabled = true)
+        historyStore = EncryptedHistoryStore(context.applicationContext), prefetchEnabled = true,
+        openAttachment = { source -> context.contentResolver.openInputStream(android.net.Uri.parse(source.uri)) ?: throw java.io.IOException("unavailable") })
 
 /**
  * The single admission lock covers persistence, dispatch and receipt recovery. Lifecycle changes
@@ -47,10 +48,12 @@ internal class NetworkMobileRepository(
     private val observeRestoredSession: Boolean = true,
     private val historyStore: HistoryStore = MemoryHistoryStore(),
     private val prefetchEnabled: Boolean = false,
+    private val openAttachment: ((dev.dshmobile.app.model.DraftAttachment) -> java.io.InputStream)? = null,
 ) : MobileRepository {
     private val repositoryJob = SupervisorJob(ownerScope.coroutineContext[Job])
     private val scope = CoroutineScope(ownerScope.coroutineContext + repositoryJob)
     private val mutex = Mutex()
+    private val fileReads = kotlinx.coroutines.sync.Semaphore(2)
     private val history = SessionHistoryCache(now)
     private val diskHistory = PersistentHistory(historyStore, now, flushScope = scope)
     @Volatile private var historyEpoch = historyStore.authority.epoch
@@ -97,6 +100,8 @@ internal class NetworkMobileRepository(
     @Volatile private var observer: EventSource? = null
     private var reconnectJob: Job? = null
     private var reconnectAttempt = 0
+    // Connectivity is visible before the fresh metadata/history cut authorizes actions.
+    private var syncing = false
     private data class DraftEdit(val revision: Long, val text: String)
     private val draftSequence = java.util.concurrent.atomic.AtomicLong()
     private val liveDrafts = java.util.concurrent.ConcurrentHashMap<String, DraftEdit>()
@@ -151,12 +156,25 @@ internal class NetworkMobileRepository(
         if (connection != ConnectionState.ONLINE || key in setOf("forbidden", "chat_unavailable")) stopObserver()
         if (connection == ConnectionState.OFFLINE) scheduleReconnect()
     }
-    private suspend fun persist(value: StoredState) {
+    private fun protectUploads(value: StoredState): StoredState {
+        val instant = now()
+        val used = (stored.possiblyUsedUploads + value.possiblyUsedUploads).filterValues { it > instant }.toMutableMap()
+        // Include the previous records before removing them, including abandonment/receipt reconciliation.
+        (stored.acceptedPrompts + listOfNotNull(stored.pending) + value.acceptedPrompts + listOfNotNull(value.pending))
+            .filter { it.kind == "send" }.flatMap { it.uploadIds.orEmpty() }.forEach { used.putIfAbsent(it, instant + 600_000) }
+        val overflow = used.size > 1280
+        return value.copy(possiblyUsedUploads = used.entries.toList().takeLast(1280).associate { it.toPair() },
+            uploadProtectionUntil = maxOf(stored.uploadProtectionUntil, value.uploadProtectionUntil, if (overflow) instant + 600_000 else 0))
+    }
+    private suspend fun persist(input: StoredState) {
+        val value = protectUploads(input)
         try { store.write(value) }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { safeDebugDiagnostic("state.persist", failure); throw MobileFailure("storage_failed") }
         stored = value
-        mutableState.value = state.value.copy(pending = value.pending?.presentation(), acceptedPrompts = value.acceptedPrompts.map { it.presentation() })
+        mutableState.value = state.value.copy(pending = value.pending?.presentation(), acceptedPrompts = value.acceptedPrompts.map { it.presentation() },
+            attachmentDrafts = value.attachmentDrafts, answerDrafts = value.answerDrafts,
+            retainedAttachmentSources = value.acceptedPrompts.flatMap { it.attachmentSources } + value.pending?.attachmentSources.orEmpty())
     }
     private fun stopObserver() {
         generation++
@@ -177,7 +195,7 @@ internal class NetworkMobileRepository(
     }
     private fun online() {
         if (stored.host == null) throw MobileFailure("not_paired")
-        if (!foreground || state.value.connection != ConnectionState.ONLINE) throw MobileFailure("offline_no_send")
+        if (!foreground || syncing || state.value.connection != ConnectionState.ONLINE) throw MobileFailure("offline_no_send")
         if (stored.pending != null) throw MobileFailure("command_unresolved")
     }
     private suspend fun restoreLocked() {
@@ -198,11 +216,18 @@ internal class NetworkMobileRepository(
                 stored.acceptedPrompts.any { it.requestId == stored.pending?.requestId || it.kind != "send" || it.status !in setOf("accepted", "queued", "unconfirmed") })
                 throw MobileFailure("storage_failed")
             stored.acceptedPrompts.forEach { validateStoredCommand(it) }
-            if (stored.drafts.size > 64 || stored.drafts.any { !validId(it.key) || it.value.toByteArray().size > 32 * 1024 }) throw MobileFailure("storage_failed")
+            val sanitized = stored.sanitizeDrafts()
+            if (sanitized != stored) {
+                val oldDrafts = stored.attachmentDrafts
+                store.write(sanitized); stored = sanitized
+                oldDrafts.filterKeys(::validId).forEach { (session, sources) ->
+                    discardStaging(session, sources.filter { it.uploadId?.let(::validId) == true })
+                }
+            }
             synchronized(lifecycle) {
                 if (foreground && desiredForeground && !closed) api = HostApi(host.endpoint, host.deviceToken)
             }
-        } else if (stored.pending != null || stored.acceptedPrompts.isNotEmpty() || stored.drafts.isNotEmpty() || stored.selectedSessionId != null) {
+        } else if (stored.pending != null || stored.acceptedPrompts.isNotEmpty() || stored.drafts.isNotEmpty() || stored.selectedSessionId != null || stored.attachmentDrafts.isNotEmpty() || stored.answerDrafts.isNotEmpty()) {
             throw MobileFailure("storage_failed")
         }
         val lastIndex = if (host != null) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -222,7 +247,10 @@ internal class NetworkMobileRepository(
             draft = draftFor(stored.selectedSessionId), pending = stored.pending?.presentation(),
             acceptedPrompts = stored.acceptedPrompts.map { it.presentation() }, localPromptActions = promptActions,
             error = if (stored.pending != null) "command_uncertain" else null, observingSession = observingSession,
+            draftsRestored = true, attachmentDrafts = stored.attachmentDrafts, answerDrafts = stored.answerDrafts,
+            retainedAttachmentSources = stored.acceptedPrompts.flatMap { it.attachmentSources } + stored.pending?.attachmentSources.orEmpty(),
         )
+        if (lastIndex != null) StartupPerf.mark("cache_list_shown")
     }
     override suspend fun restore() = action {
         restoreLocked()
@@ -270,7 +298,7 @@ internal class NetworkMobileRepository(
             synchronized(lifecycle) {
                 if (foreground && desiredForeground && !closed) api = HostApi(host.endpoint, host.deviceToken)
             }
-            mutableState.value = MobileState(paired = true, hostName = host.hostName, localPromptActions = promptActions,
+            mutableState.value = MobileState(paired = true, draftsRestored = true, hostName = host.hostName, localPromptActions = promptActions,
                 remoteMode = host.endpoint.relay != null, relayHost = host.endpoint.relay?.let { safeRelayOrigin(it) },
                 connection = ConnectionState.SYNCING, busy = true, observingSession = observingSession)
             checkpoint = "pair.device-refresh"
@@ -295,27 +323,44 @@ internal class NetworkMobileRepository(
         catch (cancelled: CancellationException) {
             // A navigation-owned refresh can be cancelled during metadata GETs. The closed stream
             // and incomplete handshake are not ONLINE, and SYNCING must not survive its owner.
-            if (state.value.connection == ConnectionState.SYNCING) {
+            if (syncing) {
                 mutableState.value = state.value.copy(connection = ConnectionState.OFFLINE, busy = false,
                     snapshotStale = state.value.snapshot != null)
                 scheduleReconnect()
             }
             throw cancelled
-        }
+        } finally { syncing = false }
     }
     private suspend fun refreshFromHostLocked(readHistory: Boolean) {
         historyEpoch = historyStore.authority.epoch
         val network = api()
         prefetch.cancel()
         stopObserver()
-        mutableState.value = state.value.copy(connection = ConnectionState.SYNCING, busy = true, error = null)
-        // Independent bounded GETs overlap; capability negotiation still gates session reads.
+        syncing = true
+        mutableState.value = state.value.copy(connection = ConnectionState.SYNCING, busy = true, error = null,
+            snapshotStale = state.value.snapshot != null)
+        // Speculate only a read. Unsupported hosts may reject it; discard both result and failure.
         val metadata = coroutineScope {
-            val caps = async { network.capabilities() }
+            val caps = async {
+                network.capabilities().also {
+                    checkHistoryEpoch()
+                    if (foreground && desiredForeground && !closed) {
+                        mutableState.value = state.value.copy(connection = ConnectionState.ONLINE)
+                        StartupPerf.mark("online")
+                    }
+                }
+            }
             val workspaces = async { network.workspaces() }
             val presets = async { network.presets() }
-            val index = async { if (caps.await().capabilities.sessions) network.sessions() else HostApi.SessionIndex(emptyList(), false) }
-            RefreshMetadata(caps.await(), workspaces.await(), presets.await(), index.await())
+            val index = async {
+                try { Result.success(network.sessions()) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) { Result.failure(failure) }
+            }
+            val negotiated = caps.await()
+            val sessions = if (negotiated.capabilities.sessions) index.await().getOrThrow()
+                else { index.cancel(); HostApi.SessionIndex(emptyList(), false) }
+            RefreshMetadata(negotiated, workspaces.await(), presets.await(), sessions)
         }
         checkHistoryEpoch()
         val (caps, workspaces, presets, index) = metadata
@@ -337,6 +382,7 @@ internal class NetworkMobileRepository(
         mutableState.value = state.value.copy(hostName = caps.hostName, capabilities = caps.capabilities,
             workspaces = workspaces, presets = presets, sessions = sessions, sessionsTruncated = index.truncated,
             demo = caps.upstreamVersion == "fixture", lastSyncedAt = now())
+        StartupPerf.mark("list_fresh")
         var historyError: String? = null
         val refreshed = try {
             if (readHistory && selected != null && observingSession) readObservedSnapshot(network, selected) else null
@@ -357,7 +403,10 @@ internal class NetworkMobileRepository(
             demo = caps.upstreamVersion == "fixture", lastSyncedAt = now(), busy = false,
             connection = if (foreground) ConnectionState.ONLINE else ConnectionState.OFFLINE,
         )
-        if (refreshed != null && observingSession) reconcileSnapshot(refreshed)
+        if (refreshed != null && observingSession) {
+            StartupPerf.mark("chat_fresh")
+            reconcileSnapshot(refreshed)
+        }
         if (stored.pending != null) resolveLocked(reloadSnapshot = false)
         // When observing, a successful GET does not mean the stream recovered. Reset only on
         // a real SSE snapshot; otherwise repeated stream-open failures would retry forever.
@@ -381,6 +430,7 @@ internal class NetworkMobileRepository(
             mutableState.value = state.value.copy(observingSession = true,
                 snapshot = cached ?: state.value.snapshot, snapshotStale = cached != null || state.value.snapshotStale,
                 draft = if (cached != null) draftFor(sessionId) else state.value.draft)
+            if (cached != null) StartupPerf.mark("chat_cache_shown")
             scope.async(start = CoroutineStart.LAZY) {
                 action {
                     try { selectLocked(sessionId, revision) }
@@ -463,6 +513,7 @@ internal class NetworkMobileRepository(
             mutableState.value = MobileReducer.replaceSnapshot(state.value, snapshot, now()).copy(
                 draft = draftFor(sessionId), busy = false,
             )
+            StartupPerf.mark("chat_fresh")
             reconcileSnapshot(snapshot)
             startObserver()
         } catch (cancelled: CancellationException) {
@@ -505,21 +556,118 @@ internal class NetworkMobileRepository(
             (presetId != null && state.value.presets.none { it.id == presetId })) throw MobileFailure("invalid_selection")
         dispatch(StoredCommand(UUID.randomUUID().toString(), "create", workspaceId = workspaceId, presetId = presetId))
     }
-    override suspend fun sendMessage(text: String) {
+    override suspend fun sendMessage(text: String) = sendMessage(text, null, emptyList())
+    override suspend fun sendMessage(text: String, delivery: String?, uploadIds: List<String>) {
         val origin = state.value.snapshot?.session?.id
         val blocked = state.value.busy
         action {
             restoreLocked(); online()
             if (blocked || origin == null || stored.selectedSessionId != origin) throw MobileFailure("invalid_selection")
             if (state.value.capabilities?.textPrompt != true) throw MobileFailure("unsupported")
-            if (text.isBlank() || text.toByteArray().size > 32 * 1024) throw MobileFailure("invalid_text")
+            if ((text.isBlank() && uploadIds.isEmpty()) || text.toByteArray().size > 32 * 1024 || '\u0000' in text) throw MobileFailure("invalid_text")
+            if (delivery !in setOf(null, "queue", "steer") || (delivery == "steer" && state.value.capabilities?.steer != true) ||
+                (uploadIds.isNotEmpty() && state.value.capabilities?.attachments != true) || uploadIds.size > 20 || uploadIds.distinct().size != uploadIds.size) throw MobileFailure("unsupported")
             val snapshot = executableSnapshot()
             if (MobileReducer.blockingPromptCount(state.value, snapshot.session.id) >= MobileReducer.MAX_ACCEPTED_PROMPTS) throw MobileFailure("command_unresolved")
             val command = StoredCommand(UUID.randomUUID().toString(), "send", sessionId = snapshot.session.id, text = text,
-                queuedWhileRunning = snapshot.activity == "running")
+                queuedWhileRunning = snapshot.activity in setOf("running", "waiting"), delivery = delivery,
+                uploadIds = uploadIds.takeIf { it.isNotEmpty() },
+                attachmentSources = stored.attachmentDrafts[snapshot.session.id].orEmpty().filter { it.uploadId in uploadIds })
             // Store draft and exact command in the SAME atomic encrypted write before dispatch.
             dispatch(command, stored.drafts + (snapshot.session.id to text))
         }
+    }
+    private fun discardStaging(session: String, sources: List<dev.dshmobile.app.model.DraftAttachment>) {
+        val host = stored.host ?: return
+        if (stored.uploadProtectionUntil > now()) return
+        val protected = stored.acceptedPrompts.flatMap { it.uploadIds.orEmpty() } + stored.pending?.uploadIds.orEmpty() + stored.possiblyUsedUploads.filterValues { it > now() }.keys
+        val referenced = stored.attachmentDrafts.values.flatten().mapNotNull { it.uploadId }
+        val ids = sources.mapNotNull { it.uploadId }.distinct().filter { it !in protected && it !in referenced }
+        if (ids.isEmpty()) return
+        scope.launch {
+            // Best effort and independent of foreground/UI; never retry a mutation or an admitted source.
+            val cleanupApi = HostApi(host.endpoint, host.deviceToken)
+            try { ids.forEach { id -> runCatching { cleanupApi.discardUpload(session, id) } } }
+            finally { cleanupApi.close() }
+        }
+    }
+    override suspend fun saveAttachments(sessionId: String, items: List<dev.dshmobile.app.model.DraftAttachment>) = action {
+        restoreLocked()
+        if (!validId(sessionId) || items.size > 20 || items.sumOf { it.size } > dev.dshmobile.app.model.PhoneRules.MESSAGE_LIMIT || items.any { !validAttachmentDraft(it) }) throw MobileFailure("invalid_selection")
+        saveAttachmentsLocked(sessionId, items)
+    }
+    override suspend fun editAttachments(sessionId: String, add: List<dev.dshmobile.app.model.DraftAttachment>, remove: Set<String>,
+        replace: dev.dshmobile.app.model.DraftAttachment?, expectedUploadId: String?) = action {
+        restoreLocked()
+        val current = stored.attachmentDrafts[sessionId].orEmpty()
+        val retained = current.filterNot { it.localId in remove }.map { source ->
+            if (replace?.localId == source.localId && source.uploadId == expectedUploadId) replace else source
+        }
+        val items = retained + add.filter { candidate -> candidate.localId !in remove && retained.none { it.localId == candidate.localId } }
+        if (!validId(sessionId) || items.size > 20 || items.sumOf { it.size } > dev.dshmobile.app.model.PhoneRules.MESSAGE_LIMIT || items.any { !validAttachmentDraft(it) }) throw MobileFailure("invalid_selection")
+        saveAttachmentsLocked(sessionId, items)
+    }
+    private suspend fun saveAttachmentsLocked(sessionId: String, items: List<dev.dshmobile.app.model.DraftAttachment>) {
+        val previous = stored.attachmentDrafts
+        persist(stored.copy(attachmentDrafts = if (items.isEmpty()) stored.attachmentDrafts - sessionId else (stored.attachmentDrafts + (sessionId to items)).entries.toList().takeLast(64).associate { it.toPair() }))
+        previous.forEach { (session, old) -> discardStaging(session, old.filter { source -> stored.attachmentDrafts[session].orEmpty().none { it.uploadId == source.uploadId } }) }
+    }
+    override suspend fun saveAnswerDraft(sessionId: String, callId: String, answer: dev.dshmobile.app.model.QuestionAnswer) = action {
+        restoreLocked()
+        if (!validId(sessionId) || !validId(callId) || !validAnswerDraft(answer)) throw MobileFailure("invalid_selection")
+        persist(stored.copy(answerDrafts = (stored.answerDrafts + (dev.dshmobile.app.model.questionDraftKey(sessionId, callId) to answer)).entries.toList().takeLast(64).associate { it.toPair() }))
+    }
+    private suspend fun phoneCommand(capability: String, build: (SessionSnapshot) -> StoredCommand) {
+        val origin = state.value.snapshot?.session?.id
+        action {
+            restoreLocked(); online()
+            if (origin == null || stored.selectedSessionId != origin || !dev.dshmobile.app.model.PhoneRules.canMutate(state.value)) throw MobileFailure("invalid_selection")
+            val caps = state.value.capabilities
+            val available = when (capability) { "queue" -> caps?.queue; "rename" -> caps?.rename; "model" -> caps?.models; "answer" -> caps?.questions; else -> false }
+            if (available != true) throw MobileFailure("unsupported")
+            dispatch(build(requireNotNull(state.value.snapshot)))
+        }
+    }
+    override suspend fun queueAction(itemId: String, action: String) = phoneCommand("queue") { snapshot ->
+        if (action == "steer" && state.value.capabilities?.steer != true) throw MobileFailure("unsupported")
+        if (action !in setOf("steer", "remove") || snapshot.pendingQueue.none { it.id == itemId } || (action == "steer" && !snapshot.session.running)) throw MobileFailure("invalid_selection")
+        StoredCommand(UUID.randomUUID().toString(), "queue", sessionId = snapshot.session.id, itemId = itemId, action = action)
+    }
+    override suspend fun rename(title: String) = phoneCommand("rename") { snapshot ->
+        if (!dev.dshmobile.app.model.PhoneRules.validTitle(title)) throw MobileFailure("invalid_selection")
+        StoredCommand(UUID.randomUUID().toString(), "rename", sessionId = snapshot.session.id, title = title)
+    }
+    override suspend fun selectModel(selection: dev.dshmobile.app.model.ModelSelection) = phoneCommand("model") { snapshot ->
+        if (!validId(selection.provider) || !validId(selection.model)) throw MobileFailure("invalid_selection")
+        StoredCommand(UUID.randomUUID().toString(), "model", sessionId = snapshot.session.id, selection = selection)
+    }
+    override suspend fun answer(callId: String, answer: dev.dshmobile.app.model.QuestionAnswer) = phoneCommand("answer") { snapshot ->
+        val question = snapshot.pendingQuestions.singleOrNull { it.callId == callId && it.state == "open" } ?: throw MobileFailure("question_expired")
+        if (!dev.dshmobile.app.model.PhoneRules.validAnswer(question, answer, state.value.capabilities?.questionSkip == true)) throw MobileFailure("invalid_selection")
+        StoredCommand(UUID.randomUUID().toString(), "answer", sessionId = snapshot.session.id, callId = callId, answer = answer)
+    }
+    override suspend fun skipQuestion(callId: String) = phoneCommand("answer") { snapshot ->
+        if (state.value.capabilities?.questionSkip != true) throw MobileFailure("unsupported")
+        if (snapshot.pendingQuestions.none { it.callId == callId && it.state == "open" }) throw MobileFailure("question_expired")
+        StoredCommand(UUID.randomUUID().toString(), "answer", sessionId = snapshot.session.id, callId = callId, skip = true)
+    }
+    override suspend fun file(sessionId: String, attachmentId: String): ByteArray {
+        if (state.value.capabilities?.fileDownload != true || state.value.snapshot?.takeIf { it.session.id == sessionId }?.messages?.none { m -> m.attachments.any { it.id == attachmentId } } != false) throw MobileFailure("unsupported")
+        fileReads.acquire()
+        try { return api().file(sessionId, attachmentId) } finally { fileReads.release() }
+    }
+    override suspend fun models(): dev.dshmobile.app.model.ModelCatalog {
+        if (state.value.capabilities?.models != true) throw MobileFailure("unsupported")
+        return api().models()
+    }
+    override suspend fun upload(sessionId: String, attachment: dev.dshmobile.app.model.DraftAttachment, open: () -> java.io.InputStream, progress: (Int) -> Unit): dev.dshmobile.app.model.DraftAttachment {
+        if (state.value.capabilities?.attachments != true || state.value.snapshot?.session?.id != sessionId || !dev.dshmobile.app.model.PhoneRules.canMutate(state.value)) throw MobileFailure("forbidden")
+        val receipt = api().upload(sessionId, attachment.name, attachment.mime, attachment.size, open, progress)
+        return attachment.copy(uploadId = receipt.uploadId, expiresAt = receipt.expiresAt)
+    }
+    override suspend fun image(sessionId: String, attachmentId: String): ByteArray {
+        if (state.value.capabilities?.attachments != true || state.value.connection != ConnectionState.ONLINE) throw MobileFailure("unsupported")
+        return api().image(sessionId, attachmentId)
     }
     override suspend fun cancelRun() {
         val origin = state.value.snapshot
@@ -537,17 +685,60 @@ internal class NetworkMobileRepository(
         val snapshot = state.value.snapshot ?: throw MobileFailure("invalid_selection")
         if (state.value.snapshotStale) throw MobileFailure("invalid_selection")
         if (!snapshot.session.canExecute || state.value.workspaces.none { it.id == snapshot.session.workspaceId && it.canExecute }) throw MobileFailure("forbidden")
-        if (snapshot.activity !in setOf("idle", "running")) throw MobileFailure("unsupported")
+        if (snapshot.activity !in setOf("idle", "running") && !(snapshot.activity == "waiting" && state.value.capabilities?.questions == true && snapshot.pendingQuestions.isNotEmpty())) throw MobileFailure("unsupported")
         return snapshot
     }
+    private suspend fun refreshedSources(session: String, sources: List<dev.dshmobile.app.model.DraftAttachment>, force: Boolean = false): List<dev.dshmobile.app.model.DraftAttachment> =
+        sources.map { source ->
+            if (!force && source.uploadId != null && source.expiresAt > now()) source else {
+                val open = openAttachment ?: throw MobileFailure("attachment_unavailable")
+                val receipt = api().upload(session, source.name, source.mime, source.size, { open(source) }, {})
+                val refreshed = source.copy(uploadId = receipt.uploadId, expiresAt = receipt.expiresAt)
+                fun replace(items: List<dev.dshmobile.app.model.DraftAttachment>) = items.map { if (it.localId == source.localId) refreshed else it }
+                // Commit each successful upload before attempting the next one; a later 429 cannot lose it.
+                persist(stored.copy(attachmentDrafts = stored.attachmentDrafts.mapValues { (id, items) -> if (id == session) replace(items) else items },
+                    acceptedPrompts = stored.acceptedPrompts.map { command -> if (command.sessionId == session) {
+                        val updated = replace(command.attachmentSources)
+                        command.copy(attachmentSources = updated) // Never rewrite an already admitted command's exact uploadIds.
+                    } else command }))
+                refreshed
+            }
+        }
     private suspend fun dispatch(command: StoredCommand, drafts: Map<String, String> = stored.drafts) {
         persist(stored.copy(pending = command, drafts = drafts))
         mutableState.value = state.value.copy(pending = command.presentation(), draft = draftFor(stored.selectedSessionId), busy = true, error = null)
         try {
-            val receipt = api().command(command)
+            val receipt = try { api().command(command) } catch (missing: MobileFailure) {
+                if (missing.key != "upload_missing" || command.attachmentSources.size != command.uploadIds.orEmpty().size || command.attachmentSources.isEmpty()) throw missing
+                // Only an explicit pre-admission 404 authorizes this single automatic continuation.
+                // Keep the requestId; uncertain/lost responses never enter this branch.
+                val session = requireNotNull(command.sessionId)
+                // The pre-admission 404 makes all submitted IDs suspect; invalidate them durably.
+                // A retry after a partial refresh can then reuse successes and refresh only failures.
+                val stale = command.attachmentSources.map { it.copy(expiresAt = 0) }
+                val staleById = stale.associateBy { it.localId }
+                persist(stored.copy(pending = null, attachmentDrafts = stored.attachmentDrafts + (session to stored.attachmentDrafts[session].orEmpty().map { staleById[it.localId] ?: it })))
+                val sources = refreshedSources(session, stale)
+                val refreshed = command.copy(uploadIds = sources.map { requireNotNull(it.uploadId) }, attachmentSources = sources)
+                val mapping = sources.associateBy { it.localId }
+                val attachments = stored.attachmentDrafts[command.sessionId].orEmpty().map { mapping[it.localId] ?: it }
+                persist(stored.copy(pending = refreshed, attachmentDrafts = stored.attachmentDrafts + (command.sessionId to attachments)))
+                api().command(refreshed)
+            }
             applyReceipt(receipt)
             reloadCommandSnapshot(command)
         } catch (failure: MobileFailure) {
+            if (failure.key == "upload_missing") {
+                persist(stored.copy(pending = null))
+                mutableState.value = state.value.copy(error = "attachment_unavailable", busy = false)
+                return
+            }
+            if (failure.key == "question_expired" && command.kind == "answer") {
+                persist(stored.copy(pending = null))
+                mutableState.value = state.value.copy(error = "question_expired", busy = false)
+                reloadCommandSnapshot(command)
+                return
+            }
             // Even a malformed/lost response cannot prove no upstream admission. Never POST again.
             if (stored.pending != null) {
                 persist(stored.copy(pending = stored.pending?.copy(status = "uncertain")))
@@ -557,7 +748,7 @@ internal class NetworkMobileRepository(
                     catch (lookup: MobileFailure) { fail(lookup.key) }
                 }
             }
-            if (failure.key in setOf("unauthorized", "revoked", "forbidden", "incompatible_protocol", "tls_failed", "network_unavailable", "invalid_response", "rate_limited")) fail(failure.key)
+            if (stored.pending == null || failure.key in setOf("unauthorized", "revoked", "forbidden", "incompatible_protocol", "tls_failed", "network_unavailable", "invalid_response", "rate_limited")) fail(failure.key)
         }
         mutableState.value = state.value.copy(busy = false)
         if (foreground && state.value.connection == ConnectionState.ONLINE) startObserver()
@@ -587,9 +778,14 @@ internal class NetworkMobileRepository(
                     val admitted = command.copy(status = if (command.queuedWhileRunning) "queued" else "accepted", acceptedAt = now(), idleSnapshots = 0)
                     val drafts = stored.drafts.toMutableMap()
                     if (drafts[command.sessionId] == command.text) drafts.remove(command.sessionId)
-                    persist(stored.copy(pending = null, acceptedPrompts = boundedLocalPrompts(stored.acceptedPrompts + admitted), drafts = drafts))
+                    persist(stored.copy(pending = null, acceptedPrompts = boundedLocalPrompts(stored.acceptedPrompts + admitted), drafts = drafts,
+                        attachmentDrafts = withoutConfirmedAttachments(command)))
                     command.sessionId?.let { if (liveDrafts[it]?.text == command.text) liveDrafts.remove(it) }
                     mutableState.value = state.value.copy(draft = draftFor(stored.selectedSessionId), error = null)
+                } else if (command.kind in setOf("queue", "rename", "model", "answer")) {
+                    val answeredKey = if (command.kind == "answer") dev.dshmobile.app.model.questionDraftKey(requireNotNull(command.sessionId), requireNotNull(command.callId)) else null
+                    persist(stored.copy(pending = null, answerDrafts = if (answeredKey != null) stored.answerDrafts - answeredKey else stored.answerDrafts))
+                    mutableState.value = state.value.copy(error = null)
                 } else {
                     persist(stored.copy(pending = command.copy(status = "accepted")))
                     mutableState.value = state.value.copy(pending = stored.pending?.presentation(), error = null)
@@ -606,12 +802,20 @@ internal class NetworkMobileRepository(
             }
         }
     }
+    private fun withoutConfirmedAttachments(command: StoredCommand): Map<String, List<dev.dshmobile.app.model.DraftAttachment>> {
+        val session = command.sessionId ?: return stored.attachmentDrafts
+        val ids = command.uploadIds.orEmpty().toSet()
+        val remaining = stored.attachmentDrafts[session].orEmpty().filterNot { it.uploadId in ids }
+        return if (remaining.isEmpty()) stored.attachmentDrafts - session else stored.attachmentDrafts + (session to remaining)
+    }
     private suspend fun reconcileSnapshot(snapshot: SessionSnapshot?) {
         if (snapshot == null) return
         cacheSnapshot(snapshot)
         val observedAt = now()
         val accepted = stored.acceptedPrompts.mapNotNull { local ->
-            if (MobileReducer.reconcilesPrompt(local.presentation(), snapshot)) return@mapNotNull null
+            if (MobileReducer.reconcilesPrompt(local.presentation(), snapshot) ||
+                (local.sessionId == snapshot.session.id && snapshot.pendingQueue.any { it.requestId == local.requestId }) ||
+                (local.sessionId == snapshot.session.id && local.itemId != null && snapshot.pendingQueue.none { it.id == local.itemId })) return@mapNotNull null
             if (local.sessionId != snapshot.session.id || local.status == "unconfirmed") return@mapNotNull local
             val idle = if (snapshot.activity == "idle" && !snapshot.session.running) local.idleSnapshots + 1 else 0
             val since = local.acceptedAt ?: observedAt // Migrate legacy accepted records without inventing admission time.
@@ -625,7 +829,8 @@ internal class NetworkMobileRepository(
         if (!prompt && !cancelled && accepted == stored.acceptedPrompts) return
         val drafts = stored.drafts.toMutableMap()
         if (prompt && drafts[command.sessionId] == command.text) drafts.remove(command.sessionId)
-        persist(stored.copy(pending = if (prompt || cancelled) null else command, acceptedPrompts = boundedLocalPrompts(accepted), drafts = drafts))
+        persist(stored.copy(pending = if (prompt || cancelled) null else command, acceptedPrompts = boundedLocalPrompts(accepted), drafts = drafts,
+            attachmentDrafts = if (prompt && command != null) withoutConfirmedAttachments(command) else stored.attachmentDrafts))
         if (prompt && command?.sessionId != null && liveDrafts[command.sessionId]?.text == command.text) liveDrafts.remove(command.sessionId)
         mutableState.value = state.value.copy(draft = draftFor(stored.selectedSessionId), error = if (prompt || cancelled) null else state.value.error)
     }
@@ -652,8 +857,12 @@ internal class NetworkMobileRepository(
             val snapshot = executableSnapshot()
             if (MobileReducer.blockingPromptCount(state.value, origin) >= MobileReducer.MAX_ACCEPTED_PROMPTS) throw MobileFailure("command_unresolved")
             // Only the explicit, warned user action enters here. Preserve the old record for reconciliation.
+            val sources = refreshedSources(origin, original.attachmentSources)
+            if (!original.uploadIds.isNullOrEmpty() && sources.size != original.uploadIds.size) throw MobileFailure("attachment_unavailable")
             dispatch(StoredCommand(UUID.randomUUID().toString(), "send", sessionId = snapshot.session.id,
-                text = original.text, queuedWhileRunning = snapshot.activity == "running"))
+                text = original.text, queuedWhileRunning = snapshot.activity in setOf("running", "waiting"),
+                delivery = original.delivery, uploadIds = if (sources.isNotEmpty()) sources.map { requireNotNull(it.uploadId) } else original.uploadIds,
+                attachmentSources = sources))
         }
     }
     override suspend fun abandonPending() = action {
@@ -678,7 +887,7 @@ internal class NetworkMobileRepository(
         val command = stored.pending ?: return
         val receipt = api().receipt(command.requestId)
         if (receipt == null) {
-            persist(stored.copy(pending = command.copy(status = "uncertain")))
+            if (stored.pending != null) persist(stored.copy(pending = stored.pending?.copy(status = "uncertain")))
             mutableState.value = state.value.copy(pending = stored.pending?.presentation(), error = "command_uncertain")
         } else applyReceipt(receipt)
         if (reloadSnapshot && stored.pending != null) reloadCommandSnapshot(command)
@@ -746,10 +955,13 @@ internal class NetworkMobileRepository(
         stopObserver(); cancelReconnect(); prefetch.cancel()
         cacheMutex.withLock { diskHistory.clear() }
         store.clear() // If this fails, report storage_failed and never claim the device was forgotten.
+        val abandonedDrafts = stored.attachmentDrafts
+        stored = stored.copy(attachmentDrafts = emptyMap())
+        abandonedDrafts.forEach { (session, sources) -> discardStaging(session, sources) }
         api?.close(); api = null
         historyEpoch = historyStore.authority.epoch
         stored = StoredState(); restored = true; liveDrafts.clear(); history.clear(); observingSession = false
-        mutableState.value = MobileState(localPromptActions = promptActions)
+        mutableState.value = MobileState(localPromptActions = promptActions, draftsRestored = true)
     }
     override fun close() {
         synchronized(lifecycle) {
@@ -764,11 +976,16 @@ internal class NetworkMobileRepository(
     private companion object { const val MAX_LOCAL_PROMPTS = 32 }
 
     private fun validateStoredCommand(command: StoredCommand) {
-        if (!validRequestId(command.requestId) || command.kind !in setOf("send", "create", "cancel") ||
+        if (!validRequestId(command.requestId) || command.kind !in setOf("send", "create", "cancel", "queue", "rename", "model", "answer") ||
             command.status !in setOf("sending", "pending", "accepted", "queued", "unconfirmed", "uncertain") ||
             command.acceptedAt?.let { it < 0 } == true || command.idleSnapshots !in 0..2 ||
             (command.sessionId != null && !validId(command.sessionId)) || command.text.orEmpty().toByteArray().size > 32 * 1024 ||
-            (command.kind == "send" && (command.text.isNullOrBlank() || command.sessionId == null)) ||
+            (command.kind == "send" && ((command.text.isNullOrBlank() && command.uploadIds.isNullOrEmpty()) || command.sessionId == null)) ||
+            (command.delivery !in setOf(null, "queue", "steer")) || command.uploadIds.orEmpty().let { it.size > 20 || it.distinct().size != it.size || it.any { id -> !validId(id) } } ||
+            (command.kind == "queue" && (command.sessionId == null || !validId(command.itemId.orEmpty()) || command.action !in setOf("steer", "remove"))) ||
+            (command.kind == "rename" && (command.sessionId == null || !dev.dshmobile.app.model.PhoneRules.validTitle(command.title.orEmpty()))) ||
+            (command.kind == "model" && (command.sessionId == null || command.selection == null || !validId(command.selection.provider) || !validId(command.selection.model))) ||
+            (command.kind == "answer" && (command.sessionId == null || !validId(command.callId.orEmpty()) || (command.skip == (command.answer != null)))) ||
             (command.kind == "cancel" && (command.sessionId == null || command.expectedCursor == null || command.expectedCursor < -1)) ||
             (command.kind == "create" && (command.workspaceId == null || !validId(command.workspaceId)))) throw MobileFailure("storage_failed")
     }
