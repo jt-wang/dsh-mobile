@@ -43,6 +43,37 @@ jobs:
       - name: Test host public boundaries
         run: npm test
 
+  host-windows:
+    name: Host / Windows / Node 24
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            host/package-lock.json
+            relay/package-lock.json
+      - name: Install locked dependencies and test host
+        working-directory: host
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
+          # Host relay integration tests import the relay package from ../relay.
+          npm ci --prefix ../relay
+          if ($LASTEXITCODE -ne 0) { throw 'relay npm ci failed' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Host build failed' }
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw 'Host tests failed' }
+
   android:
     name: Android / JDK 21 / API 36
     runs-on: ubuntu-24.04

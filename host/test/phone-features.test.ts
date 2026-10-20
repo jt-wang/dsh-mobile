@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { HostError } from '../src/errors.ts';
 import { HostState } from '../src/state.ts';
 import { assertPrivate } from '../src/private-files.ts';
+import { assertStagedFilePrivate } from './helpers/staged-file-acl.ts';
 import { startHostServer } from '../src/server.ts';
 import { request as httpRequest } from 'node:http';
 import { UPLOAD_LIMIT } from '../src/phone.ts';
@@ -144,14 +145,26 @@ test('concurrent exact attachment replays return a receipt, not claimed-upload c
   let prompts = 0; adapter.prompt = async () => { prompts++; };
   adapter.upload = async () => { throw new Error('pick stays local'); };
   const token = pair().deviceToken;
-  const picked = await fetch(baseUrl + '/v1/sessions/chat/uploads', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'text/plain' }, body: 'a' }); const { uploadId } = await picked.json();
-  adapter.upload = async (_id, input) => { for await (const _chunk of input.data) {} return { ref: { id: 'f', name: input.name, size: 1, mime: input.mime, kind: 'file' }, upstream: { type: 'file', receiptId: 'receipt' } }; };
+  const picked = await fetch(baseUrl + '/v1/sessions/chat/uploads', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'text/plain' }, body: 'a' }); assert.equal(picked.status, 201); const { uploadId } = await picked.json();
+  let releaseUpload!: () => void; const uploadGate = new Promise<void>(r => { releaseUpload = r; });
+  t.after(() => releaseUpload());
+  adapter.upload = async (_id, input) => { await uploadGate; for await (const _chunk of input.data) {} return { ref: { id: 'f', name: input.name, size: 1, mime: input.mime, kind: 'file' }, upstream: { type: 'file', receiptId: 'receipt' } }; };
   const snapshot = adapter.snapshot; let held = 0, release!: () => void; const gate = new Promise<void>(r => { release = r; });
   adapter.snapshot = async (...args) => { if (++held <= 2) { if (held === 2) release(); await gate; } return snapshot(...args); };
   const body = { requestId: randomUUID(), text: 'Synthetic', uploadIds: [uploadId] };
-  const results = await Promise.all([request('/sessions/chat/messages', token, body), request('/sessions/chat/messages', token, body)]);
-  assert.ok(results.every(r => [200, 202].includes(r.status)), results.map(r => r.status).join(','));
-  assert.equal(prompts, 1);
+  try {
+    const results = await Promise.all([request('/sessions/chat/messages', token, body), request('/sessions/chat/messages', token, body)]);
+    assert.ok(results.every(r => r.status === 202), results.map(r => r.status).join(','));
+    const receipts = await Promise.all(results.map(r => r.json()));
+    assert.deepEqual(receipts[0], receipts[1]); assert.equal(receipts[0].status, 'pending');
+    assert.equal(prompts, 0, 'pending replay must not wait for the upstream upload');
+  } finally { releaseUpload(); }
+  // Admission may return a pending receipt before disk I/O reaches prompt.
+  // Observe settlement through exact HTTP replay, not the 25 ms response window.
+  const deadline = Date.now() + 5000;
+  let settled: Response;
+  do { assert.ok(Date.now() < deadline, 'attachment command must settle'); settled = await request('/sessions/chat/messages', token, body); } while ((await settled.json()).status === 'pending');
+  assert.equal(settled.status, 200); assert.equal(prompts, 1);
 });
 
 test('external HostState revocation cleans private staging on the next access', async t => {
@@ -273,7 +286,7 @@ test('file pick stays private on disk until idempotent send and removal leaves n
   const pick = async () => { const response = await fetch(baseUrl + '/v1/sessions/chat/uploads', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'text/plain', 'X-File-Name': 'original.txt' }, body: 'synthetic' }); assert.equal(response.status, 201); return response.json(); };
   const first = await pick(), directory = join(root, 'mobile-uploads');
   assert.equal(upstream, 0); const names = await readdir(directory); assert.equal(names.length, 1); assert.match(names[0]!, /^[a-f0-9]{48}\.tmp$/); assert.equal(await readFile(join(directory, names[0]!), 'utf8'), 'synthetic');
-  await assertPrivate(directory); await assertPrivate(join(directory, names[0]!));
+  await assertPrivate(directory); await assertStagedFilePrivate(join(directory, names[0]!));
   const removed = await fetch(baseUrl + '/v1/sessions/chat/uploads/' + first.uploadId, { method: 'DELETE', headers: { Authorization: 'Bearer ' + token } }); assert.equal(removed.status, 204); assert.deepEqual(await readdir(directory), []); assert.equal(upstream, 0);
   const second = await pick(), body = { requestId: randomUUID(), text: 'Synthetic', uploadIds: [second.uploadId] };
   assert.equal((await request('/sessions/chat/messages', token, body)).status, 200);

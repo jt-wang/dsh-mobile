@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { assertPrivate } from '../src/private-files.ts';
+import { assertStagedFilePrivate } from './helpers/staged-file-acl.ts';
 import { mkdtemp, mkdir, readdir, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,7 @@ test('staging rejects redirected directories and foreign reads, retains owner-on
   const root = await mkdtemp(join(tmpdir(), 'file-staging-security-')), store = new FileStaging(join(root, 'host.sqlite'));
   t.after(async () => { await store.close(); await rm(root, { recursive: true, force: true }); });
   const signal = new AbortController().signal, data = () => (async function* () { yield Buffer.from('abc'); })();
-  const path = await store.save(data(), 3, signal); await assertPrivate(store.directory); await assertPrivate(path); assert.match(path, /[a-f0-9]{48}\.tmp$/);
+  const path = await store.save(data(), 3, signal); await assertPrivate(store.directory); await assertStagedFilePrivate(path); assert.match(path, /[a-f0-9]{48}\.tmp$/);
   assert.throws(() => store.read(join(root, 'foreign'), signal), { code: 'not_found' }); await store.remove(path);
   const original = fs.open;
   fs.open = (async (...args: Parameters<typeof fs.open>) => { const handle = await original(...args); handle.write = (async () => { throw Object.assign(new Error('Synthetic disk full'), { code: 'ENOSPC' }); }) as typeof handle.write; return handle; }) as typeof fs.open;
