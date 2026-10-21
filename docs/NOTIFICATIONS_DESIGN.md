@@ -1,6 +1,6 @@
 # Background notifications — design and acceptance contract
 
-Status: proposed capability, not implemented or advertised. Research checked on 2026-10-06. This document adds a design to the current development preview; it does not authorize deployment, source changes, new dependencies, live-profile changes or device tests.
+Status: implemented as the opt-in foreground mode (phase 1 below): a foreground service with a visible persistent notification and a host notification feed. UnifiedPush and periodic WorkManager (phases 2 and 3) are not implemented, and no FCM is used. Answering agent questions from the phone ships in app 0.8.0 with host plugin 0.7.0. This document is the original design, researched on 2026-10-06; for current behavior see [Architecture](<ARCHITECTURE.md>), [Mobile protocol](<PROTOCOL.md>) and the README.
 
 ## Decision and scope
 
@@ -11,7 +11,7 @@ Recommend a **phased hybrid** with one host-owned notification journal and sever
 3. **Optional delayed fallback: periodic WorkManager**, with a 15-minute minimum interval and no maximum latency claim. It is reconciliation, not an instant-delivery substitute. Add it after the basic foreground slice, or alongside UnifiedPush if its permission/dependency cost is accepted.
 4. No automatic mode escalation: missing push must not silently start a foreground service. Offer the user a choice; run at most one primary real-time delivery mode. All modes share dedupe and preferences.
 
-The requested alerts are **answer finished** and **attention needed on the desktop**. Mobile approvals and question responses remain unsupported. Agent execution, tools and provider credentials remain on the PC. No GMS, Firebase (including embedded FCM distributors), telemetry, public default push account, third-party plaintext message content or raw DSH port exposure.
+The requested alerts are **answer finished** and **attention needed on the desktop**. Mobile approvals remain unsupported because DSH does not expose them to plugins; answering agent questions from the phone was added later, in app 0.8.0 with host plugin 0.7.0. Agent execution, tools and provider credentials remain on the PC. No GMS, Firebase (including embedded FCM distributors), telemetry, public default push account, third-party plaintext message content or raw DSH port exposure.
 
 **Governing limitation:** without a privileged OS push path, no option guarantees instant delivery after force-stop, a powered-off phone, a disconnected VPN, disabled notifications, OEM network shutdown or a sleeping PC. UnifiedPush moves the persistent connection to a distributor; it does not remove this limitation. Background, Activity closed, ordinary process death, Recent-app swipe, Android Task Manager Stop and Settings Force stop are different states. The product must say which were actually tested. If “closed” includes force-stop and an absolute guarantee, the stated requirement cannot be met under these constraints.
 
