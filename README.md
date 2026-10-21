@@ -240,7 +240,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ../tools/android-build
 
 ## Нужно похожее решение?
 
-Проект сделал [Павел Логачев](https://github.com/pavel-logachev). Делаю сайты, веб-сервисы, Telegram-ботов, приложения и автоматизацию под задачу: сам разбираю, делаю и запускаю. 20 лет в ИТ: инженер, затем руководитель проектов. Расскажите о задаче [на почту](mailto:ai@logachev.net) или [в Telegram](https://t.me/pavel_logachev) — разбор на 20–30 минут бесплатный, готовое ТЗ не нужно. Цены и другие проекты — на [logachev.net](https://logachev.net/) и [в профиле](https://github.com/pavel-logachev).
+Проект сделал [Павел Логачев](https://github.com/pavel-logachev). Делаю сайты, веб-сервисы, Telegram-ботов, приложения и автоматизацию под задачу: сам разбираю, делаю и запускаю. 20 лет в ИТ: инженер, затем руководитель проектов. Расскажите о задаче [на почту](mailto:pavel@logachev.net) или [в Telegram](https://t.me/pavel_logachev) — разбор на 20–30 минут бесплатный, готовое ТЗ не нужно. Цены и другие проекты — на [logachev.net](https://logachev.net/) и [в профиле](https://github.com/pavel-logachev).
 
 ## English
 
@@ -250,7 +250,7 @@ Pair with a one-use QR code and connect over Wi‑Fi, Tailscale or your own opti
 
 Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.8.0) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The new 0.8.0 features need host plugin 0.7.0 from the same release; with plugin 0.6.0 the app keeps working without them. The computer must remain on. Notifications use an opt-in foreground connection without Google services. Approvals of agent actions still require the desktop.
 
-Built by [Pavel Logachev](https://github.com/pavel-logachev): 20 years in IT, first as an engineer, then as a project manager. I build websites, web services, Telegram bots, apps and automation for your task. Have a similar one? [ai@logachev.net](mailto:ai@logachev.net) · [logachev.net](https://logachev.net/)
+Built by [Pavel Logachev](https://github.com/pavel-logachev): 20 years in IT, first as an engineer, then as a project manager. I build websites, web services, Telegram bots, apps and automation for your task. Have a similar one? [pavel@logachev.net](mailto:pavel@logachev.net) · [logachev.net](https://logachev.net/)
 
 ## Лицензия
 
