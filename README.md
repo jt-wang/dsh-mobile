@@ -1,108 +1,110 @@
-<picture><source media="(max-width: 767px)" srcset="docs/assets/dsh-mobile-banner-mobile.png"><img src="docs/assets/dsh-mobile-banner.png" alt="Экраны DSH Mobile для Android. Чаты и уведомления — на телефоне, агент работает на компьютере."></picture>
+<picture><source media="(max-width: 767px)" srcset="docs/assets/dsh-mobile-banner-mobile.png"><img src="docs/assets/dsh-mobile-banner.png" alt="DSH Mobile screens for Android. Chats and notifications are on the phone; the agent works on the computer."></picture>
 
 # DSH Mobile
 
-Кейс на сайте: <https://logachev.net/#case-dsh-mobile>
+Case study on the website: <https://logachev.net/#case-dsh-mobile>
 
-[![Последний релиз](https://img.shields.io/github/v/release/pavel-logachev/dsh-mobile?style=flat-square&labelColor=0b0f14&label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7&color=c3f451)](https://github.com/pavel-logachev/dsh-mobile/releases/latest) [![Проверки в CI](https://img.shields.io/github/actions/workflow/status/pavel-logachev/dsh-mobile/ci.yml?branch=main&style=flat-square&labelColor=0b0f14&label=CI)](https://github.com/pavel-logachev/dsh-mobile/actions/workflows/ci.yml) [![Лицензия](https://img.shields.io/github/license/pavel-logachev/dsh-mobile?style=flat-square&labelColor=0b0f14&label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F&color=7f99ad)](<LICENSE>)
+[![Latest release](https://img.shields.io/github/v/release/pavel-logachev/dsh-mobile?style=flat-square&labelColor=0b0f14&label=release&color=c3f451)](https://github.com/pavel-logachev/dsh-mobile/releases/latest) [![CI checks](https://img.shields.io/github/actions/workflow/status/pavel-logachev/dsh-mobile/ci.yml?branch=main&style=flat-square&labelColor=0b0f14&label=CI)](https://github.com/pavel-logachev/dsh-mobile/actions/workflows/ci.yml) [![License](https://img.shields.io/github/license/pavel-logachev/dsh-mobile?style=flat-square&labelColor=0b0f14&label=license&color=7f99ad)](<LICENSE>)
 
-**Ваш агент [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) работает на компьютере. С Android-телефона вы ставите задачи с фото и файлами, читаете ответы в реальном времени, отвечаете на вопросы агента и получаете уведомление «Ответ готов».**
+English | [Русский](README.ru.md)
 
-[Скачать APK 0.8.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.8.0) · [Установка](#установка) · [Архитектура](#как-это-устроено) · [Безопасность](#безопасность) · [English](#english)
+**Your [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) agent runs on your computer. From your Android phone you assign tasks with photos and files, read replies in real time, answer the agent's questions and get an “Answer ready” notification.**
 
-> Неофициальный проект Павла Логачева. Разрабатывается независимо от DeepSeek.
+[Download APK 0.8.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.8.0) · [Installation](#installation) · [Architecture](#how-it-works) · [Security](#security)
 
-Android 8.0+ · Привязка по QR-коду · Wi‑Fi или Tailscale
+> An unofficial project by Pavel Logachev. Developed independently of DeepSeek.
 
-Модели, инструменты и подписки остаются на компьютере. Облачного сервера у DSH Mobile нет.
+Android 8.0+ · QR code pairing · Wi‑Fi or Tailscale
 
-## Что можно делать с телефона
+Models, tools and subscriptions stay on the computer. DSH Mobile has no cloud server.
 
-- **Открывать чаты всех проектов.** Искать чаты и фильтровать по проекту. Список проектов следует боковой панели DSH и обновляется без повторной привязки.
-- **Ставить задачи.** Выбрать проект и пресет и сразу написать задачу: приложение создаст чат и отправит текст один раз.
-- **Отправлять фото и файлы.** Снимок с камеры, фотографии через системный выбор фото (Photo Picker), файлы через системный выбор файлов. Загрузка начинается сразу после выбора. В одном сообщении — до 20 вложений общим объемом до 200 МиБ, каждый файл — до 20 МиБ. Изображения PNG, JPEG, WebP и GIF агент получает как изображения, файлы передаются в хранилище вложений DSH в момент отправки. Неотправленные загрузки истекают на компьютере через 10 минут и в DSH не попадают.
-- **Читать ответ в реальном времени.** Markdown, таблицы, блоки кода с копированием. Изображения из сообщений видны прямо в переписке; по нажатию открывается полноэкранный просмотр, где картинку можно увеличить, отправить через «Поделиться» или сохранить. Файлы из сообщений можно скачать — до 20 МиБ. Служебные события свернуты в строку «Действия агента» — полный текст доступен по нажатию. Длинный сжатый чат, старую историю которого не удается восстановить в пределах ограничений, открывается с последними сообщениями и пометкой, что история обрезана.
-- **Дописывать и направлять, пока агент работает.** По умолчанию сообщение встанет в очередь DSH и дойдет до агента в следующем ходе. «Направить» доставляет его на следующем шаге агента, не останавливая текущий ход: удерживайте кнопку отправки или нажмите ↳ у сообщения в очереди. Сообщение можно и убрать из очереди.
-- **Отвечать на вопросы агента.** Выбрать один или несколько вариантов, написать свой ответ или пропустить вопрос. Вариант, который рекомендует агент, отмечен, но не выбран заранее. Подтверждения действий агента остаются на компьютере.
-- **Переименовывать чат и менять его модель.** Оба действия — в меню ⋯. Новая модель применяется со следующего запроса к модели, возможно уже на следующем шаге идущего хода; запрос, который уже выполняется, не переключается.
-- **Останавливать работу.** Отдельная кнопка «Стоп» запрашивает подтверждение.
-- **Получать уведомления.** Для «Ответ готов» и «Агент ждет вашего решения» отдельно выбираются «Со звуком» (всплывающий баннер со звуком), «Без звука» или «Выключены». У каждого режима свой канал Android; в настройках приложения есть переходы к системным настройкам каналов. При обновлении прежний системный выбор сохраняется: выключенный канал остается выключенным, беззвучный — беззвучным. Звук сопровождает каждое новое событие, несколько оповещений группируются, а постоянное уведомление о связи — беззвучное. Уведомление о вопросе агента сразу открывает этот вопрос. Предупреждение «Часть событий могла быть пропущена» исчезает само, когда компьютер подтверждает полное восстановление без пропусков. Для открытого на экране чата уведомлений нет. Отдельные проекты и чаты можно отключить.
-- **Возвращаться к переписке.** Поиск по сообщениям, черновик для каждого чата и копирование по долгому нажатию.
+## What you can do from your phone
 
-Вложения, «Направить», ответы на вопросы, переименование, смена модели, просмотр и скачивание файлов, а также новые возможности уведомлений требуют плагина-компаньона 0.7.0. Приложение показывает каждую новую функцию, только если подключенный плагин сообщает о ее поддержке.
+- **Open chats from all projects.** Search chats and filter them by project. The project list follows the DSH sidebar and updates without re-pairing.
+- **Assign tasks.** Pick a project and a preset and write the task right away: the app creates a chat and sends the text once.
+- **Send photos and files.** A shot from the camera, photos through the system photo picker (Photo Picker), files through the system file picker. Uploading starts as soon as you pick them. One message can carry up to 20 attachments with a total size of up to 200 MiB, each file up to 20 MiB. The agent receives PNG, JPEG, WebP and GIF images as images; files are handed to the DSH attachment store at the moment of sending. Unsent uploads expire on the computer after 10 minutes and never reach DSH.
+- **Read the reply in real time.** Markdown, tables, code blocks with a copy button. Images from messages appear right in the conversation; tap one to open a full-screen viewer where you can zoom in, send it via Share or save it. Files from messages can be downloaded — up to 20 MiB. Service events are collapsed into an “Agent activity” line — the full text opens on tap. A long compacted chat whose older history cannot be restored within the limits opens with the latest messages and a note that the history is truncated.
+- **Add messages and steer while the agent works.** By default a message joins the DSH queue and reaches the agent on its next turn. “Steer” delivers it at the agent's next step without stopping the current turn: hold the send button or tap ↳ on a queued message. You can also remove a message from the queue.
+- **Answer the agent's questions.** Pick one or more options, write your own answer or skip the question. The option the agent recommends is marked but not preselected. Approvals of agent actions stay on the computer.
+- **Rename a chat and change its model.** Both actions are in the ⋯ menu. The new model applies from the next model request, possibly as early as the next step of the running turn; a request that is already in progress is not switched.
+- **Stop a run.** A separate Stop button asks for confirmation.
+- **Get notifications.** For “Answer ready” and “Agent needs your decision” you choose separately between “With sound” (a pop-up banner with sound), “Silent” and “Off”. Each mode has its own Android channel; the app settings link to the system channel settings. Your earlier system choice is kept on update: a disabled channel stays disabled, a silent one stays silent. Sound accompanies every new event, multiple alerts are grouped, and the persistent connection notification is silent. A notification about an agent question opens that question directly. The warning “Some events may have been missed” disappears by itself once the computer confirms full recovery with nothing missed. There are no notifications for the chat that is open on screen. You can turn notifications off for individual projects and chats.
+- **Come back to the conversation.** Message search, a draft for each chat and copying with a long press.
 
-Тема следует системной, светлую или темную можно выбрать вручную. Интерфейс на русском и английском: язык следует системному или выбирается в настройках приложения. Поддерживается крупный шрифт.
+Attachments, “Steer”, answering questions, renaming, changing the model, viewing and downloading files, as well as the new notification features require companion plugin 0.7.0. The app shows each new feature only if the connected plugin reports that it supports it.
 
-<picture><source media="(max-width: 767px)" srcset="docs/assets/dsh-mobile-screens-mobile.png"><img src="docs/assets/dsh-mobile-screens.png" alt="Три экрана: чаты разных проектов, ответ в Markdown во время работы агента и выбор проекта перед новым чатом."></picture>
+The theme follows the system one; you can also choose light or dark manually. The interface is in Russian and English: the language follows the system or is chosen in the app settings. Large font sizes are supported.
 
-Снимки сделаны в настоящем приложении с синтетическими демо-данными. Реальных чатов и подключенных моделей на них нет.
+<picture><source media="(max-width: 767px)" srcset="docs/assets/dsh-mobile-screens-mobile.png"><img src="docs/assets/dsh-mobile-screens.png" alt="Three screens: chats from different projects, a Markdown reply while the agent is working, and choosing a project before a new chat."></picture>
 
-## Скриншоты
+The screenshots were taken in the real app with synthetic demo data. They contain no real chats or connected models.
+
+## Screenshots
 
 ![DSH Mobile 0.8](docs/images/0.8/hero.png)
 
-DSH Mobile 0.8: агент работает на компьютере, а чат с ним — у вас в телефоне.
+DSH Mobile 0.8: the agent works on your computer, and your chat with it is on your phone.
 
-![Чаты всех проектов](docs/images/0.8/chats.png)
+![Chats from all projects](docs/images/0.8/chats.png)
 
-Чаты всех проектов DSH в одном списке.
+Chats from all DSH projects in one list.
 
-![Сообщение во время работы агента](docs/images/0.8/steer.png)
+![A message while the agent is working](docs/images/0.8/steer.png)
 
-Агент работает, а вы дописываете: в очередь или «Направить» на следующем шаге.
+The agent is working and you add a message: to the queue, or “Steer” at the next step.
 
-![Вложения в сообщении](docs/images/0.8/attachments.png)
+![Attachments in a message](docs/images/0.8/attachments.png)
 
-Фото с камеры, снимки из галереи и файлы — в одном сообщении агенту.
+Camera photos, gallery pictures and files — in one message to the agent.
 
-![Вопрос агента](docs/images/0.8/question.png)
+![Agent question](docs/images/0.8/question.png)
 
-Вопрос агента: выберите вариант, напишите свой ответ или пропустите.
+An agent question: pick an option, write your own answer or skip it.
 
-![Меню чата](docs/images/0.8/menu.png)
+![Chat menu](docs/images/0.8/menu.png)
 
-Меню ⋯: переименование чата и смена модели.
+The ⋯ menu: renaming the chat and changing the model.
 
-![Просмотр изображения](docs/images/0.8/viewer.png)
+![Image viewer](docs/images/0.8/viewer.png)
 
-Изображение из чата на весь экран: увеличить, поделиться, сохранить.
+An image from the chat in full screen: zoom in, share, save.
 
-![Уведомления](docs/images/0.8/notifications.png)
+![Notifications](docs/images/0.8/notifications.png)
 
-Уведомления: ответ готов, агент задал вопрос.
+Notifications: the answer is ready, the agent has asked a question.
 
-## Как это устроено
+## How it works
 
-На компьютере устанавливается плагин-компаньон. Он открывает привязанному телефону узкий API через защищенное соединение, но не публикует наружу веб-интерфейс DSH.
+A companion plugin is installed on the computer. It opens a narrow API to the paired phone over a secure connection but does not expose the DSH web interface to the outside.
 
 ```text
-Android-приложение
-  │ HTTPS по Wi‑Fi или Tailscale
-  │ или через ваш собственный relay
+Android app
+  │ HTTPS over Wi‑Fi or Tailscale
+  │ or through your own relay
   ▼
-Плагин-компаньон внутри DSH
+Companion plugin inside DSH
   │
   ▼
-Ваши проекты и агенты на компьютере
+Your projects and agents on the computer
 ```
 
-Телефон — только клиент: агент продолжает работать и после закрытия приложения. Основная история переписки хранится в DSH на компьютере.
+The phone is only a client: the agent keeps working after you close the app. The main conversation history is stored in DSH on the computer.
 
-Android-клиент написан на Kotlin и Jetpack Compose, плагин работает на Node.js. Собственный relay — необязательный вариант подключения; общего публичного relay проект не предоставляет.
+The Android client is written in Kotlin and Jetpack Compose; the plugin runs on Node.js. Your own relay is an optional way to connect; the project does not provide a shared public relay.
 
-## Установка
+## Installation
 
-Подробную [инструкцию установки](<docs/SETUP.md>) можно передать своему агенту DSH. В ней — проверки окружения, команды и отдельное согласование установки, прав доступа и активации.
+You can hand the detailed [setup guide](<docs/SETUP.md>) to your DSH agent. It contains environment checks, commands and separate approval of the installation, access rights and activation.
 
-1. **Проверьте требования.**
+1. **Check the requirements.**
 
-   Компьютер: Windows, DeepSeek Harness `0.2.0-rc.2` или `0.2.1-alpha.1`, Node.js 24.x, OpenSSL 3. Телефон: Android 8.0 или новее. Node 24 нужен и процессу DSH, внутри которого работает плагин, — одной подходящей версии в PATH недостаточно.
+   Computer: Windows, DeepSeek Harness `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x, OpenSSL 3. Phone: Android 8.0 or later. Node 24 is also required by the DSH process the plugin runs in — having one suitable version on PATH is not enough.
 
-2. **Скачайте и проверьте файлы релиза.**
+2. **Download and verify the release files.**
 
-   Из [релиза 0.8.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.8.0) нужны подписанный [dsh-mobile-0.8.0.apk](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-0.8.0.apk), архив плагина [dsh-mobile-host-0.7.0.zip](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-host-0.7.0.zip) и их контрольные суммы: [dsh-mobile-0.8.0.apk.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-0.8.0.apk.sha256), [dsh-mobile-host-0.7.0.zip.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-host-0.7.0.zip.sha256). В архиве — плагин-компаньон 0.7.0: новые функции приложения 0.8.0 работают только с ним. Все файлы должны быть из одного релиза. `UNSIGNED-verification.apk` — проверочный артефакт, не файл для установки.
+   From [release 0.8.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.8.0) you need the signed [dsh-mobile-0.8.0.apk](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-0.8.0.apk), the plugin archive [dsh-mobile-host-0.7.0.zip](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-host-0.7.0.zip) and their checksums: [dsh-mobile-0.8.0.apk.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-0.8.0.apk.sha256), [dsh-mobile-host-0.7.0.zip.sha256](https://github.com/pavel-logachev/dsh-mobile/releases/download/v0.8.0/dsh-mobile-host-0.7.0.zip.sha256). The archive contains companion plugin 0.7.0: the new features of app 0.8.0 work only with it. All files must come from the same release. `UNSIGNED-verification.apk` is a verification artifact, not a file to install.
 
-   Укажите абсолютные пути к скачанным файлам и сравните хеши с `.sha256`. При несовпадении остановитесь.
+   Specify the absolute paths to the downloaded files and compare the hashes with the `.sha256` files. If they do not match, stop.
 
    ```powershell
    $zip = '<ABSOLUTE_DOWNLOADED_HOST_ZIP>'
@@ -112,9 +114,9 @@ Android-клиент написан на Kotlin и Jetpack Compose, плагин
    # Compare exactly with the release's .sha256 files. A mismatch means STOP.
    ```
 
-3. **Подготовьте плагин на компьютере.**
+3. **Prepare the plugin on the computer.**
 
-   Извлеките из архива и прочитайте [установщик](<tools/install-host.ps1>). В командах ниже замените заполнители: путь к скрипту и адрес компьютера в домашней сети или Tailscale. Если дополнительный адрес не нужен, удалите второй элемент массива.
+   Extract the [installer](<tools/install-host.ps1>) from the archive and read it. In the commands below, replace the placeholders: the path to the script and the computer's address on your home network or in Tailscale. If you do not need an additional address, remove the second element of the array.
 
    ```powershell
    $installer = '<ABSOLUTE_REVIEWED_INSTALL_HOST_PS1>'
@@ -124,27 +126,27 @@ Android-клиент написан на Kotlin и Jetpack Compose, плагин
    & $installer -ZipPath $zip -Hosts $hosts
    ```
 
-   Этот шаг готовит файлы и конфигурацию, но еще не подключает плагин к DSH.
+   This step prepares the files and configuration but does not yet connect the plugin to DSH.
 
-4. **Активируйте плагин.**
+4. **Activate the plugin.**
 
-   После проверки предлагаемых изменений:
+   After reviewing the proposed changes:
 
    ```powershell
    & $installer -ZipPath $zip -Hosts $hosts -Activate
    ```
 
-   Установщик не перезапускает DSH. Если плагин не запустился, следуйте диагностике в [инструкции](<docs/SETUP.md>): перезапуск может потребоваться, но согласуется отдельно.
+   The installer does not restart DSH. If the plugin has not started, follow the troubleshooting steps in the [guide](<docs/SETUP.md>): a restart may be needed, but it is approved separately.
 
-   Если для домашнего Wi‑Fi нужно правило брандмауэра Windows, добавляйте его только с согласия владельца и только для частной сети. Установщик не меняет брандмауэр автоматически.
+   If home Wi‑Fi needs a Windows Firewall rule, add it only with the owner's consent and only for the private network. The installer does not change the firewall automatically.
 
-5. **Установите APK на телефон.**
+5. **Install the APK on the phone.**
 
-   Разрешите Android установку из выбранного источника. После установки отключите это разрешение.
+   Allow Android to install apps from the chosen source. Turn this permission off after installation.
 
-6. **Привяжите телефон по QR-коду.**
+6. **Pair the phone with a QR code.**
 
-   На компьютере укажите каталог установленной версии плагина и проверьте конфигурацию:
+   On the computer, specify the directory of the installed plugin version and check the configuration:
 
    ```powershell
    $plugin = '<EXACT_LOCALAPPDATA_DSHMOBILE_PLUGIN_VERSION_DIRECTORY>'
@@ -153,105 +155,95 @@ Android-клиент написан на Kotlin и Jetpack Compose, плагин
    node $cli verify-config --config $config
    ```
 
-   Затем выберите **одну** команду привязки. Только чтение всех текущих и будущих проектов:
+   Then choose **one** pairing command. Read-only access to all current and future projects:
 
    ```powershell
    node $cli pair --config $config --read all --ttl 300 --qr
    ```
 
-   Или чтение **и запуск задач** во всех этих проектах — только если вы согласны дать телефону такие права:
+   Or read access **and running tasks** in all of these projects — only if you agree to give the phone these rights:
 
    ```powershell
    node $cli pair --config $config --read all --execute all --ttl 300 --qr
    ```
 
-   В приложении нажмите «Сканировать QR-код», сверьте адрес компьютера и отпечаток сертификата, затем подтвердите привязку. Камера нужна только для сканирования; код распознается без сети и без сервисов Google.
+   In the app, tap “Scan QR code”, check the computer's address and the certificate fingerprint, then confirm pairing. The camera is used only for scanning; the code is recognized without a network and without Google services.
 
-**Для работы вне дома** установите Tailscale на компьютер и телефон, подключите их к своей сети Tailscale и укажите имя компьютера при подготовке плагина. Открывать порт на роутере не нужно. Альтернатива — [собственный relay на VPS](<docs/RELAY_DEPLOYMENT.md>).
+**To use it away from home,** install Tailscale on the computer and the phone, connect both to your Tailscale network and specify the computer's name when preparing the plugin. You do not need to open a port on your router. The alternative is [your own relay on a VPS](<docs/RELAY_DEPLOYMENT.md>).
 
-**Обновление с 0.7.1 и более ранних версий:** APK 0.8.0 подписан тем же ключом, что и все прежние релизы, и устанавливается поверх без удаления приложения. На телефоне владельца проверена установка 0.8.0 поверх 0.7.1: чаты и привязка сохранились; настройки при таком обновлении тоже сохраняются. Ранее там же проверены переходы 0.6.1 → 0.7.0 и 0.7.0 → 0.7.1, установка 0.7.1 поверх опубликованного 0.7.0 — также на эмуляторе Android 11. Плагин обновляется до 0.7.0 установщиком из нового архива с ключами `-Upgrade -Activate`: установщик заменяет блок плагина в профиле DSH, а DSH подхватывает новую версию на лету. Агенты продолжают работать, телефон ненадолго теряет связь. Если новый плагин не начал принимать подключения — например, в DSH не включена горячая перезагрузка, — DSH нужно перезапустить. Перезапуск завершает идущие ходы агентов, поэтому делайте его, когда агенты ничего не выполняют. Переход плагина 0.5.1 → 0.6.0 проверен на тестовой копии с сохранением конфигурации, TLS-ключа и остального содержимого профиля. Порядок обновления и отката описан в [инструкции](<docs/SETUP.md>).
+**Upgrading from 0.7.1 and earlier:** APK 0.8.0 is signed with the same key as all previous releases and installs over them without uninstalling the app. Installing 0.8.0 over 0.7.1 was verified on the owner's phone: chats and pairing were kept; settings are kept on such an upgrade as well. Earlier, the 0.6.1 → 0.7.0 and 0.7.0 → 0.7.1 upgrades were verified on the same phone, and installing 0.7.1 over the published 0.7.0 was also verified on an Android 11 emulator. The plugin is upgraded to 0.7.0 by the installer from the new archive with the `-Upgrade -Activate` switches: the installer replaces the plugin block in the DSH profile, and DSH picks up the new version on the fly. Agents keep working, and the phone briefly loses its connection. If the new plugin has not started accepting connections — for example, because hot reload is not enabled in DSH — DSH has to be restarted. A restart ends the agents' running turns, so do it when the agents are not running anything. The plugin upgrade 0.5.1 → 0.6.0 was verified on a test copy, with the configuration, the TLS key and the rest of the profile contents preserved. The upgrade and rollback procedure is described in the [guide](<docs/SETUP.md>).
 
-Приложение 0.8.0 показывает новые функции, только если подключенный плагин сообщает о них, поэтому с плагином 0.6.0 оно продолжает работать — без новых функций. Приложение 0.7.0 на телефоне проверено и с плагином 0.5.1: без индикатора субагентов и с более медленным первым открытием чата. Приложение 0.6.1 совместимо с плагином 0.6.0 по протоколу.
+App 0.8.0 shows new features only if the connected plugin reports them, so it keeps working with plugin 0.6.0 — without the new features. App 0.7.0 was also verified on the phone with plugin 0.5.1: without the subagent indicator and with a slower first opening of a chat. App 0.6.1 is protocol-compatible with plugin 0.6.0.
 
-## Безопасность
+## Security
 
-- **Права агента остаются прежними.** Плагин работает внутри DSH с его правами. Фильтр по проектам — не песочница: агент с телефона может делать то же, что и с компьютера. Право запуска задач давайте только доверенным устройствам.
-- **Приглашение — секрет.** QR-код одноразовый и действует не дольше 15 минут. Не публикуйте его, не отправляйте в чат и не сохраняйте в общие журналы. При привязке проверяются сертификат компьютера, его срок действия, адрес и закрепленный отпечаток.
-- **Ключи провайдеров не передаются на телефон.** Данные привязки защищены Android Keystore и исключены из резервных копий. Приватные файлы плагина на Windows доступны только владельцу учетной записи.
-- **Потерянный телефон нужно отозвать на компьютере.** Локальный выход из приложения удаляет данные привязки с телефона, но не означает отзыв доступа на стороне DSH.
-- **Уведомления не содержат текста ответа.** В уведомлении «Ответ готов» — только названия проекта и чата. Уведомление о вопросе агента на разблокированном телефоне показывает текст первого вопроса, а на экране блокировки — только название чата. На экране блокировки содержимое чата скрыто.
-- **Relay не видит содержимое чатов.** Он пересылает зашифрованный трафик, но видит IP-адреса, время и объем передачи.
+- **Agent permissions stay the same.** The plugin runs inside DSH with its permissions. Project filtering is not a sandbox: an agent can do the same from the phone as from the computer. Give the right to run tasks only to trusted devices.
+- **The invitation is a secret.** The QR code is single-use and valid for no more than 15 minutes. Do not publish it, send it to a chat or save it in shared logs. Pairing checks the computer's certificate, its validity period, the address and the pinned fingerprint.
+- **Provider keys are not sent to the phone.** Pairing data is protected by Android Keystore and excluded from backups. The plugin's private files on Windows are accessible only to the owner of the user account.
+- **Revoke a lost phone on the computer.** Signing out of the app locally deletes the pairing data from the phone but does not revoke access on the DSH side.
+- **Notifications contain no reply text.** The “Answer ready” notification shows only the project and chat names. A notification about an agent question shows the text of the first question on an unlocked phone and only the chat name on the lock screen. Chat content is hidden on the lock screen.
+- **The relay does not see chat contents.** It forwards encrypted traffic but sees IP addresses, timing and the amount of data transferred.
 
-Не публикуйте наружу веб-порт DSH и не отключайте проверку TLS. Подробнее — в [описании безопасности](<docs/SECURITY.md>).
+Do not expose the DSH web port to the outside and do not disable TLS verification. Details are in the [security overview](<docs/SECURITY.md>).
 
-## Сборка из исходников
+## Building from source
 
-Из корня репозитория, в PowerShell:
+From the repository root, in PowerShell:
 
 ```powershell
-cd host;  npm ci; npm ci --prefix ../relay; npm run check   # плагин-компаньон, Node 24; тестам нужен соседний relay
+cd host;  npm ci; npm ci --prefix ../relay; npm run check   # companion plugin, Node 24; the tests need the neighboring relay
 cd ..\android
 powershell -NoProfile -ExecutionPolicy Bypass -Command "& ../tools/android-build.ps1 -Tasks ':app:assembleDebug', ':app:testDebugUnitTest', ':app:lintDebug'"
 ```
 
-Рекомендуется JDK 21; Windows-помощник также поддерживает JDK 17. Нужны Android SDK platform 36 и build-tools 36.0.0.
+JDK 21 is recommended; the Windows helper also supports JDK 17. You need Android SDK platform 36 and build-tools 36.0.0.
 
-Обычная release-сборка APK не подписана и не устанавливается как есть. Сборка, упаковка плагина и подпись своим ключом описаны в [инструкции по сборке](<docs/BUILD.md>) и [инструкции выпуска APK](<docs/ANDROID_RELEASE.md>).
+A regular release build of the APK is unsigned and cannot be installed as is. Building, packaging the plugin and signing with your own key are described in the [build guide](<docs/BUILD.md>) and the [APK release guide](<docs/ANDROID_RELEASE.md>).
 
-## Проверки релиза 0.8.0
+## Release 0.8.0 checks
 
-Релиз 0.8.0 обновляет приложение до 0.8.0 и плагин-компаньон до 0.7.0. Relay и установщик с 0.7.0 не менялись, поэтому их строки ниже — проверки [релиза 0.7.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.0).
+Release 0.8.0 updates the app to 0.8.0 and the companion plugin to 0.7.0. The relay and the installer have not changed since 0.7.0, so their rows below are the checks of [release 0.7.0](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.7.0).
 
-| Часть | Что проверено |
+| Component | What was checked |
 |---|---|
-| Android 0.8.0 | 280 модульных тестов; Android lint без ошибок. Инструментальные тесты: 45 из 45 на эмуляторе Android 11 и 45 из 45 на эмуляторе Android 16 |
-| Подпись APK | Release APK подписан; подпись и выравнивание проверены. Сертификат тот же, что у всех прежних релизов |
-| Обновление | На OnePlus 15 владельца (Android 16) APK 0.8.0 установлен поверх 0.7.1: версия 0.8.0, чаты и привязка сохранились |
-| Плагин 0.7.0 | 241 тест: 237 проходят, 4 пропущены — это необязательные интеграционные тесты, которые запускаются, только если указать установленный модуль DSH и OpenSSL. Канареечный тест на изолированной установленной копии DSH пройден |
-| Плагин в рабочем DSH | Плагин 0.7.0 работает в DSH владельца с 20 октября 2026 года. Его включил автоматический холодный перезапуск с проверками состояния и откатом. После перезапуска плагин сообщает обо всех новых функциях: «Направить», очередь, переименование, модели, вопросы, пропуск вопроса, вложения, скачивание файлов, уведомления |
-| На телефоне владельца | Владелец пользуется приложением 0.8.0 со своим рабочим DSH |
-| Совместимость с DSH | Поддерживаются те же версии: `0.2.0-rc.2` и `0.2.1-alpha.1` |
-| Relay (не менялся с 0.7.0) | 18 тестов |
-| Установщик (не менялся с 0.7.0) | 28 сценариев; отдельно 9 проверок обновления 0.5.1 → 0.6.0 на тестовой копии с сохранением конфигурации, TLS-ключа и остального содержимого профиля |
-| Разрешения APK | Интернет, камера, внутреннее служебное; уведомления и фоновая служба — только при включенных уведомлениях. Без телеметрии и сервисов Google |
+| Android 0.8.0 | 280 unit tests; Android lint with no errors. Instrumented tests: 45 of 45 on an Android 11 emulator and 45 of 45 on an Android 16 emulator |
+| APK signature | The release APK is signed; the signature and alignment were verified. The certificate is the same as in all previous releases |
+| Upgrade | On the owner's OnePlus 15 (Android 16), APK 0.8.0 was installed over 0.7.1: version 0.8.0, chats and pairing kept |
+| Plugin 0.7.0 | 241 tests: 237 pass, 4 are skipped — these are optional integration tests that run only if an installed DSH module and OpenSSL are specified. A canary test on an isolated installed copy of DSH passed |
+| Plugin in the owner's working DSH | Plugin 0.7.0 has been running in the owner's DSH since October 20, 2026. It was enabled by an automatic cold restart with health checks and rollback. After the restart, the plugin reports all the new features: Steer, the queue, renaming, models, questions, skipping a question, attachments, file downloads, notifications |
+| On the owner's phone | The owner uses app 0.8.0 with his working DSH |
+| DSH compatibility | The same versions are supported: `0.2.0-rc.2` and `0.2.1-alpha.1` |
+| Relay (unchanged since 0.7.0) | 18 tests |
+| Installer (unchanged since 0.7.0) | 28 scenarios; separately, 9 checks of the 0.5.1 → 0.6.0 upgrade on a test copy, with the configuration, the TLS key and the rest of the profile contents preserved |
+| APK permissions | Internet, camera, an internal service permission; notifications and the foreground service only when notifications are enabled. No telemetry and no Google services |
 
-## Ограничения
+## Limitations
 
-- **Компьютер и DSH должны быть включены.** Телефон не запускает агента автономно.
-- **Уведомления зависят от фонового соединения.** Push через Google (FCM) нет. Пока уведомления включены, в шторке видна запись «DSH Mobile на связи»; Android может остановить это соединение. После перезагрузки телефона или принудительной остановки приложение нужно открыть снова.
-- **Экономия батареи у некоторых производителей может задерживать доставку уведомлений.** Push через UnifiedPush — в планах.
-- **Подтверждения действий агента — на компьютере.** DSH не дает плагинам доступа к ним. На вопросы агента можно отвечать с телефона, если на компьютере установлен плагин 0.7.0.
-- **Новые функции 0.8.0 требуют плагина 0.7.0.** С плагином 0.6.0 приложение работает без них.
-- **Одна привязка — один компьютер.** В списке учитываются первые 100 зарегистрированных проектов. Полной истории переписки без связи с компьютером нет.
-- **Обновление DSH требует проверки совместимости.** Плагин сверяет версию из своих настроек, а не фактически установленную. Поддерживаются только указанные выше проверенные версии.
-- **Обрыв связи не означает, что задача не отправлена.** Приложение сверяет ее статус с компьютером. Если доставка осталась неопределенной, проверьте результат на компьютере, прежде чем отправлять задачу заново.
+- **The computer and DSH must be on.** The phone does not run the agent on its own.
+- **Notifications depend on a background connection.** There is no push through Google (FCM). While notifications are on, a “DSH Mobile connected” entry is visible in the notification shade; Android may stop this connection. After the phone restarts or the app is force-stopped, open the app again.
+- **Battery saving on some manufacturers' phones may delay notifications.** Push through UnifiedPush is planned.
+- **Approvals of agent actions happen on the computer.** DSH does not give plugins access to them. You can answer the agent's questions from the phone if plugin 0.7.0 is installed on the computer.
+- **The new 0.8.0 features require plugin 0.7.0.** With plugin 0.6.0 the app works without them.
+- **One pairing, one computer.** The list includes the first 100 registered projects. The full conversation history is not available without a connection to the computer.
+- **Updating DSH requires a compatibility check.** The plugin checks the version from its settings, not the version actually installed. Only the verified versions listed above are supported.
+- **A dropped connection does not mean the task was not sent.** The app checks its status with the computer. If delivery is still uncertain, check the result on the computer before sending the task again.
 
-## Документация
+## Documentation
 
-- [Установка, обновление и удаление](<docs/SETUP.md>)
-- [Архитектура](<docs/ARCHITECTURE.md>)
-- [Протокол мобильного клиента](<docs/PROTOCOL.md>)
-- [Безопасность](<docs/SECURITY.md>)
-- [Интеграция с DSH](<docs/DSH_INTEGRATION.md>)
-- [Развертывание своего relay](<docs/RELAY_DEPLOYMENT.md>) и [его протокол](<docs/RELAY_PROTOCOL.md>)
-- [Сборка из исходников](<docs/BUILD.md>)
-- [Подпись и выпуск Android APK](<docs/ANDROID_RELEASE.md>)
-- [Участие в проекте](<CONTRIBUTING.md>)
+- [Installation, upgrade and removal](<docs/SETUP.md>)
+- [Architecture](<docs/ARCHITECTURE.md>)
+- [Mobile client protocol](<docs/PROTOCOL.md>)
+- [Security](<docs/SECURITY.md>)
+- [DSH integration](<docs/DSH_INTEGRATION.md>)
+- [Deploying your own relay](<docs/RELAY_DEPLOYMENT.md>) and [its protocol](<docs/RELAY_PROTOCOL.md>)
+- [Building from source](<docs/BUILD.md>)
+- [Signing and releasing the Android APK](<docs/ANDROID_RELEASE.md>)
+- [Contributing](<CONTRIBUTING.md>)
 
-## Нужно похожее решение?
+## Need something similar?
 
-Проект сделал [Павел Логачев](https://github.com/pavel-logachev). Делаю сайты, веб-сервисы, Telegram-ботов, приложения и автоматизацию под задачу: сам разбираю, делаю и запускаю. 20 лет в ИТ: инженер, затем руководитель проектов. Расскажите о задаче [на почту](mailto:pavel@logachev.net) или [в Telegram](https://t.me/pavel_logachev) — разбор на 20–30 минут бесплатный, готовое ТЗ не нужно. Цены и другие проекты — на [logachev.net](https://logachev.net/) и [в профиле](https://github.com/pavel-logachev).
+This project was built by [Pavel Logachev](https://github.com/pavel-logachev). I build websites, web services, Telegram bots, apps and automation for your task: I work out the task, build the solution and launch it myself. 20 years in IT: first as an engineer, then as a project manager. Tell me about your task [by email](mailto:pavel@logachev.net) or [on Telegram](https://t.me/pavel_logachev) — a 20–30 minute review is free, and you do not need a ready-made specification. Prices and other projects are on [logachev.net](https://logachev.net/) and [in my profile](https://github.com/pavel-logachev).
 
-## English
+## License
 
-DSH Mobile is an unofficial Android client for DeepSeek Harness, developed independently of DeepSeek. Your agent runs on your computer; your phone lets you browse chats across projects, send tasks with photos and files, follow live Markdown replies with inline images, queue a message while the agent is working or steer it so the agent gets it at its next step, answer the agent's questions, rename a chat or change its model, and stop a run. Optional notifications tell you when an answer is ready or the agent has a question. Models, tools, subscriptions and canonical history stay on the computer.
-
-Pair with a one-use QR code and connect over Wi‑Fi, Tailscale or your own optional relay. DSH Mobile provides no hosted cloud server or shared relay. A companion plugin exposes a narrow HTTPS API, not the DSH web UI. The phone verifies the computer's pinned certificate, and each device has revocable permissions. Project filtering is not a sandbox: agents retain their desktop tool permissions.
-
-Requires Android 8.0+, Windows, DSH `0.2.0-rc.2` or `0.2.1-alpha.1`, Node.js 24.x and OpenSSL 3. [Download the signed APK and host package](https://github.com/pavel-logachev/dsh-mobile/releases/tag/v0.8.0) and follow the [setup guide](<docs/SETUP.md>), or give it to your DSH agent. The new 0.8.0 features need host plugin 0.7.0 from the same release; with plugin 0.6.0 the app keeps working without them. The computer must remain on. Notifications use an opt-in foreground connection without Google services. Approvals of agent actions still require the desktop.
-
-Built by [Pavel Logachev](https://github.com/pavel-logachev): 20 years in IT, first as an engineer, then as a project manager. I build websites, web services, Telegram bots, apps and automation for your task. Have a similar one? [pavel@logachev.net](mailto:pavel@logachev.net) · [logachev.net](https://logachev.net/)
-
-## Лицензия
-
-[MIT](<LICENSE>) © 2026 Pavel Logachev. Сторонние зависимости распространяются под своими лицензиями.
+[MIT](<LICENSE>) © 2026 Pavel Logachev. Third-party dependencies are distributed under their own licenses.
