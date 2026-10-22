@@ -83,6 +83,8 @@ class PhonePlatformJourneyTest {
         val share = File(dir, "share-synthetic-expired.txt").apply { writeText("Synthetic"); setLastModified(System.currentTimeMillis() - dev.dshmobile.app.ui.chat.TemporaryMedia.SHARE_TTL_MS - 1) }
         val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.media", share)
         try { context.contentResolver.openInputStream(uri)?.close(); fail("Expired export opened") } catch (_: java.io.FileNotFoundException) { }
+        // Provider refuses expired shares; draft-aware cleanup owns deletion/revocation.
+        dev.dshmobile.app.ui.chat.TemporaryMedia.cleanupShares(context)
         assertFalse(share.exists())
         val camera = File(dir, "camera-synthetic-orphan.jpg").apply { writeText("Synthetic"); setLastModified(System.currentTimeMillis() - dev.dshmobile.app.ui.chat.TemporaryMedia.CAMERA_TTL_MS - 1) }
         dev.dshmobile.app.ui.chat.TemporaryMedia.cleanup(context, emptyList())
@@ -109,6 +111,7 @@ class PhonePlatformJourneyTest {
             // SystemUI auto-group summary repeats question text but launches MAIN, not OPEN_CHAT.
             // Expand the DSH group, then click only the exact question in the real child row.
             val exactQuestion: (AccessibilityNodeInfo) -> Boolean = { node -> node.isVisibleToUser && node.text?.toString() == "Which synthetic check?" }
+            if (android.os.Build.VERSION.SDK_INT < 36) {
             val expand = awaitNode { node -> node.isVisibleToUser && node.viewIdResourceName == "android:id/expand_button" && node.parent?.parent?.let { header ->
                 fun containsApp(parent: AccessibilityNodeInfo): Boolean = parent.text?.toString() == "DSH Mobile" || (0 until parent.childCount).any { index -> parent.getChild(index)?.let(::containsApp) == true }
                 containsApp(header)
@@ -116,6 +119,7 @@ class PhonePlatformJourneyTest {
             val expandBounds = android.graphics.Rect(); expand.getBoundsInScreen(expandBounds)
             instrumentation.uiAutomation.executeShellCommand("input tap ${expandBounds.centerX()} ${expandBounds.centerY()}").use { descriptor ->
                 android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() }
+            }
             }
             instrumentation.uiAutomation.waitForIdle(500, 3000)
             val questionNode = awaitNode(exactQuestion)
@@ -128,6 +132,8 @@ class PhonePlatformJourneyTest {
             compose.onNodeWithTag("question_submit").performClick()
             compose.waitUntil(15000) { compose.onAllNodesWithTag("question_record_question").fetchSemanticsNodes().isNotEmpty() }
             compose.waitUntil(10000) { manager.activeNotifications.none { it.notification.extras.getBoolean("dev.dshmobile.questionAlert") } }
+            // SINGLE_TOP replaces the Activity intent; restore ActivityScenario's launch identity for teardown.
+            scenario.onActivity { it.intent = android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_LAUNCHER).setClass(context, MainActivity::class.java) }
         } } finally { context.stopService(intent); manager.cancelAll() }
     }
     @Test fun photoPickerUploadsAndSends() {
@@ -139,14 +145,26 @@ class PhonePlatformJourneyTest {
         context.contentResolver.openOutputStream(uri)!!.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
         try { ActivityScenario.launch(MainActivity::class.java).use {
             openChat(); attach(context.getString(dev.dshmobile.app.R.string.mobile_attach_photos))
+            // API 30 uses DocumentsUI fallback rather than the platform Photo Picker.
+            if (android.os.Build.VERSION.SDK_INT < 33) {
+                clickSystem("Show roots", "Показать корни", "Открыть список")
+                clickSystem("Images", "Изображения")
+                val pictures = awaitNode { it.isVisibleToUser && it.text?.toString() == "Pictures" }
+                var folder: AccessibilityNodeInfo? = pictures
+                while (folder != null && folder.viewIdResourceName?.endsWith(":id/item_root") != true) folder = folder.parent
+                check(requireNotNull(folder).performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            }
             // Do not match explanatory text «доступ ... фотографиям» as a photo tile.
-            val photo = awaitNode { node -> node.isVisibleToUser && (node.contentDescription?.startsWith("Фото, дата") == true || node.contentDescription?.startsWith("Photo taken") == true) }
-            val photoBounds = android.graphics.Rect(); photo.getBoundsInScreen(photoBounds)
-            instrumentation.uiAutomation.executeShellCommand("input tap ${photoBounds.centerX()} ${photoBounds.centerY()}").use { descriptor ->
-                android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() }
+            val photo = awaitNode { node -> node.isVisibleToUser && (node.text?.toString() == "phone08-synthetic.png" || node.contentDescription?.startsWith("phone08-synthetic.png,") == true || node.contentDescription?.startsWith("Фото, дата") == true || node.contentDescription?.startsWith("Photo taken") == true) }
+            if (android.os.Build.VERSION.SDK_INT < 33) check(photo.performAction(AccessibilityNodeInfo.ACTION_CLICK)) else {
+                val photoBounds = android.graphics.Rect(); photo.getBoundsInScreen(photoBounds)
+                instrumentation.uiAutomation.executeShellCommand("input tap ${photoBounds.centerX()} ${photoBounds.centerY()}").use { descriptor ->
+                    android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() }
+                }
             }
             // Cloud picker variants expose a single-photo confirmation or return immediately.
-            if (instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() != context.packageName) {
+            instrumentation.uiAutomation.waitForIdle(500, 3000)
+            if (instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()?.contains("documentsui") == true || instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()?.contains("photopicker") == true) {
                 clickSystem("Add", "Добавить", "Done", "Готово", "Выбрать", "Select")
             }
             compose.waitUntil(15000) { compose.onAllNodesWithContentDescription("PNG", substring = true).fetchSemanticsNodes().isNotEmpty() }
@@ -174,10 +192,12 @@ class PhonePlatformJourneyTest {
             compose.waitUntil(15000) { compose.onAllNodesWithTag("image_viewer").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("image_viewer").performTouchInput { click() }
             compose.waitUntil(5000) { compose.onAllNodesWithTag("viewer_save").fetchSemanticsNodes().isNotEmpty() }
+            fun savedImages() = context.contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media._ID), "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("synthetic%"), null)?.use { it.count } ?: 0
+            val beforeSave = savedImages()
             compose.onNodeWithTag("viewer_save").performClick()
-            compose.waitUntil(5000) { context.contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media._ID), "${MediaStore.Images.Media.DISPLAY_NAME} = ?", arrayOf("synthetic.png"), null)?.use { it.count > 0 } == true }
+            compose.waitUntil(10000) { savedImages() > beforeSave }
             compose.onNodeWithTag("viewer_share").performClick()
-            awaitNode { it.viewIdResourceName == "com.android.intentresolver:id/headline" || it.text?.toString()?.contains("Sharing", true) == true }
+            awaitNode { it.viewIdResourceName in listOf("com.android.intentresolver:id/headline", "android:id/chooser_header") || it.text?.toString()?.contains("Sharing", true) == true }
             assertTrue(File(context.cacheDir, "shared-media").listFiles().orEmpty().any { it.name.startsWith("share-") })
             instrumentation.uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
         }
@@ -187,8 +207,10 @@ class PhonePlatformJourneyTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             openChat()
             compose.onNodeWithTag("chat_timeline").performScrollToNode(hasTestTag("file_open_synthetic-file"))
+            fun downloadedFiles() = context.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Downloads._ID), "${MediaStore.Downloads.DISPLAY_NAME} LIKE ?", arrayOf("synthetic%"), null)?.use { it.count } ?: 0
+            val beforeDownload = downloadedFiles()
             compose.onNodeWithTag("file_open_synthetic-file").performScrollTo().performClick()
-            compose.waitUntil(15000) { context.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Downloads._ID), "${MediaStore.Downloads.DISPLAY_NAME} = ?", arrayOf("synthetic.txt"), null)?.use { it.count > 0 } == true }
+            compose.waitUntil(15000) { downloadedFiles() > beforeDownload }
             awaitNode { it.packageName?.toString() != context.packageName && (it.viewIdResourceName?.contains("resolver") == true || it.text?.toString()?.contains("Synthetic") == true || it.text?.toString()?.contains("Отправ") == true) }
             instrumentation.uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
         }
@@ -202,9 +224,20 @@ class PhonePlatformJourneyTest {
         context.contentResolver.openOutputStream(uri)!!.use { it.write("Synthetic file only".toByteArray()) }
         try { ActivityScenario.launch(MainActivity::class.java).use {
             openChat(); attach(context.getString(dev.dshmobile.app.R.string.mobile_attach_files))
-            clickSystem(name)
-            try { compose.waitUntil(15000) { compose.onAllNodesWithContentDescription("TXT", substring = true).fetchSemanticsNodes().isNotEmpty() } }
-            catch (failure: Exception) { compose.onRoot().printToLog("SyntheticPlatform"); throw failure }
+            if (android.os.Build.VERSION.SDK_INT < 33) {
+                clickSystem("Show roots", "Показать корни", "Открыть список")
+                clickSystem("Downloads", "Загрузки")
+            }
+            val document = awaitNode { it.isVisibleToUser && it.text?.toString() == name }
+            var row: AccessibilityNodeInfo? = document
+            while (row != null && row.viewIdResourceName?.endsWith(":id/item_root") != true) row = row.parent
+            check(requireNotNull(row).performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            // DocumentsUI multi-select requires an explicit confirmation after selecting the row.
+            instrumentation.uiAutomation.waitForIdle(500, 3000)
+            if (instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()?.contains("documentsui") == true || instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()?.contains("photopicker") == true) {
+                clickSystem("Open", "Открыть", "Select", "Выбрать")
+            }
+            compose.waitUntil(15000) { try { compose.onAllNodesWithContentDescription("TXT", substring = true).fetchSemanticsNodes().isNotEmpty() } catch (_: IllegalStateException) { false } }
             compose.onNodeWithTag("send_message").assertIsEnabled().performClick()
             compose.waitUntil(15000) { compose.onAllNodesWithContentDescription("TXT", substring = true).fetchSemanticsNodes().isEmpty() }
         } } finally { context.contentResolver.delete(uri, null, null) }
