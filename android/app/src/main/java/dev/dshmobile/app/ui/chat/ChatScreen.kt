@@ -25,6 +25,10 @@ import dev.dshmobile.app.ui.theme.ControlSize
 import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.theme.LocalMobileColors
 import dev.dshmobile.app.ui.theme.Spacing
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.motionEnabled
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -70,6 +74,7 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
     LaunchedEffect(snapshot?.session?.id, currentModel) { if (currentModel != null && state.capabilities?.models == true && model.modelCatalog == null) model.loadModels() }
     val modelName = currentModel?.let { selected -> model.modelCatalog?.items?.find { it.provider == selected.provider && it.id == selected.model }?.name ?: selected.model }
     val header = snapshot?.session ?: state.sessions.firstOrNull { it.id == requestedSession }
+    val motion = motionEnabled
     Scaffold(containerColor = MaterialTheme.colorScheme.background, snackbarHost = { SnackbarHost(snackbars) },
         topBar = { CenterAlignedTopAppBar(navigationIcon = {
             IconButton(onClick = onBack, modifier = Modifier.testTag("chat_drawer")) { Icon(MobileIcons.ChevronLeft, stringResource(R.string.mobile_chats), Modifier.size(IconSize.Action)) }
@@ -121,15 +126,23 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
             scrolledContainerColor = MaterialTheme.colorScheme.background)) },
         bottomBar = {
             Column {
-                snapshot?.takeIf { it.activity in listOf("running", "waiting") || (it.activity == "idle" && it.session.runningSubagents > 0) }?.let { ActivityRow(it, state.capabilities?.questions == true && it.pendingQuestions.isNotEmpty()) }
+                val activity = snapshot?.takeIf { it.activity in listOf("running", "waiting") || (it.activity == "idle" && it.session.runningSubagents > 0) }
+                // The row rises out of the composer and folds back into it; while leaving it keeps its last words.
+                val heldActivity = remember { arrayOfNulls<SessionSnapshot>(1) }
+                if (activity != null) heldActivity[0] = activity
+                AnimatedVisibility(activity != null, enter = Motion.riseIn(motion), exit = Motion.riseOut(motion), label = "activity row") {
+                    heldActivity[0]?.let { ActivityRow(it, state.capabilities?.questions == true && it.pendingQuestions.isNotEmpty()) }
+                }
                 Composer(visibleState, model, onCancel = { cancel = true }, onModels = { imagesNeeded = true; models = true; model.loadModels() })
             }
         }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).testTag("chat_screen")) {
-            if (searching) HistorySearchBar(query, { query = it }, matches.size, if (selectedMatch == null) -1 else matches.indexOf(selectedMatch),
-                onPrevious = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, -1) },
-                onNext = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, 1) },
-                onClose = { searching = false; query = "" })
+            AnimatedVisibility(searching, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "history search") {
+                HistorySearchBar(query, { query = it }, matches.size, if (selectedMatch == null) -1 else matches.indexOf(selectedMatch),
+                    onPrevious = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, -1) },
+                    onNext = { matchIndex = nextSearchIndex(matches.indexOf(selectedMatch), matches.size, 1) },
+                    onClose = { searching = false; query = "" })
+            }
             val staleText = if (snapshot != null && state.snapshotStale)
                 stringResource(if (state.busy || model.interactionBlocked) R.string.mobile_short_syncing else R.string.mobile_stale_state) else null
             // Off-line, the stale-state explanation is the strip's second row instead of a separate third line.
@@ -137,7 +150,8 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
             if (state.connection == ConnectionState.ONLINE) state.error?.let { ErrorText(it, Modifier.padding(horizontal = Spacing.Gutter, vertical = Spacing.S)) }
             if (state.demo) {
                 // Opaque band with a hairline: the timeline scrolls under an edge, not under floating text.
-                Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(horizontal = Spacing.Gutter, vertical = 6.dp)) { DemoBadge() }
+                // The band grows with the badge (it wraps at large font scales) and keeps the 8dp rhythm under the top bar.
+                Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(horizontal = Spacing.Gutter, vertical = Spacing.S)) { DemoBadge() }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             if (staleText != null && state.connection == ConnectionState.ONLINE) Text(staleText,

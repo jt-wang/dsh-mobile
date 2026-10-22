@@ -1,6 +1,13 @@
 package dev.dshmobile.app.ui.home
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.motionEnabled
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -83,8 +90,27 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
             if (state.connection == ConnectionState.ONLINE) state.error?.let { ErrorText(it, Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
             pendingDelivery()
             val pull = rememberPullToRefreshState()
-            val refreshing = state.manualRefreshing
-            PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, state = pull,
+            // The repository flips manualRefreshing only once it owns its lock, so a released pull could
+            // snap back and reappear (or blink for a fast refresh). Hold the indicator from the release
+            // until that refresh has started and finished, and for at least one readable spin.
+            var pulledAt by remember { mutableStateOf<Long?>(null) }
+            var started by remember { mutableStateOf(false) }
+            var outcomeAtPull by remember { mutableStateOf<Pair<Long?, String?>?>(null) }
+            val outcome = state.lastSyncedAt to state.error
+            LaunchedEffect(pulledAt, state.manualRefreshing, outcome) {
+                val since = pulledAt ?: return@LaunchedEffect
+                if (state.manualRefreshing) { started = true; return@LaunchedEffect }
+                // A very fast refresh can finish between two frames; its sync time or error still changes.
+                val finished = started || outcome != outcomeAtPull
+                kotlinx.coroutines.delay(if (finished) (MIN_REFRESH_SPIN_MS - (System.currentTimeMillis() - since)).coerceAtLeast(0) else REFRESH_START_TIMEOUT_MS)
+                pulledAt = null; started = false
+            }
+            val refreshing = state.manualRefreshing || pulledAt != null
+            // Rows fade in/out and glide to new positions (filters, new chats, reorder); off without motion.
+            val motion = motionEnabled
+            val itemFade = remember(motion) { if (motion) Motion.tween<Float>(Motion.Medium, true) else null }
+            val itemPlacement = remember(motion) { if (motion) Motion.tween<androidx.compose.ui.unit.IntOffset>(Motion.Medium, true) else null }
+            PullToRefreshBox(isRefreshing = refreshing, onRefresh = { pulledAt = System.currentTimeMillis(); started = false; outcomeAtPull = outcome; onRefresh() }, state = pull,
                 indicator = { PullToRefreshDefaults.Indicator(state = pull, isRefreshing = refreshing,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = if (searchOpen) 112.dp else 56.dp)) },
                 modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -92,7 +118,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                     // Filters scroll with the list so large landscape text cannot consume the row viewport.
                     item(key = "list-filters") {
                         Column {
-                            if (searchOpen) SearchField(query, onQuery)
+                            AnimatedVisibility(searchOpen, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "chat search") { SearchField(query, onQuery) }
                             val tabs = rememberLazyListState()
                             // Tab text starts on the gutter (row padding + the tab's own 12dp); edges fade where more tabs scroll in.
                             LazyRow(Modifier.fillMaxWidth().edgeFade(tabs).testTag("project_filters"), state = tabs,
@@ -108,7 +134,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                         }
                     }
                     if (visible.isEmpty()) item(key = LazyItemKeys.EMPTY_CHATS) {
-                        EmptyState(
+                        EmptyState(modifier = Modifier.animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade).fillMaxWidth().padding(top = 32.dp),
                             title = stringResource(when {
                                 query.isNotBlank() -> R.string.mobile_no_search_title
                                 state.connection != ConnectionState.ONLINE && sessions.isEmpty() -> R.string.mobile_offline
@@ -120,7 +146,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                                 state.connection != ConnectionState.ONLINE && sessions.isEmpty() -> R.string.mobile_history_unavailable
                                 projectId != null -> R.string.mobile_no_project_body
                                 else -> R.string.mobile_home_empty_body
-                            }), modifier = Modifier.fillMaxWidth().padding(top = 32.dp))
+                            }))
                     }
                     groups.forEach { group ->
                         item(key = LazyItemKeys.section(group.section.name)) {
@@ -129,7 +155,8 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                                 DateSection.YESTERDAY -> R.string.mobile_yesterday
                                 DateSection.THIS_WEEK -> R.string.mobile_this_week
                                 DateSection.EARLIER -> R.string.mobile_earlier
-                            }), Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 4.dp).semantics { heading() },
+                            }), Modifier.animateItem(fadeInSpec = itemFade, placementSpec = itemPlacement, fadeOutSpec = itemFade)
+                                .padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 4.dp).semantics { heading() },
                                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         items(group.sessions, key = { LazyItemKeys.session(it.id) }, contentType = { "session" }) { session ->
@@ -137,7 +164,8 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
                                 timestamp = sessionTimestamp(session.updatedAt, group.section, now, locale = locale),
                                 readOnly = !session.canExecute || state.workspaces.none { it.id == session.workspaceId && it.canExecute },
                                 enabled = !interactionBlocked && state.connection in listOf(ConnectionState.ONLINE, ConnectionState.SYNCING, ConnectionState.OFFLINE),
-                                onClick = { onSelect(session.id) })
+                                onClick = { onSelect(session.id) },
+                                modifier = Modifier.animateItem(fadeInSpec = itemFade, placementSpec = itemPlacement, fadeOutSpec = itemFade))
                         }
                     }
                     if (state.sessionsTruncated) item(key = LazyItemKeys.TRUNCATED_CHATS) {
@@ -183,6 +211,10 @@ private fun SearchField(query: String, onQuery: (String) -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("chat_search"))
 }
 
+private const val MIN_REFRESH_SPIN_MS = 600L
+/** Upper bound for a refresh that never reports start (closed repository); the lock wait itself is covered. */
+private const val REFRESH_START_TIMEOUT_MS = 8_000L
+
 internal fun sessionWorkLabel(session: SessionSummary, main: String, subagents: String, count: String, waiting: String? = null): String? = when {
     session.waitingForAnswer -> waiting
     session.running -> main + if (session.runningSubagents > 0) " · $count" else ""
@@ -205,20 +237,40 @@ private fun ProjectTab(label: String, selected: Boolean, tag: String, onClick: (
 }
 
 @Composable
-private fun SessionRow(session: SessionSummary, project: String, timestamp: String, readOnly: Boolean, enabled: Boolean, onClick: () -> Unit) {
+private fun SessionRow(session: SessionSummary, project: String, timestamp: String, readOnly: Boolean, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val work = sessionWorkLabel(session, stringResource(R.string.mobile_working),
         stringResource(R.string.mobile_subagents_working, session.runningSubagents), stringResource(R.string.mobile_subagents_count, session.runningSubagents), stringResource(R.string.mobile_waiting_for_answer))
-    val details = listOfNotNull(project, work,
-        if (readOnly) stringResource(R.string.mobile_read_only) else null).joinToString(" · ")
-    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).clickable(enabled = enabled, onClick = onClick)
+    val readOnlyLabel = if (readOnly) stringResource(R.string.mobile_read_only) else null
+    val warning = LocalMobileColors.current.warning
+    // Same words as before; only the waiting phrase takes the amber status hue, matching the glyph.
+    val details = remember(project, work, readOnlyLabel, session.waitingForAnswer, warning) {
+        buildAnnotatedString {
+            listOfNotNull(project, work, readOnlyLabel).forEachIndexed { index, part ->
+                if (index > 0) append(" · ")
+                if (session.waitingForAnswer && part == work) withStyle(SpanStyle(color = warning)) { append(part) } else append(part)
+            }
+        }
+    }
+    Row(modifier.fillMaxWidth().heightIn(min = 64.dp).clickable(enabled = enabled, onClick = onClick)
         .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 12.dp).testTag("session_${session.id}"),
         horizontalArrangement = Arrangement.spacedBy(Spacing.M), verticalAlignment = Alignment.Top) {
         // One fixed cell, centred on the first title line (22sp line height × font scale), so running and idle rows share a left edge.
         val titleLine = with(LocalDensity.current) { MaterialTheme.typography.titleMedium.lineHeight.toDp() }
-        Box(Modifier.size(ControlSize.StatusCell, maxOf(ControlSize.StatusCell, titleLine)), contentAlignment = Alignment.Center) {
-            if (session.waitingForAnswer) Icon(MobileIcons.Question, stringResource(R.string.mobile_waiting_for_answer), Modifier.size(ControlSize.StatusGlyph))
-            else if (session.running || session.runningSubagents > 0) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else IdleRing()
+        val status = when { session.waitingForAnswer -> RowStatus.WAITING; session.running || session.runningSubagents > 0 -> RowStatus.WORKING; else -> RowStatus.IDLE }
+        val waitingLabel = stringResource(R.string.mobile_waiting_for_answer)
+        // Status swaps crossfade in place; the cell never resizes, so the title does not shift.
+        val motion = motionEnabled
+        AnimatedContent(status, Modifier.size(ControlSize.StatusCell, maxOf(ControlSize.StatusCell, titleLine)), transitionSpec = { Motion.crossfade(motion) },
+            contentAlignment = Alignment.Center, label = "chat status") { shown ->
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                when (shown) {
+                    // Waiting is the one status that asks for the user: the amber status hue, as on the chat's activity row.
+                    RowStatus.WAITING -> WaitingGlyph(waitingLabel)
+                    RowStatus.WORKING -> Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke)
+                    RowStatus.IDLE -> IdleRing()
+                }
+            }
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(session.title.ifBlank { stringResource(R.string.mobile_untitled) }, Modifier.fillMaxWidth(), style = MaterialTheme.typography.titleMedium,
@@ -229,6 +281,14 @@ private fun SessionRow(session: SessionSummary, project: String, timestamp: Stri
             }
         }
     }
+}
+
+private enum class RowStatus { WAITING, WORKING, IDLE }
+
+/** "Needs your decision": the question outline in the warning hue, sized so its circle matches the 14dp ring and spinner. */
+@Composable
+private fun WaitingGlyph(label: String) {
+    Icon(MobileIcons.Question, label, Modifier.size(IconSize.Meta), tint = LocalMobileColors.current.warning)
 }
 
 /** Composer-shaped entry point: one tap opens project, preset and task text together. */

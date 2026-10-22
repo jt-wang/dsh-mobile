@@ -6,7 +6,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.animateSize
+import dev.dshmobile.app.ui.theme.motionEnabled
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,7 +50,8 @@ internal fun connectionColor(connection: ConnectionState): Color = when (connect
 @Composable
 internal fun ConnectionPill(state: MobileState, onClick: () -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
     val label = connectionLabel(state.connection)
-    Row(modifier.heightIn(min = 48.dp).widthIn(min = 48.dp).clip(CircleShape).clickable(onClick = onClick)
+    // Label changes (connecting → online) resize the pill smoothly instead of jumping.
+    Row(modifier.animateSize(motionEnabled).heightIn(min = 48.dp).widthIn(min = 48.dp).clip(CircleShape).clickable(onClick = onClick)
         .padding(horizontal = if (compact) 0.dp else 12.dp)
         .testTag("connection_state").semantics(mergeDescendants = true) {
             role = Role.Button
@@ -105,9 +111,19 @@ internal fun ConnectionDetails(state: MobileState, onDismiss: () -> Unit, onRefr
  */
 @Composable
 internal fun ConnectionIssueStrip(state: MobileState, onRefresh: () -> Unit, detail: String? = null) {
-    if (state.connection == ConnectionState.ONLINE) return
+    val motion = motionEnabled
+    // Slides open under the top bar and folds away on reconnect, showing the last issue while it leaves.
+    val held = remember { arrayOf<Pair<MobileState, String?>?>(null) }
+    if (state.connection != ConnectionState.ONLINE) held[0] = state to detail
+    AnimatedVisibility(state.connection != ConnectionState.ONLINE, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "connection issue") {
+        held[0]?.let { (shown, shownDetail) -> IssueStripContent(shown, onRefresh, shownDetail) }
+    }
+}
+
+@Composable
+private fun IssueStripContent(state: MobileState, onRefresh: () -> Unit, detail: String?) {
     val label = connectionLabel(state.connection)
-    Column {
+    Column(Modifier.animateSize(motionEnabled)) {
         Row(Modifier.fillMaxWidth().heightIn(min = ControlSize.TouchTarget).padding(start = Spacing.Gutter, end = Spacing.S), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             StatusDot(connectionColor(state.connection), pulse = state.connection in listOf(ConnectionState.CONNECTING, ConnectionState.SYNCING))

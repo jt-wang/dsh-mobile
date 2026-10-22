@@ -1,5 +1,10 @@
 package dev.dshmobile.app.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import dev.dshmobile.app.ui.theme.AnimatedKeyed
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.motionEnabled
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -82,7 +87,10 @@ internal fun QueueGroup(items: List<QueueItem>, enabled: Boolean, working: Boole
                 IconButton(onClick = { expanded = !expanded }) { Icon(if (expanded) MobileIcons.ChevronDown else MobileIcons.ChevronRight,
                     stringResource(if (expanded) R.string.mobile_queue_collapse else R.string.mobile_queue_expand)) }
             }
-            if (expanded) items.forEach { item ->
+            // The list unfolds under its header; items join and leave the open list with the same reveal.
+            val motion = motionEnabled
+            AnimatedVisibility(expanded, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "queue items") { Column {
+            AnimatedKeyed(items, key = { it.id }, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion)) { item -> Column {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 12.dp).testTag("queue_${item.id}"), verticalAlignment = Alignment.CenterVertically) {
                     if (item.attachments.isNotEmpty()) { Icon(MobileIcons.Attach, null, Modifier.size(14.dp)); Text("${item.attachments.size}", style = MaterialTheme.typography.labelSmall); Spacer(Modifier.width(6.dp)) }
@@ -95,7 +103,8 @@ internal fun QueueGroup(items: List<QueueItem>, enabled: Boolean, working: Boole
                         Icon(MobileIcons.Steer, stringResource(if (working) R.string.mobile_queue_steer_now else R.string.mobile_queue_steer_unavailable)) }
                     IconButton(onClick = { onAction(item.id, "remove") }, enabled = enabled && acting == null, modifier = Modifier.testTag("queue_remove_${item.id}")) { Icon(MobileIcons.Close, stringResource(R.string.mobile_queue_remove)) }
                 }
-            }
+            } }
+            } }
         }
     }
 }
