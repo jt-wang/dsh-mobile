@@ -4,7 +4,7 @@ export const HOST_VERSION = '0.7.0';
 export interface PhoneCapabilities { steer: boolean; queue: boolean; rename: boolean; models: boolean; questions: boolean; questionSkip?: boolean; fileDownload?: boolean; attachments: boolean }
 export type Delivery = 'queue' | 'steer';
 export interface AttachmentRef { id: string; name: string; size: number; mime: string; kind: 'image' | 'file' }
-export interface QuestionItem { id: string; header?: string; question: string; detail?: string; options: { label: string; description?: string; recommended?: boolean }[]; multiSelect: boolean; allowFreeText: boolean }
+export interface QuestionItem { id: string; header?: string; question: string; detail?: string; options: { label: string; displayLabel?: string; description?: string; recommended?: boolean }[]; multiSelect: boolean; allowFreeText: boolean }
 export interface PendingQuestion { callId: string; state: 'open' | 'continued'; questions: QuestionItem[] }
 export interface QuestionAnswer { answers: { id: string; selected: string[]; custom?: string }[] }
 export interface QueueItem { id: string; text: string; delivery: Delivery; requestId?: string; attachments?: AttachmentRef[] }
@@ -57,6 +57,11 @@ export function parseMutation(route: string, body: Record<string, unknown>): Ses
   }
   throw new HostError('invalid_request');
 }
+/** Display only: the original label remains the exact upstream answer token. */
+export function recommendedLabel(label: string): { displayLabel: string; recommended: boolean } {
+  const suffix = /\s*(?:\(\s*(?:recommended|推荐)\s*\)|（\s*(?:recommended|推荐)\s*）|\[\s*(?:recommended|推荐)\s*\]|［\s*(?:recommended|推荐)\s*］)\s*$/i;
+  return { displayLabel: label.replace(suffix, ''), recommended: suffix.test(label) };
+}
 /** Explicit projection: upstream tool payloads, host paths and arbitrary metadata cannot leak. */
 export function questionsOf(value: unknown): PendingQuestion[] {
   if (!Array.isArray(value) || value.length > 20) return [];
@@ -68,7 +73,7 @@ export function questionsOf(value: unknown): PendingQuestion[] {
       const q = record(raw); if (!q || !identifier(q.id) || typeof q.question !== 'string' || Buffer.byteLength(q.question) > 32768 || (q.header !== undefined && typeof q.header !== 'string') || (q.detail !== undefined && typeof q.detail !== 'string')) return [];
       const options: QuestionItem['options'] = [];
       if (q.options !== undefined && (!Array.isArray(q.options) || q.options.length > 100)) return [];
-      for (const raw of (q.options ?? []) as unknown[]) { const o = record(raw); if (!o || typeof o.label !== 'string' || (o.description !== undefined && typeof o.description !== 'string')) return []; options.push({ label: o.label, recommended: /\s*(?:\((?:recommended|推荐)\)|（(?:recommended|推荐)）)\s*$/i.test(o.label), ...(o.description !== undefined ? { description: o.description as string } : {}) }); }
+      for (const raw of (q.options ?? []) as unknown[]) { const o = record(raw); if (!o || typeof o.label !== 'string' || (o.description !== undefined && typeof o.description !== 'string')) return []; options.push({ label: o.label, ...recommendedLabel(o.label), ...(o.description !== undefined ? { description: o.description as string } : {}) }); }
       questions.push({ id: q.id, question: q.question, ...(q.header !== undefined ? { header: q.header as string } : {}), ...(q.detail !== undefined ? { detail: q.detail as string } : {}), options, multiSelect: q.multiSelect === true, allowFreeText: true });
     }
     return [{ callId: p.callId, state: p.state as 'open' | 'continued', questions }];
@@ -80,10 +85,18 @@ export function attachmentName(name: string): string {
   for (const point of name) { const size = Buffer.byteLength(point); if (bytes + size > 256) break; result += point; bytes += size; }
   return result;
 }
+/** Deliberately small passive-content allowlist, shared by metadata and inference. */
+export function safeFileMime(name: string, declared?: unknown): string {
+  if (/\.(?:exe|com|bat|cmd|ps1|sh|msi|dll|scr|js|mjs|cjs|html?|xhtml|svg|hta)$/i.test(name)) return 'application/octet-stream';
+  if (declared === 'application/pdf' || declared === 'text/plain') return declared;
+  if (/\.pdf$/i.test(name)) return 'application/pdf';
+  if (/\.(?:txt|log|csv|md)$/i.test(name)) return 'text/plain';
+  return 'application/octet-stream';
+}
 export function attachmentRefs(content: unknown): AttachmentRef[] {
   if (!Array.isArray(content)) return [];
   return content.flatMap(raw => { const p = record(raw), a = record(p?.attachment); if (!a || !identifier(a.attachmentId) || !Number.isSafeInteger(a.bytes) || (a.bytes as number) < 0 || !['image', 'file'].includes(p?.type as string)) return [];
-    return [{ id: a.attachmentId, name: typeof a.name === 'string' ? attachmentName(a.name.split(/[\\/]/).at(-1)!) : 'image', size: a.bytes as number, mime: p!.type === 'image' && IMAGE_MIMES.includes(a.mediaType as ImageMime) ? a.mediaType as string : 'application/octet-stream', kind: p!.type as 'image' | 'file' }]; });
+    return [{ id: a.attachmentId, name: typeof a.name === 'string' ? attachmentName(a.name.split(/[\\/]/).at(-1)!) : 'image', size: a.bytes as number, mime: p!.type === 'image' && IMAGE_MIMES.includes(a.mediaType as ImageMime) ? a.mediaType as string : safeFileMime(typeof a.name === 'string' ? a.name : '', a.mediaType ?? a.mime), kind: p!.type as 'image' | 'file' }]; });
 }
 export function safeAttachmentRefs(value: unknown): AttachmentRef[] {
   if (!Array.isArray(value) || value.length > 100) throw new HostError('internal_error');

@@ -24,6 +24,10 @@ class SubagentActivityTest {
         assertEquals("субагенты работают · 3", label(session.copy(runningSubagents = 3)))
         assertEquals("работает · субагентов: 3", label(session.copy(running = true, runningSubagents = 3)))
     }
+    @Test fun `question waiting takes precedence over main and delegated work labels`() {
+        val waiting = decodeWire<SessionSummary>(base).copy(running = true, runningSubagents = 2, waitingForAnswer = true)
+        assertEquals("Ждёт ответа", sessionWorkLabel(waiting, "Работает", "Субагенты", "2", "Ждёт ответа"))
+    }
     @Test fun `authoritative answer event displays regardless of stale list subagent count`() {
         val event = NotificationEvent(1, "event", 1, 1, 99, "project", "chat", "answer-finished", 1)
         val local = NotificationLocal(settings = NotificationSettings(enabled = true))

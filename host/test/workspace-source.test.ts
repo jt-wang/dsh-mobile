@@ -13,6 +13,18 @@ import { runAdminCli } from '../src/cli.ts';
 import { HostState } from '../src/state.ts';
 import { opening, summary } from './fixtures/rc2.ts';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+// HTTP deliberately returns 202 after its short response window. Assert the
+// durable terminal receipt, not an assumption about filesystem scheduling.
+async function settled(response: Response, lookup: () => Promise<Response>): Promise<{ httpStatus: number; receipt: any }> {
+  let receipt = await response.json(), httpStatus = response.status;
+  const deadline = Date.now() + 10_000;
+  while (response.status === 202 && receipt.status === 'pending' && Date.now() < deadline) {
+    await delay(10); const next = await lookup(); assert.equal(next.status, 200); receipt = await next.json();
+  }
+  assert.notEqual(receipt.status, 'pending', 'command must settle within the bounded test window');
+  return { httpStatus, receipt };
+}
 
 const ALPHA = '11111111-1111-4111-8111-111111111111';
 const BETA = '22222222-2222-4222-8222-222222222222';
@@ -131,7 +143,9 @@ test('registry API lists new/renamed projects and all-scope sessions live, omits
   rows.unshift({ ...summary, sessionId: 'beta-session', cwd: beta });
   assert.deepEqual((await (await request('/workspaces')).json()).items, [{ id: BETA, name: 'Бета (демо)', canExecute: true }, { id: ALPHA, name: 'Новая альфа (демо)', canExecute: true }]);
   assert.equal((await (await request('/sessions')).json()).items.length, 2);
-  assert.equal((await request('/sessions', { workspaceId: BETA, requestId: randomUUID() })).status, 201);
+  const createId = randomUUID();
+  const created = await settled(await request('/sessions', { workspaceId: BETA, requestId: createId }), () => request('/commands/' + createId));
+  assert.ok([201, 202].includes(created.httpStatus)); assert.equal(created.receipt.status, 'accepted');
   const stream = await request('/sessions/session-fixture/events'), reader = stream.body!.getReader();
   await reader.read();
   archived = ['session-fixture'];
@@ -202,8 +216,9 @@ test('mutations reject a registry workspace remap at the server-to-adapter admis
     projectId = ALPHA;
     const requestId = randomUUID();
     const response = await fetch(`${base}/v1/sessions${suffix}`, { method: 'POST', headers: { authorization: `Bearer ${device.deviceToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...body, requestId }) });
-    assert.equal(response.status, 404);
-    assert.equal((await response.json()).status, 'rejected');
+    const result = await settled(response, () => fetch(`${base}/v1/commands/${requestId}`, { headers: { authorization: `Bearer ${device.deviceToken}` } }));
+    assert.ok([404, 202].includes(result.httpStatus));
+    assert.equal(result.receipt.status, 'rejected');
     assert.equal(host.state.getCommand(device.deviceId, requestId)?.receipt.status, 'rejected');
   }
   assert.deepEqual({ prompts, cancels, creates }, { prompts: 0, cancels: 0, creates: 0 });
@@ -222,8 +237,8 @@ test('registry create with a preset attaches once and duplicate requestId return
   const device = host.state.consumePairing(host.state.createPairing({ readWorkspaceIds: ['*'], executeWorkspaceIds: ['*'] }).pairingToken, 'Synthetic phone');
   const base = (await host.start()).baseUrl, requestId = randomUUID();
   const create = (presetId: string) => fetch(`${base}/v1/sessions`, { method: 'POST', headers: { authorization: `Bearer ${device.deviceToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ requestId, workspaceId: ALPHA, presetId }) });
-  const first = await create('synthetic-preset'); assert.equal(first.status, 201);
-  const receipt = await first.json(); assert.equal(receipt.status, 'accepted');
+  const first = await settled(await create('synthetic-preset'), () => fetch(`${base}/v1/commands/${requestId}`, { headers: { authorization: `Bearer ${device.deviceToken}` } })); assert.ok([201, 202].includes(first.httpStatus));
+  const receipt = first.receipt; assert.equal(receipt.status, 'accepted');
   const duplicate = await create('synthetic-preset'); assert.equal(duplicate.status, 201); assert.deepEqual(await duplicate.json(), receipt);
   assert.equal((await create('different-preset')).status, 409);
   assert.deepEqual(creates, [{ workspaceId: ALPHA, sessionId: `session-${requestId}`, agentPreset: 'synthetic-preset' }]);

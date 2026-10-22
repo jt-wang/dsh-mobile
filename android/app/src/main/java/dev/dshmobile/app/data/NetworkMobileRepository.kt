@@ -239,6 +239,7 @@ internal class NetworkMobileRepository(
             persist(stored.copy(pending = stored.pending?.copy(status = "uncertain")))
         }
         mutableState.value = MobileState(
+            manualRefreshing = state.value.manualRefreshing,
             paired = host != null, hostName = host?.hostName.orEmpty(),
             remoteMode = host?.endpoint?.relay != null, relayHost = host?.endpoint?.relay?.let { safeRelayOrigin(it) },
             connection = if (host == null) ConnectionState.DISCONNECTED else ConnectionState.OFFLINE,
@@ -308,9 +309,12 @@ internal class NetworkMobileRepository(
         finally { pairingTransport = null; pairingApi.close() }
     }
     override suspend fun refresh() = action {
-        restoreLocked()
-        if (stored.host == null) throw MobileFailure("not_paired")
-        if (foreground) refreshLocked()
+        mutableState.value = state.value.copy(manualRefreshing = true)
+        try {
+            restoreLocked()
+            if (stored.host == null) throw MobileFailure("not_paired")
+            if (foreground) refreshLocked()
+        } finally { mutableState.value = state.value.copy(manualRefreshing = false) }
     }
     private data class RefreshMetadata(
         val capabilities: CapabilitiesResponse,
@@ -642,13 +646,13 @@ internal class NetworkMobileRepository(
         StoredCommand(UUID.randomUUID().toString(), "model", sessionId = snapshot.session.id, selection = selection)
     }
     override suspend fun answer(callId: String, answer: dev.dshmobile.app.model.QuestionAnswer) = phoneCommand("answer") { snapshot ->
-        val question = snapshot.pendingQuestions.singleOrNull { it.callId == callId && it.state == "open" } ?: throw MobileFailure("question_expired")
+        val question = snapshot.pendingQuestions.singleOrNull { it.callId == callId && it.state in setOf("open", "continued") } ?: throw MobileFailure("question_expired")
         if (!dev.dshmobile.app.model.PhoneRules.validAnswer(question, answer, state.value.capabilities?.questionSkip == true)) throw MobileFailure("invalid_selection")
         StoredCommand(UUID.randomUUID().toString(), "answer", sessionId = snapshot.session.id, callId = callId, answer = answer)
     }
     override suspend fun skipQuestion(callId: String) = phoneCommand("answer") { snapshot ->
         if (state.value.capabilities?.questionSkip != true) throw MobileFailure("unsupported")
-        if (snapshot.pendingQuestions.none { it.callId == callId && it.state == "open" }) throw MobileFailure("question_expired")
+        if (snapshot.pendingQuestions.none { it.callId == callId && it.state in setOf("open", "continued") }) throw MobileFailure("question_expired")
         StoredCommand(UUID.randomUUID().toString(), "answer", sessionId = snapshot.session.id, callId = callId, skip = true)
     }
     override suspend fun file(sessionId: String, attachmentId: String): ByteArray {

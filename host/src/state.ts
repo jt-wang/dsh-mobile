@@ -67,6 +67,7 @@ export class HostState {
         result TEXT, error TEXT, http_status INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         PRIMARY KEY(device_id, request_id)
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS mobile_created_sessions (id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS notification_state (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS runtime_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, pid INTEGER NOT NULL) STRICT;
     `);
@@ -101,6 +102,21 @@ export class HostState {
       const insert = this.db.prepare('INSERT INTO notification_state(id,value) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value');
       for (const [id, value] of values) insert.run(id, JSON.stringify(value));
     });
+  }
+
+  /** Index-only exception, never an authorization grant. 256 IDs, seven days. */
+  rememberMobileSession(id: string): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM mobile_created_sessions WHERE expires_at<=?').run(this.now());
+      this.db.prepare('INSERT INTO mobile_created_sessions(id,expires_at) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET expires_at=excluded.expires_at').run(id, this.now() + 7 * 24 * 60 * 60_000);
+      this.db.exec('DELETE FROM mobile_created_sessions WHERE id NOT IN (SELECT id FROM mobile_created_sessions ORDER BY expires_at DESC, rowid DESC LIMIT 256)');
+    });
+  }
+  mobileSessionVisible(id: string, blank: boolean | undefined): boolean {
+    const entry = this.db.prepare('SELECT expires_at FROM mobile_created_sessions WHERE id=?').get(id);
+    const retained = !!entry && Number(entry.expires_at) > this.now();
+    if (entry && (blank === false || !retained)) this.db.prepare('DELETE FROM mobile_created_sessions WHERE id=?').run(id);
+    return blank !== true || retained;
   }
 
   createPairing(grants: DeviceGrants, ttlMs = 300_000): PairingOffer {

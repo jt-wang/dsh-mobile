@@ -83,7 +83,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
             if (state.connection == ConnectionState.ONLINE) state.error?.let { ErrorText(it, Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
             pendingDelivery()
             val pull = rememberPullToRefreshState()
-            val refreshing = state.busy && state.connection == ConnectionState.SYNCING
+            val refreshing = state.manualRefreshing
             PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, state = pull,
                 indicator = { PullToRefreshDefaults.Indicator(state = pull, isRefreshing = refreshing,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = if (searchOpen) 112.dp else 56.dp)) },
@@ -183,7 +183,8 @@ private fun SearchField(query: String, onQuery: (String) -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("chat_search"))
 }
 
-internal fun sessionWorkLabel(session: SessionSummary, main: String, subagents: String, count: String): String? = when {
+internal fun sessionWorkLabel(session: SessionSummary, main: String, subagents: String, count: String, waiting: String? = null): String? = when {
+    session.waitingForAnswer -> waiting
     session.running -> main + if (session.runningSubagents > 0) " · $count" else ""
     session.runningSubagents > 0 -> subagents
     else -> null
@@ -207,7 +208,7 @@ private fun ProjectTab(label: String, selected: Boolean, tag: String, onClick: (
 private fun SessionRow(session: SessionSummary, project: String, timestamp: String, readOnly: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val work = sessionWorkLabel(session, stringResource(R.string.mobile_working),
-        stringResource(R.string.mobile_subagents_working, session.runningSubagents), stringResource(R.string.mobile_subagents_count, session.runningSubagents))
+        stringResource(R.string.mobile_subagents_working, session.runningSubagents), stringResource(R.string.mobile_subagents_count, session.runningSubagents), stringResource(R.string.mobile_waiting_for_answer))
     val details = listOfNotNull(project, work,
         if (readOnly) stringResource(R.string.mobile_read_only) else null).joinToString(" · ")
     Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).clickable(enabled = enabled, onClick = onClick)
@@ -216,7 +217,8 @@ private fun SessionRow(session: SessionSummary, project: String, timestamp: Stri
         // One fixed cell, centred on the first title line (22sp line height × font scale), so running and idle rows share a left edge.
         val titleLine = with(LocalDensity.current) { MaterialTheme.typography.titleMedium.lineHeight.toDp() }
         Box(Modifier.size(ControlSize.StatusCell, maxOf(ControlSize.StatusCell, titleLine)), contentAlignment = Alignment.Center) {
-            if (session.running || session.runningSubagents > 0) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else IdleRing()
+            if (session.waitingForAnswer) Icon(MobileIcons.Question, stringResource(R.string.mobile_waiting_for_answer), Modifier.size(ControlSize.StatusGlyph))
+            else if (session.running || session.runningSubagents > 0) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else IdleRing()
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(session.title.ifBlank { stringResource(R.string.mobile_untitled) }, Modifier.fillMaxWidth(), style = MaterialTheme.typography.titleMedium,

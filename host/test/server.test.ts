@@ -60,6 +60,33 @@ async function setup(t: TestContext, adapter: HostAdapter = new TestAdapter()) {
   return { host, hosts, config, adapter, baseUrl, request, pair };
 }
 
+test('blank sessions are hidden only in the index, mobile creates remain visible across restart', async t => {
+  const adapter = new TestAdapter();
+  adapter.snapshots.get('s-alpha')!.session = { ...snapshot.session, title: '', blank: true, waitingForAnswer: true };
+  // Also exercise an upstream that adopts/reuses a blank session on create.
+  adapter.createSession = async () => ({ sessionId: 's-alpha' });
+  const { request, pair, host, hosts, config } = await setup(t, adapter), { deviceToken } = await pair();
+  assert.deepEqual((await (await request('/sessions', deviceToken)).json()).items, []);
+  const direct = await (await request('/sessions/s-alpha', deviceToken)).json();
+  assert.equal(direct.session.blank, true); assert.equal(direct.session.title, ''); assert.equal(direct.session.waitingForAnswer, true);
+  const sse = await request('/sessions/s-alpha/events', deviceToken), reader = sse.body!.getReader();
+  try { assert.equal(sse.status, 200); assert.match(new TextDecoder().decode((await reader.read()).value), /"blank":true/); } finally { await reader.cancel(); }
+  const created = await request('/sessions', deviceToken, 'POST', { requestId: randomUUID(), workspaceId: 'alpha' });
+  assert.equal(created.status, 201);
+  assert.equal((await (await request('/sessions', deviceToken)).json()).items[0].id, 's-alpha');
+  await host.close();
+  const restarted = await startHostServer({ config, adapter }); hosts.push(restarted); const url = (await restarted.start()).baseUrl;
+  const items = (await (await fetch(url + '/v1/sessions', { headers: { Authorization: 'Bearer ' + deviceToken } })).json()).items;
+  assert.equal(items[0].id, 's-alpha');
+});
+
+test('absent blank fails open and waiting boolean is projected into the index', async t => {
+  const adapter = new TestAdapter(); adapter.snapshots.get('s-alpha')!.session.waitingForAnswer = true;
+  const { request, pair } = await setup(t, adapter), { deviceToken } = await pair();
+  const item = (await (await request('/sessions', deviceToken)).json()).items[0];
+  assert.equal(item.id, 's-alpha'); assert.equal(item.waitingForAnswer, true);
+});
+
 test('notification routes authenticate, stream real pages, enforce policy revisions and stream caps', async t => {
   const { request, pair } = await setup(t); const { deviceToken } = await pair();
   assert.equal((await request('/notification-events')).status, 401);

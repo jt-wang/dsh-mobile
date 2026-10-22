@@ -5,20 +5,93 @@ import { startHostServer } from '../src/server.ts';
 import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+import { attachmentRefs, questionsOf } from '../src/phone.ts';
 import { createDshAdapter } from '../src/dsh-adapter.ts';
 import { opening, summary, requestId } from './fixtures/rc2.ts';
 
-async function setup(t: any, hooks: { beforeFollow?: () => Promise<void>; events?: import('../src/dsh-adapter.ts').DshAdapterOptions['events']; fileUploads?: import('../src/dsh-adapter.ts').DshAdapterOptions['fileUploads']; resolveAgent?: () => Promise<{ agent: unknown }>; attachments?: import('../src/dsh-adapter.ts').DshAdapterOptions['attachments'] } = {}) {
+async function setup(t: any, hooks: { pollIntervalMs?: number; beforeFollow?: () => Promise<void>; events?: import('../src/dsh-adapter.ts').DshAdapterOptions['events']; fileUploads?: import('../src/dsh-adapter.ts').DshAdapterOptions['fileUploads']; resolveAgent?: () => Promise<{ agent: unknown }>; attachments?: import('../src/dsh-adapter.ts').DshAdapterOptions['attachments'] } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'phone-adapter-'))); await mkdir(join(root, 'w'));
   const frame: any = structuredClone(opening); frame.header.cwd = join(root, 'w');
   const row = { ...structuredClone(summary), cwd: frame.header.cwd, running: true };
   const calls: any[] = [];
   const controller = { async list() { return { items: [row] }; }, async *follow(_r: any, signal: AbortSignal) { try { await hooks.beforeFollow?.(); yield structuredClone(frame); } finally { assert.ok(signal.aborted); } }, async page() { return {}; }, async projections() { return frame.projections; }, async create() { return { sessionId: row.sessionId }; }, async prompt(r: any) { calls.push(r); }, cancel() {}, async rename(r: any) { calls.push(r); }, async updateQueue(r: any) { calls.push(r); }, async selectModel(r: any) { calls.push(r); }, async modelCatalog() { return { default: { provider: 'p', model: 'm' }, groups: [{ id: 'p', models: [{ id: 'm', name: 'Synthetic model' }] }] }; }, async attachment(r: any) { calls.push(r); return { attachment: { attachmentId: 'image', mediaType: 'image/png' as const, bytes: 3 }, data: 'YWJj' }; } };
   let answered: any;
-  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', events: hooks.events, pollIntervalMs: 60000, workspaces: [{ id: 'w', name: 'Synthetic', path: frame.header.cwd }], sessionController: { ...controller, ...(hooks.resolveAgent ? { resolveAgent: hooks.resolveAgent } : {}) }, modelInfo: async () => ({ inputModalities: ['text', 'image'] }), questionBridge: { pending: () => [], answer: () => false, close() {} }, answerContinued: async (...args) => { answered = args; return true; }, fileUploads: { async uploadStream(r) { let size = 0; for await (const data of r.data) size += data.length; return { receiptId: 'receipt', file: { attachmentId: 'file', name: r.name!, bytes: size } }; } }, ...(hooks.fileUploads ? { fileUploads: hooks.fileUploads } : {}), attachments: { async validateImage(r) { assert.equal(r.mediaType, 'image/png'); }, async *readFileStream(ref) { assert.equal(ref.attachmentId, 'file'); assert.equal(ref.name, 'synthetic.txt'); yield Buffer.from('abc'); } }, ...(hooks.attachments ? { attachments: hooks.attachments } : {}) });
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', events: hooks.events, pollIntervalMs: hooks.pollIntervalMs ?? 60000, workspaces: [{ id: 'w', name: 'Synthetic', path: frame.header.cwd }], sessionController: { ...controller, ...(hooks.resolveAgent ? { resolveAgent: hooks.resolveAgent } : {}) }, modelInfo: async () => ({ inputModalities: ['text', 'image'] }), questionBridge: { pending: () => [], answer: () => false, close() {} }, answerContinued: async (...args) => { answered = args; return true; }, fileUploads: { async uploadStream(r) { let size = 0; for await (const data of r.data) size += data.length; return { receiptId: 'receipt', file: { attachmentId: 'file', name: r.name!, bytes: size } }; } }, ...(hooks.fileUploads ? { fileUploads: hooks.fileUploads } : {}), attachments: { async validateImage(r) { assert.equal(r.mediaType, 'image/png'); }, async *readFileStream(ref) { assert.equal(ref.attachmentId, 'file'); assert.equal(ref.name, 'synthetic.txt'); yield Buffer.from('abc'); } }, ...(hooks.attachments ? { attachments: hooks.attachments } : {}) });
   t.after(async () => { adapter.dispose(); await rm(root, { recursive: true, force: true }); });
   return { adapter, frame, row, calls, answered: () => answered, signal: new AbortController().signal };
 }
+
+test('list carries blank, empty localized title and open or continued question status', async t => {
+  const { adapter, row, frame, signal } = await setup(t);
+  row.blank = true; row.projections = frame.projections; delete row.projections.values.title;
+  assert.equal((await adapter.listSessions(signal))[0]!.blank, true);
+  assert.equal((await adapter.listSessions(signal))[0]!.title, '');
+  for (const state of ['open', 'continued']) {
+    frame.projections.values.userQuestions = { active: [{ callId: 'call', state, questions: [{ id: 'q', question: 'Pick', options: [{ label: 'Yes' }] }] }] };
+    assert.equal((await adapter.listSessions(signal))[0]!.waitingForAnswer, true);
+    assert.equal((await adapter.snapshot(row.sessionId, signal)).session.waitingForAnswer, true);
+  }
+  frame.projections.values.userQuestions.active = [];
+  assert.equal((await adapter.listSessions(signal))[0]!.waitingForAnswer, false);
+  assert.equal((await adapter.snapshot(row.sessionId, signal)).session.waitingForAnswer, false);
+});
+
+test('watch refresh publishes waiting when a continued question appears and clears it on reply', async t => {
+  const { adapter, frame, row } = await setup(t, { pollIntervalMs: 10 });
+  const abort = new AbortController(), iterator = adapter.watch(row.sessionId, abort.signal)[Symbol.asyncIterator]();
+  try {
+    assert.equal((await iterator.next()).value!.session.waitingForAnswer, false);
+    frame.projections.values.userQuestions = { active: [{ callId: 'call', state: 'continued', questions: [{ id: 'q', question: 'Pick', options: [{ label: 'Yes' }] }] }] };
+    assert.equal((await iterator.next()).value!.session.waitingForAnswer, true);
+    frame.projections.values.userQuestions.active = [];
+    assert.equal((await iterator.next()).value!.session.waitingForAnswer, false);
+  } finally { abort.abort(); await iterator.return?.(); }
+});
+
+test('receipt budget survives module reimport and fresh cordis tracing wrappers', async t => {
+  const original = {}, live = new Set<string>(); let serial = 0;
+  const service = () => ({ [Symbol.for('cordis.original')]: original, resolve(_a: unknown, id: string) { return live.has(id) ? {} : undefined; }, async uploadStream(r: any) { for await (const _chunk of r.data) {} const receiptId = 'reload-' + serial++; live.add(receiptId); return { receiptId, file: { attachmentId: 'file', name: 'test.txt', bytes: 3 } }; } });
+  const { adapter, row, frame, signal } = await setup(t, { fileUploads: service(), resolveAgent: async () => ({ agent: {} }) });
+  const input = () => ({ size: 3, mime: 'text/plain', name: 'test.txt', data: (async function* () { yield Buffer.from('abc'); })() });
+  for (let i = 0; i < 20; i++) await adapter.upload(row.sessionId, input(), signal, 'w');
+  adapter.dispose();
+  const generation = await import('../src/dsh-adapter.ts?generation=reload-regression');
+  const second = await generation.createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'w', name: 'Synthetic', path: row.cwd }], sessionController: { async list() { return { items: [row] }; }, async *follow() { yield frame; }, async page() {}, async projections() {}, async create() { return { sessionId: row.sessionId }; }, async prompt() {}, cancel() {}, async attachment() {}, async resolveAgent() { return { agent: {} }; } }, fileUploads: service(), attachments: { async validateImage() {} } });
+  t.after(() => second.dispose());
+  await assert.rejects(second.upload(row.sessionId, input(), signal, 'w'), { code: 'rate_limited' }); assert.equal(live.size, 20);
+});
+
+test('definitive failures before DSH reads bytes release reservations', async t => {
+  let attempts = 0;
+  const { adapter, row, signal } = await setup(t, { fileUploads: { async uploadStream() { attempts++; throw new Error('Synthetic pre-storage failure'); } } });
+  for (let i = 0; i < 25; i++) await assert.rejects(adapter.upload(row.sessionId, { size: 3, mime: 'text/plain', name: 'test.txt', data: (async function* () { yield Buffer.from('abc'); })() }, signal, 'w'), /pre-storage failure/);
+  assert.equal(attempts, 25);
+  (await adapter.reserveFileUploads(row.sessionId, 20, signal, 'w')).release();
+});
+
+test('declared PDF type survives send projection even without a filename extension', async t => {
+  const { adapter, frame, row, signal } = await setup(t);
+  await adapter.upload(row.sessionId, { size: 3, name: 'document', mime: 'application/pdf', data: (async function* () { yield Buffer.from('abc'); })() }, signal, 'w');
+  frame.records.push({ type: 'event', event: { seq: 8, time: 1700000000008, type: 'user/message', surfaceOp: 'append', data: { id: 'pdf', source: { kind: 'user' }, content: [{ type: 'file', attachment: { attachmentId: 'file', name: 'document', bytes: 3 } }] } } }); frame.cursor = 8;
+  assert.equal((await adapter.snapshot(row.sessionId, signal)).messages.at(-1)!.attachments![0]!.mime, 'application/pdf');
+});
+
+test('file references recover safe MIME metadata or extension without active content', () => {
+  const ref = (name: string, mediaType?: string) => attachmentRefs([{ type: 'file', attachment: { attachmentId: 'f', name, bytes: 3, mediaType } }])[0]!.mime;
+  assert.equal(ref('REPORT.PDF'), 'application/pdf'); assert.equal(ref('notes.txt'), 'text/plain');
+  assert.equal(ref('no-extension', 'application/pdf'), 'application/pdf');
+  for (const [name, mime] of [['index.html', 'text/html'], ['script.js', 'application/javascript'], ['program.exe', 'application/pdf'], ['page.svg', 'image/svg+xml']]) assert.equal(ref(name!, mime), 'application/octet-stream');
+});
+
+test('recommended labels have a clean display value and preserve the answer token', () => {
+  for (const suffix of [' (Recommended)', '（ recommended ）', ' ( 推荐 ) ', '[ Recommended ]', '［推荐］', '(RECOMMENDED)']) {
+    const label = 'Choice' + suffix;
+    const option = questionsOf([{ callId: 'call', state: 'open', questions: [{ id: 'q', question: 'Pick', options: [{ label }] }] }])[0]!.questions[0]!.options[0]!;
+    assert.equal(option.label, label); assert.equal(option.displayLabel, 'Choice'); assert.equal(option.recommended, true);
+  }
+  const option = questionsOf([{ callId: 'call', state: 'open', questions: [{ id: 'q', question: 'Pick', options: [{ label: 'Recommended in prose' }] }] }])[0]!.questions[0]!.options[0]!;
+  assert.equal(option.displayLabel, 'Recommended in prose'); assert.equal(option.recommended, false);
+});
 
 test('watch does not replay buffered model or delivery events covered by opening cursor', async t => {
   let emit!: (value: any) => void, entered!: () => void, release!: () => void;

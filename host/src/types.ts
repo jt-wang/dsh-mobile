@@ -3,6 +3,8 @@ export interface WorkspaceConfig { id: string; name: string; path: string }
 export interface Preset { id: string; name: string }
 export interface HostSession {
   id: string; title: string; workspaceId: string; updatedAt: number; running: boolean;
+  blank?: boolean;
+  waitingForAnswer?: boolean;
   runningSubagents?: number;
   model?: SessionModel | null;
 }

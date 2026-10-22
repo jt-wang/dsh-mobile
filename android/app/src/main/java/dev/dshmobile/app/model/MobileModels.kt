@@ -15,6 +15,8 @@ data class SessionSummary(
     val running: Boolean, val canExecute: Boolean,
     @Serializable(with = RunningSubagentsSerializer::class) val runningSubagents: Int = 0,
     val model: SessionModel? = null,
+    val blank: Boolean? = null,
+    val waitingForAnswer: Boolean = false,
 )
 @Serializable
 data class ChatMessage(
@@ -75,6 +77,7 @@ data class MobileState(
     val acceptedPrompts: List<PendingCommand> = emptyList(),
     val localPromptActions: LocalPromptActions? = null,
     val busy: Boolean = false,
+    val manualRefreshing: Boolean = false,
     val error: String? = null,
     val lastSyncedAt: Long? = null,
     val demo: Boolean = false,
