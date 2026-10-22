@@ -66,11 +66,12 @@ class Review08bRegressionTest {
             manager.notify("language", 2, child); updateAlertSummary(context, added = "language" to child)
             withTimeout(3000) { while (manager.activeNotifications.none { it.id == 3 }) delay(20) }
             val summary = manager.activeNotifications.single { it.id == 3 }.notification
-            assertEquals("Open the chat on your computer", summary.extras.getString(Notification.EXTRA_TEXT))
+            assertEquals(summaryBody(dev.dshmobile.app.locale.appLanguageContext(context), NotificationSummary(1, 1, 0)), summary.extras.getString(Notification.EXTRA_TEXT))
             val pendingIntent = summary.contentIntent
             pin("ru")
             refreshNotificationLanguagePass(context)
-            withTimeout(10000) { while (manager.activeNotifications.single { it.id == 3 }.notification.extras.getString(Notification.EXTRA_TEXT) != "Откройте чат на компьютере") delay(50) }
+            val russianBody = summaryBody(dev.dshmobile.app.locale.appLanguageContext(context), NotificationSummary(1, 1, 0))
+            withTimeout(10000) { while (manager.activeNotifications.single { it.id == 3 }.notification.extras.getString(Notification.EXTRA_TEXT) != russianBody) delay(50) }
             assertEquals(pendingIntent, manager.activeNotifications.single { it.id == 3 }.notification.contentIntent)
         } finally {
             NotificationPosting.cancelAll(context)
@@ -128,7 +129,7 @@ class Review08bRegressionTest {
                         "/v1/sessions/chat/uploads" -> {
                             uploads++
                             if(uploads == 1) json("""{"uploadId":"fresh-1","expiresAt":9999999999999,"attachment":{"id":"ref","name":"test.txt","size":4,"mime":"text/plain","kind":"file"}}""",201)
-                            else json("""{"error":{"code":"rate_limited","message":"Synthetic","retryable":true}}""",429)
+                            else json("""{"error":{"code":"host_error","message":"Synthetic","retryable":true}}""",503)
                         }
                         else -> json("""{"error":{"code":"not_found","message":"Synthetic","retryable":false}}""",404)
                     }

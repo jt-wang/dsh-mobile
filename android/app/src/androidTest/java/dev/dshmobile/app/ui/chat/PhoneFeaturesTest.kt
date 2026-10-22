@@ -110,10 +110,11 @@ class PhoneFeaturesTest {
         compose.onNodeWithText(text(R.string.mobile_message_steered)).assertIsDisplayed()
         compose.onNodeWithTag("file_open_file").performClick(); assertTrue(opened)
     }
-    @Test fun continuedQuestionIsNotAnswerable() {
+    @Test fun continuedQuestionRemainsAnswerable() {
         content { QuestionBlock(question().copy(state = "continued"), null, false, true, false, false, skipSupported = true, onChange = {}, onSubmit = {}) }
-        compose.onNodeWithTag("question_submit").assertDoesNotExist(); compose.onNodeWithTag("question_skip").assertDoesNotExist()
-        compose.onNodeWithText(text(R.string.mobile_question_expired)).assertIsDisplayed()
+        compose.onNodeWithTag("question_submit").assertIsDisplayed().assertIsNotEnabled()
+        compose.onNodeWithTag("question_skip").assertIsDisplayed().assertIsEnabled()
+        compose.onNodeWithText(text(R.string.mobile_question_expired)).assertDoesNotExist()
     }
     @Test fun attachmentErrorHasRetryAndRemove() {
         var retried = ""; var removed = ""

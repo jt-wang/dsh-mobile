@@ -85,7 +85,7 @@ class Review08cRegressionTest {
             suspend fun deliver(id: String) {
                 val event = NotificationEvent(1,id,1,System.currentTimeMillis(),Long.MAX_VALUE,"w","chat","answer-finished",1)
                 kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
-                    show.invoke(service,"synthetic",event,local,emptyList<Any>(),emptyList<Any>(),false,continuation)
+                    show.invoke(service,"synthetic",event,local,false,continuation)
                 }
             }
             deliver("event-one")

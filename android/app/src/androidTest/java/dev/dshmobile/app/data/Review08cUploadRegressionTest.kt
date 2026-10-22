@@ -48,7 +48,7 @@ class Review08cUploadRegressionTest {
                 "/v1/sessions/chat/uploads" -> {
                     uploads++
                     if(holdUpload && uploads==1) { entered.countDown(); check(release.await(10,TimeUnit.SECONDS)) }
-                    if(uploads==2) json("""{"error":{"code":"rate_limited","message":"Synthetic","retryable":true}}""",429)
+                    if(uploads==2) json("""{"error":{"code":"host_error","message":"Synthetic","retryable":true}}""",503)
                     else json("""{"uploadId":"fresh-$uploads","expiresAt":9999999999999,"attachment":{"id":"ref","name":"test.txt","size":4,"mime":"text/plain","kind":"file"}}""",201)
                 }
                 else -> json("""{"error":{"code":"not_found","message":"Synthetic","retryable":false}}""",404)

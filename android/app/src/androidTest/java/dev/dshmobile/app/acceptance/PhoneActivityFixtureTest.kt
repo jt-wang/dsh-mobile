@@ -38,8 +38,11 @@ class PhoneActivityFixtureTest {
             compose.onNodeWithText("Synthetic Activity rename").assertIsDisplayed()
             compose.onNodeWithTag("message_input").performTextInput("Synthetic Activity message")
             compose.onNodeWithTag("send_message").performClick()
-            compose.waitUntil(5000) { compose.onAllNodesWithText("Synthetic Activity message").fetchSemanticsNodes().isNotEmpty() }
-            assertTrue(compose.onAllNodesWithText("Synthetic Activity message").fetchSemanticsNodes().isNotEmpty())
+            // Questions can fill the small viewport below the message; lazy rows need an explicit scroll.
+            compose.waitUntil(10000) { try {
+                compose.onNodeWithTag("chat_timeline").performScrollToNode(hasText("Synthetic Activity message", substring = true))
+                compose.onNodeWithText("Synthetic Activity message", substring = true).assertIsDisplayed(); true
+            } catch (_: AssertionError) { false } }
         }
     }
 }

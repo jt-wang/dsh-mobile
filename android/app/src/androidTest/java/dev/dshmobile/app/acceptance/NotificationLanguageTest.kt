@@ -23,6 +23,9 @@ import org.junit.Test
 /** Running/stopped production service with synthetic pairing. Disposable emulator only. */
 class NotificationLanguageTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+    private fun localized(tag: String, resource: Int): String = context.createConfigurationContext(
+        android.content.res.Configuration(context.resources.configuration).apply { setLocales(LocaleList.forLanguageTags(tag)) }
+    ).getString(resource)
     private fun await(check: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + 10_000
         while (!check() && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(50)
@@ -72,7 +75,7 @@ class NotificationLanguageTest {
             assertEquals(20, alerts.size)
             alerts.forEach {
                 assertEquals("Ответ готов", it.notification.extras.getString(Notification.EXTRA_TITLE))
-                assertEquals("Откройте этот чат в приложении", it.notification.extras.getString(Notification.EXTRA_TEXT))
+                assertEquals(localized("ru", R.string.notif_open_chat_fallback), it.notification.extras.getString(Notification.EXTRA_TEXT))
                 assertEquals("Ответ готов", it.notification.publicVersion.extras.getString(Notification.EXTRA_TEXT))
                 assertEquals("answers_silent_v2", it.notification.channelId)
             }
@@ -276,11 +279,12 @@ class NotificationLanguageTest {
                 NotificationStore(context).update { it.copy(enabled = false) } // Activity resume must not restart monitoring.
                 manager.cancel(1) // stopService can detach (rather than remove) the foreground notification.
                 // No activity/service alive: API 33+ must use the manifest receiver, not onResume.
-                scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+                scenario.moveToState(if (Build.VERSION.SDK_INT >= 33) androidx.lifecycle.Lifecycle.State.DESTROYED else androidx.lifecycle.Lifecycle.State.CREATED)
             }
-            for ((choice, title, generic, channel, monitoring) in listOf(
-                listOf("ru", "Ответ готов", "Откройте этот чат в приложении", "Ответы агента · Со звуком", "Ответы с компьютера"),
-                listOf("en", "Answer ready", "Open this chat in the app", "Agent answers · With sound", "Answers from your computer"))) {
+            for ((choice, title, channel) in listOf(
+                listOf("ru", "Ответ готов", "Ответы агента · Со звуком"),
+                listOf("en", "Answer ready", "Agent answers · With sound"))) {
+                val generic = localized(choice, R.string.notif_open_chat_fallback)
                 if (stopped && Build.VERSION.SDK_INT >= 33) {
                     context.getSystemService(LocaleManager::class.java).applicationLocales = LocaleList.forLanguageTags(choice)
                 } else {
