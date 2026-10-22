@@ -63,8 +63,7 @@ class NotificationFixtureTest {
             await { manager.activeNotifications.any { it.id == 1 && it.notification.extras.getString("dev.dshmobile.connectionStatus") == "degraded" } }
             delay(3000)
             val notification = manager.activeNotifications.single { it.id == 1 }.notification
-            assertFalse(notification.extras.getString(Notification.EXTRA_TEXT).orEmpty().contains("missed"))
-            assertEquals(context.getString(dev.dshmobile.app.R.string.notif_ongoing_ready), notification.extras.getString(Notification.EXTRA_TEXT))
+            assertEquals(context.getString(dev.dshmobile.app.R.string.notif_ongoing_degraded_body), notification.extras.getString(Notification.EXTRA_TEXT))
             Log.i("DSHFixtureTest", "degraded_silently_resynced")
         } finally {
             context.stopService(intent); scenario.close(); manager.cancelAll(); store.update { old }

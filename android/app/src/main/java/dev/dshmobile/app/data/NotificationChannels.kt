@@ -36,6 +36,10 @@ internal fun refreshChannelNames(existing: Set<String>, answers: String, attenti
 
 internal fun refreshNotificationChannelNames(context: Context) {
     val manager = context.getSystemService(NotificationManager::class.java)
+    manager.getNotificationChannel(SUMMARY_CHANNEL)?.let { channel ->
+        channel.name = context.getString(R.string.notif_summary_channel)
+        manager.createNotificationChannel(channel)
+    }
     refreshChannelNames(manager.notificationChannels.map { it.id }.toSet(),
         context.getString(R.string.notif_answers_channel), context.getString(R.string.notif_attention_channel),
         context.getString(R.string.notif_mode_sound), context.getString(R.string.notif_mode_silent),

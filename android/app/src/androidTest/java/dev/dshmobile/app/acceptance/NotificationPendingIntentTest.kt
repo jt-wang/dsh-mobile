@@ -25,6 +25,52 @@ class NotificationPendingIntentTest {
     @Test fun coldActivity() = exercise("cold")
     @Test fun warmBackground() = exercise("warm")
     @Test fun foreground() = exercise("foreground")
+    @Test fun rapidAToBSupersedesSlowTargetWithoutLateNavigationOrActions() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val manager = context.getSystemService(NotificationManager::class.java)
+        host.twoChats = true
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val service = Intent(context, NotificationService::class.java)
+        try {
+            scenario.onActivity { it.startForegroundService(service) }
+            compose.waitUntil(20000) { manager.activeNotifications.any { it.notification.extras.getBoolean("dev.dshmobile.questionAlert") } }
+            val first = manager.activeNotifications.first { it.notification.extras.getBoolean("dev.dshmobile.questionAlert") }.notification.contentIntent
+            host.historyDelayMs = 3000
+            first.send()
+            compose.waitUntil(2000) { compose.onAllNodesWithTag("chat_screen").fetchSemanticsNodes().isNotEmpty() }
+            val second = android.app.PendingIntent.getActivity(context, 90, Intent(context, MainActivity::class.java)
+                .putExtra("notificationDevice", "synthetic").putExtra("notificationChat", "other")
+                .addFlags(NOTIFICATION_ACTIVITY_FLAGS), android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+            second.send()
+            compose.waitUntil(10000) { try { compose.onNodeWithTag("message_input").assertIsEnabled(); true } catch (_: AssertionError) { false } }
+            compose.onAllNodesWithTag("question_question").assertCountEquals(0)
+            Thread.sleep(3200)
+            compose.onAllNodesWithTag("question_question").assertCountEquals(0)
+        } finally { host.closeScenario(scenario); context.stopService(service) }
+    }
+    @Test fun delayedHistoryShowsTargetBeforeNetworkCompletes() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val service = Intent(context, NotificationService::class.java)
+        try {
+            scenario.onActivity { it.startForegroundService(service) }
+            compose.waitUntil(20000) { manager.activeNotifications.any { it.notification.extras.getBoolean("dev.dshmobile.questionAlert") } }
+            val notification = manager.activeNotifications.first { it.notification.extras.getBoolean("dev.dshmobile.questionAlert") }.notification
+            host.historyDelayMs = 3000
+            notificationTrace("test_pending_send_delayed")
+            notification.contentIntent.send()
+            compose.waitUntil(2000) { try { compose.onAllNodesWithTag("chat_screen").fetchSemanticsNodes().isNotEmpty() } catch (_: IllegalStateException) { false } }
+            // Cached options may edit a local draft, but no stale answer can be sent.
+            compose.onNodeWithTag("question_option_0").performScrollTo().performClick()
+            compose.onNodeWithTag("question_submit").assertIsNotEnabled()
+            notificationTrace("test_loading_visible_delayed")
+            compose.waitUntil(10000) { try { compose.onNodeWithTag("question_submit").assertIsEnabled(); true } catch (_: AssertionError) { false } }
+            notificationTrace("test_question_visible_delayed")
+        } finally { host.closeScenario(scenario); context.stopService(service) }
+    }
     @Test fun zResolvedBeforeTap() = exercise("resolved")
     private fun exercise(mode: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -38,7 +84,7 @@ class NotificationPendingIntentTest {
             compose.waitUntil(20000) { manager.activeNotifications.any { it.notification.extras.getBoolean("dev.dshmobile.questionAlert") } }
             val notification = manager.activeNotifications.first { it.notification.extras.getBoolean("dev.dshmobile.questionAlert") }.notification
             assertNotNull(notification.contentIntent)
-            if (mode == "cold") scenario.close()
+            if (mode == "cold") host.closeScenario(scenario)
             if (mode == "warm") {
                 instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME").use { descriptor -> android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() } }
                 compose.waitUntil(5000) { scenario.state == androidx.lifecycle.Lifecycle.State.CREATED }
@@ -51,9 +97,11 @@ class NotificationPendingIntentTest {
                     repository.answer("question", dev.dshmobile.app.model.QuestionAnswer(listOf(dev.dshmobile.app.model.AnswerItem("q", listOf("Unit tests")))))
                     assertNull(repository.state.value.error)
                 } } finally { repository.close(); owner.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
-                scenario.close()
+                host.closeScenario(scenario)
             }
             notificationTrace("test_pending_send_$mode")
+            var originalActivity: MainActivity? = null
+            if (mode == "warm" || mode == "foreground") scenario.onActivity { originalActivity = it }
             notification.contentIntent.send()
             val tag = if (mode == "resolved") "question_record_question" else "question_question"
             compose.waitUntil(15000) {
@@ -62,6 +110,7 @@ class NotificationPendingIntentTest {
                 catch (_: IllegalStateException) { false }
             }
             compose.onNodeWithTag(tag).assertIsDisplayed()
+            if (originalActivity != null) scenario.onActivity { assertSame(originalActivity, it) }
             if (mode != "resolved") compose.onNodeWithTag("question_option_0").assertExists()
             val dump = instrumentation.uiAutomation.executeShellCommand("dumpsys activity activities")
             File(context.filesDir, "notification-activity-$mode.txt").outputStream().use { out -> android.os.ParcelFileDescriptor.AutoCloseInputStream(dump).use { it.copyTo(out) } }
@@ -71,7 +120,7 @@ class NotificationPendingIntentTest {
                 compose.onNodeWithTag("question_submit").assertIsEnabled()
             }
         } finally {
-            scenario.close(); context.stopService(service); manager.cancelAll()
+            host.closeScenario(scenario); context.stopService(service); manager.cancelAll()
             // CLEAR_TOP recreates the standard-launchMode Activity; scenario owns the old instance.
             instrumentation.runOnMainSync {
                 val monitor = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()

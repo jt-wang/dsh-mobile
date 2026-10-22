@@ -20,6 +20,17 @@ class NotificationGroupingTest {
     private lateinit var host: NotificationTestHost
     @org.junit.Before fun freshHost() { host = NotificationTestHost() }
     @org.junit.After fun stopHost() { host.close() }
+    @Test fun summaryPluralsSelectRussianAndEnglishFormsWithoutChildContent() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        for ((locale, expected) in listOf("ru" to listOf("1 чат", "2 чата", "5 чатов", "21 чат"), "en" to listOf("1 chat", "2 chats", "5 chats", "21 chats"))) {
+            val localized = context.createConfigurationContext(android.content.res.Configuration(context.resources.configuration).apply { setLocale(java.util.Locale.forLanguageTag(locale)) })
+            listOf(1, 2, 5, 21).forEachIndexed { index, count ->
+                val model = NotificationSummary(count, count, count)
+                assertEquals(expected[index], summaryTitle(localized, model))
+                assertTrue(summaryBody(localized, model).contains(" · "))
+            }
+        }
+    }
     @Test fun oneAlert() = exercise(1)
     @Test fun fourAlerts() = exercise(4)
     private fun exercise(count: Int) {
@@ -35,20 +46,29 @@ class NotificationGroupingTest {
         val original = manager.activeNotifications.first { it.id == 2 }.notification
         for (index in 2..count) {
             val tag = "synthetic-group-$index"
-            manager.notify(tag, 2, original)
-            updateAlertSummary(context, added = tag to original)
+            val child = android.app.Notification.Builder(context, original.channelId)
+                .setSmallIcon(dev.dshmobile.app.R.drawable.ic_launcher_foreground).setGroup(ALERT_GROUP)
+                .setContentTitle("Synthetic").setContentIntent(original.contentIntent)
+                .addExtras(android.os.Bundle(original.extras).apply { putString(ALERT_CHAT, "chat-$index") }).build()
+            runBlocking { NotificationPosting.paced { manager.notify(tag, 2, child); updateAlertSummary(context, added = tag to child) } }
         }
-        compose.waitUntil(5000) { manager.activeNotifications.count { it.id == 2 } == count && manager.activeNotifications.any { it.id == 3 } }
+        compose.waitUntil(5000) { manager.activeNotifications.count { it.id == 2 } == count && manager.activeNotifications.any { it.id == 3 && it.notification.number == count } }
         val ongoing = manager.activeNotifications.single { it.id == 1 }
         assertEquals("dev.dshmobile.monitoring", ongoing.notification.group)
+        assertNotNull(ongoing.notification.contentIntent)
         val summary = manager.activeNotifications.single { it.id == 3 }
         assertEquals(ALERT_GROUP, summary.notification.group)
+        assertEquals(count, summary.notification.number)
+        assertEquals(SUMMARY_CHANNEL, summary.notification.channelId)
+        assertFalse(summary.notification.extras.getString(android.app.Notification.EXTRA_TEXT).orEmpty().contains("computer"))
         assertNotEquals(ongoing.groupKey, summary.groupKey)
         assertTrue(manager.activeNotifications.filter { it.id == 2 }.all { it.groupKey == summary.groupKey })
         assertNull(ongoing.overrideGroupKey)
         val dump = instrumentation.uiAutomation.executeShellCommand("dumpsys notification --noredact")
         File(context.filesDir, "notification-groups-$count.txt").outputStream().use { out -> android.os.ParcelFileDescriptor.AutoCloseInputStream(dump).use { it.copyTo(out) } }
         if (!stage) {
+            ongoing.notification.contentIntent.send()
+            compose.waitUntil(5000) { compose.onAllNodesWithTag("session_chat").fetchSemanticsNodes().isNotEmpty() }
             // Deterministic routing check; actual shade taps are recorded separately via adb.
             summary.notification.contentIntent.send()
             val tag = if (count == 1) "question_question" else "session_chat"
@@ -64,6 +84,6 @@ class NotificationGroupingTest {
             }
             VisibleNotificationChat.sessionId = null
         }
-        scenario.close()
+        host.closeScenario(scenario)
     }
 }

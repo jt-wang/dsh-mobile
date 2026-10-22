@@ -72,7 +72,7 @@ class NotificationLanguageTest {
             assertEquals(20, alerts.size)
             alerts.forEach {
                 assertEquals("Ответ готов", it.notification.extras.getString(Notification.EXTRA_TITLE))
-                assertEquals("Откройте чат на компьютере", it.notification.extras.getString(Notification.EXTRA_TEXT))
+                assertEquals("Откройте этот чат в приложении", it.notification.extras.getString(Notification.EXTRA_TEXT))
                 assertEquals("Ответ готов", it.notification.publicVersion.extras.getString(Notification.EXTRA_TEXT))
                 assertEquals("answers_silent_v2", it.notification.channelId)
             }
@@ -105,8 +105,8 @@ class NotificationLanguageTest {
             if (Build.VERSION.SDK_INT >= 33) context.getSystemService(LocaleManager::class.java).applicationLocales = LocaleList.forLanguageTags("ru")
             else preferences.edit().putString(LANGUAGE_KEY, "ru").commit()
             refreshNotificationLanguage(context)
-            await { manager.activeNotifications.find { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == appLanguageContext(context).getString(R.string.notif_ongoing_title_offline) }
-            assertNull(manager.activeNotifications.single { it.id == 1 && it.tag == null }.notification.extras.getString(Notification.EXTRA_TEXT))
+            await { manager.activeNotifications.find { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == appLanguageContext(context).getString(R.string.notif_ongoing_title_reconnecting) }
+            assertEquals(appLanguageContext(context).getString(R.string.notif_ongoing_reconnecting_body), manager.activeNotifications.single { it.id == 1 && it.tag == null }.notification.extras.getString(Notification.EXTRA_TEXT))
         } finally {
             manager.cancel(1)
             if (Build.VERSION.SDK_INT >= 33) context.getSystemService(LocaleManager::class.java).applicationLocales = LocaleList.forLanguageTags(old.orEmpty())
@@ -128,14 +128,14 @@ class NotificationLanguageTest {
                 "synthetic-language-device", "synthetic-language-token-0000000000000000", "Synthetic computer")))
             store.update { it.copy(enabled = true, deviceId = "synthetic-language-device", settings = it.settings.copy(enabled = true)) }
             scenario.onActivity { it.startForegroundService(intent) }
-            val offline = appLanguageContext(context).getString(R.string.notif_ongoing_title_offline)
+            val offline = appLanguageContext(context).getString(R.string.notif_ongoing_title_reconnecting)
             await { connection()?.notification?.extras?.getString(Notification.EXTRA_TITLE) == offline }
             repeat(5) {
                 val previous = connection()!!.postTime
                 scenario.onActivity { it.startForegroundService(intent) }
                 await { (connection()?.postTime ?: 0) > previous }
                 assertEquals(offline, connection()!!.notification.extras.getString(Notification.EXTRA_TITLE))
-                assertNull(connection()!!.notification.extras.getString(Notification.EXTRA_TEXT))
+                assertEquals(appLanguageContext(context).getString(R.string.notif_ongoing_reconnecting_body), connection()!!.notification.extras.getString(Notification.EXTRA_TEXT))
                 assertEquals("offline", connection()!!.notification.extras.getString("dev.dshmobile.connectionStatus"))
                 kotlinx.coroutines.delay(300)
             }
@@ -201,9 +201,19 @@ class NotificationLanguageTest {
             val method = NotificationService::class.java.declaredMethods.single { it.name == "show" }.apply { isAccessible = true }
             VisibleNotificationChat.sessionId = null
             kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
-                method.invoke(service, "synthetic-language-device", event, local, emptyList<Any>(), emptyList<Any>(), false, continuation)
+                method.invoke(service, "synthetic-language-device", event, local, false, continuation)
             }
             await { manager.activeNotifications.any { it.tag == tag } } // Positive control: this fixture really can deliver.
+            NotificationPosting.cancel(context, tag, 2)
+            NotificationPosting.paced { }
+            val unaffected = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
+                    method.invoke(service, "synthetic-language-device", event, local, false, continuation)
+                }
+            }
+            store.update { it.copy(cursor = "unrelated-page-commit") }
+            unaffected.join()
+            await { manager.activeNotifications.any { it.tag == tag } } // A durable alert cannot be dropped by unrelated page/settings bookkeeping.
             NotificationPosting.cancel(context, tag, 2)
             for (change in listOf("visible", "cancel", "off", "disabled", "project", "chat", "unpair")) {
                 store.update { local }
@@ -211,7 +221,7 @@ class NotificationLanguageTest {
                 NotificationPosting.paced { } // Ensure delivery must wait in the production pacer.
                 val queued = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
                     kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
-                        method.invoke(service, "synthetic-language-device", event, local, emptyList<Any>(), emptyList<Any>(), false, continuation)
+                        method.invoke(service, "synthetic-language-device", event, local, false, continuation)
                     }
                 }
                 when (change) {
@@ -269,8 +279,8 @@ class NotificationLanguageTest {
                 scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
             }
             for ((choice, title, generic, channel, monitoring) in listOf(
-                listOf("ru", "Ответ готов", "Откройте чат на компьютере", "Ответы агента · Со звуком", "Ответы с компьютера"),
-                listOf("en", "Answer ready", "Open the chat on your computer", "Agent answers · With sound", "Answers from your computer"))) {
+                listOf("ru", "Ответ готов", "Откройте этот чат в приложении", "Ответы агента · Со звуком", "Ответы с компьютера"),
+                listOf("en", "Answer ready", "Open this chat in the app", "Agent answers · With sound", "Answers from your computer"))) {
                 if (stopped && Build.VERSION.SDK_INT >= 33) {
                     context.getSystemService(LocaleManager::class.java).applicationLocales = LocaleList.forLanguageTags(choice)
                 } else {
@@ -287,7 +297,7 @@ class NotificationLanguageTest {
                 assertTrue(alert.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
                 assertNull(alert.sound)
                 assertNull(alert.vibrate)
-                if (!stopped) await { manager.activeNotifications.singleOrNull { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == appLanguageContext(context).getString(R.string.notif_ongoing_title_offline) }
+                if (!stopped) await { manager.activeNotifications.singleOrNull { it.id == 1 && it.tag == null }?.notification?.extras?.getString(Notification.EXTRA_TITLE) == appLanguageContext(context).getString(R.string.notif_ongoing_title_reconnecting) }
                 else assertTrue(manager.activeNotifications.none { it.id == 1 && it.tag == null })
             }
         } finally {

@@ -23,6 +23,10 @@ class NotificationService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + NotificationPosting.errors)
     private var running: Job? = null
     private var api: HostApi? = null
+    private val enrichments = mutableMapOf<String, Job>()
+    private val enrichmentSlots = kotlinx.coroutines.sync.Semaphore(2)
+    @Volatile private var workspaceNames = emptyList<dev.dshmobile.app.model.Workspace>()
+    @Volatile private var sessionNames = emptyList<dev.dshmobile.app.model.SessionSummary>()
     @Volatile private var connectionStatus = "initializing"
     private val manager by lazy { getSystemService(NotificationManager::class.java) }
     private fun localizedString(id: Int) = dev.dshmobile.app.locale.appLanguageContext(this).getString(id)
@@ -32,7 +36,7 @@ class NotificationService : Service() {
         super.onCreate()
         NotificationPosting.safely {
             // Same stable ID; Android preserves explicit user overrides on existing channels.
-            manager.createNotificationChannel(NotificationChannel(CONNECTION, localizedString(R.string.notif_connection_channel), NotificationManager.IMPORTANCE_MIN).apply {
+            manager.createNotificationChannel(NotificationChannel(CONNECTION, localizedString(R.string.notif_connection_channel), NotificationManager.IMPORTANCE_LOW).apply {
                 setShowBadge(false); setSound(null, null); enableVibration(false)
             })
         }
@@ -59,12 +63,13 @@ class NotificationService : Service() {
     }
     private fun connectionNotification(status: String): android.app.Notification {
         val stop = PendingIntent.getService(this, 0, Intent(this, NotificationService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val settings = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra("notificationSettings", true), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val settings = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java).addFlags(NOTIFICATION_ACTIVITY_FLAGS).putExtra("notificationSettings", true), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return NotificationCompat.Builder(this, CONNECTION).addExtras(connectionLanguageExtras(status)).setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(localizedString(connectionTitleResource(status)))
             .setContentText(connectionBody(dev.dshmobile.app.locale.appLanguageContext(this), status))
             .setGroup("dev.dshmobile.monitoring").setSortKey("monitoring")
-            .setOngoing(true).setOnlyAlertOnce(true).setSilent(true).setPriority(NotificationCompat.PRIORITY_MIN)
+            .setContentIntent(notificationChatListIntent(this))
+            .setOngoing(true).setOnlyAlertOnce(true).setSilent(true).setPriority(NotificationCompat.PRIORITY_LOW)
             .setShowWhen(false).setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .addAction(0, localizedString(R.string.notif_disable), stop)
             .addAction(0, localizedString(R.string.notif_open_settings), settings).build()
@@ -82,6 +87,7 @@ class NotificationService : Service() {
             var terminal = false
             var resyncRequested = false
             var observer: okhttp3.sse.EventSource? = null
+            var namesJob: Job? = null
             try {
                 val host = EncryptedStateStore(this).read().host ?: break
                 var local = store.read()
@@ -96,9 +102,21 @@ class NotificationService : Service() {
                     // Do not overwrite an offline/UI edit made while the PUT was in flight.
                     if (current.settings == local.settings) current.copy(settings = synced, dirty = false) else current
                 }
-                var workspaces = transport.workspaces()
-                var sessions = transport.sessions().items
-                var namesAt = System.currentTimeMillis()
+                // Optional presentation metadata never delays opening or reading the event stream.
+                workspaceNames = emptyList(); sessionNames = emptyList()
+                var namesAt = 0L
+                fun refreshNames() {
+                    if (namesJob?.isActive == true) return
+                    namesAt = System.currentTimeMillis()
+                    namesJob = scope.launch {
+                        try {
+                            val workspaces = transport.workspaces(); val sessions = transport.sessions().items
+                            if (api === transport) { workspaceNames = workspaces; sessionNames = sessions }
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { /* Generic fallback is sufficient for delivery. */ }
+                    }
+                }
+                refreshNames()
                 var catchupPages = 0
                 var passStarted = System.currentTimeMillis()
                 val incoming = Channel<Pair<NotificationPage?, Pair<String, Long>?>>(4)
@@ -112,24 +130,26 @@ class NotificationService : Service() {
                         break
                     }
                     if (page == null) continue
+                    notificationTrace("page_received count=${page.items.size}")
+                    page.items.forEach { notificationEventTrace("received", it.eventId, it.sequence) }
                     if (EncryptedStateStore(this).read().host?.deviceId != host.deviceId) break
-                    if (page.resetRequired || System.currentTimeMillis() - namesAt > 60000 || page.items.any { e -> sessions.none { it.id == e.sessionId } }) {
-                        workspaces = transport.workspaces(); sessions = transport.sessions().items; namesAt = System.currentTimeMillis()
-                    }
+                    if (page.resetRequired || System.currentTimeMillis() - namesAt > 60000) refreshNames()
                     var applied: AppliedNotifications? = null
                     val updated = store.update { current ->
                         if (!current.enabled || current.deviceId != host.deviceId) throw MobileFailure("not_paired")
                         current.applyPage(page, System.currentTimeMillis()).also { applied = it }.state
                     }
+                    notificationTrace("page_persisted count=${page.items.size}")
+                    page.items.forEach { notificationEventTrace("persisted", it.eventId, it.sequence) }
                     val result = applied!!
                     if (result.reset) {
                         for (chat in local.attention.keys) NotificationPosting.cancel(this, tag(host.deviceId, chat, ATTENTION), 2)
                         // Current pending attention is restored silently after reset.
-                        for (pending in page.pending) show(host.deviceId, NotificationEvent(1, pending.attentionId, 0, 0, Long.MAX_VALUE, pending.workspaceId, pending.sessionId, "attention-needed", -1, attentionId = pending.attentionId), updated, workspaces, sessions, true)
+                        for (pending in page.pending) show(host.deviceId, NotificationEvent(1, pending.attentionId, 0, 0, Long.MAX_VALUE, pending.workspaceId, pending.sessionId, "attention-needed", -1, attentionId = pending.attentionId), updated, true)
                     }
-                    for (event in result.display) show(host.deviceId, event, updated, workspaces, sessions, false)
+                    for (event in result.display) show(host.deviceId, event, updated, false)
                     for (chat in updated.attention.keys) {
-                        if (sessions.none { it.id == chat } || updated.settings.chats.find { it.sessionId == chat }?.enabled == false)
+                        if (updated.settings.chats.find { it.sessionId == chat }?.enabled == false)
                             NotificationPosting.cancel(this, tag(host.deviceId, chat, ATTENTION), 2)
                     }
                     // Coverage is feed history, not connectivity. One silent current-state reset per
@@ -152,11 +172,16 @@ class NotificationService : Service() {
                 if (failure is MobileFailure && failure.key in setOf("revoked", "unauthorized", "forbidden"))
                     runCatching { EncryptedHistoryStore(this).reject(failure.key) }
             }
-            finally { observer?.cancel(); api?.close(); api = null }
+            finally { namesJob?.cancel(); observer?.cancel(); api?.close(); api = null; synchronized(enrichments) { enrichments.values.forEach { it.cancel() }; enrichments.clear() } }
             if (resyncRequested) continue
             if (terminal) {
-                NotificationPosting.cancelAll(this@NotificationService)
+                NotificationPosting.cancelAlerts(this@NotificationService)
                 runCatching { store.update { it.copy(enabled = false, monitoringStatus = "blocked") } }
+                connectionStatus = "blocked"
+                // Leave one paced, dismissible explanation, not an unproductive foreground
+                // service or a second unpaced notify that Android can silently shed.
+                stopForeground(STOP_FOREGROUND_DETACH)
+                postNotification(this, null, 1, android.app.Notification.Builder.recoverBuilder(this, connectionNotification(connectionStatus)).setOngoing(false).build())
                 break
             }
             runCatching { store.update { it.copy(monitoringStatus = "offline") } }
@@ -168,61 +193,104 @@ class NotificationService : Service() {
         }
         stopSelf()
     }
-    private suspend fun show(device: String, event: NotificationEvent, local: NotificationLocal,
-        workspaces: List<dev.dshmobile.app.model.Workspace>, sessions: List<dev.dshmobile.app.model.SessionSummary>, silent: Boolean) {
+    private suspend fun show(device: String, event: NotificationEvent, @Suppress("UNUSED_PARAMETER") local: NotificationLocal, silent: Boolean) {
         val kind = if (event.kind == "answer-finished") ANSWERS else ATTENTION
-        val tag = tag(device, event.sessionId, kind) // Identity does not change with sound preference.
+        val tag = tag(device, event.sessionId, kind)
+        synchronized(enrichments) { enrichments.remove(tag)?.cancel() }
         if (event.kind == "attention-cleared") { NotificationPosting.cancel(this, tag, 2); return }
+        NotificationPosting.invalidate(tag, 2)
         val ticket = NotificationPosting.ticket(tag, 2)
+        var retained = false
         try {
-            NotificationPosting.pacedSuspending {
-                val store = NotificationStore(this)
-                val revision = store.changes.value
-                val latest = store.read()
-                val host = EncryptedStateStore(this).read().host
-                if (host?.deviceId != device || !latest.enabled || latest.deviceId != device ||
-                    revision != store.changes.value || !shouldDisplayNotification(event, latest, VisibleNotificationChat.sessionId, sessions) || !alertsAllowed()) {
-                    NotificationPosting.cancel(this, tag, 2); return@pacedSuspending
+            if (!postAlert(device, event, silent, kind, tag, ticket, null)) return
+            if (event.kind == "attention-needed") {
+                val transport = api ?: return
+                val job = synchronized(enrichments) {
+                    if (enrichments.size >= 32) return@synchronized null
+                    scope.launch(start = CoroutineStart.LAZY) {
+                        try {
+                            val question = withTimeoutOrNull(3000) {
+                                enrichmentSlots.acquire()
+                                try {
+                                    notificationTrace("enrichment_begin")
+                                    transport.snapshot(event.sessionId).pendingQuestions.firstOrNull()
+                                } finally { enrichmentSlots.release(); notificationTrace("enrichment_end") }
+                            } ?: return@launch
+                            // Same event, same durable episode, and still in the desired set. Dismiss,
+                            // resolution, a newer event and foreground visibility all invalidate this ticket.
+                            if (desiredAlertEvent(tag) == event.eventId) postAlert(device, event, true, kind, tag, ticket, question)
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { /* Generic attention already delivered. */ }
+                        finally {
+                            NotificationPosting.release(ticket)
+                            synchronized(enrichments) { if (enrichments[tag] === coroutineContext[Job]) enrichments.remove(tag) }
+                        }
+                    }.also { enrichments[tag] = it }
                 }
-                val question = if (event.kind == "attention-needed") runCatching { api?.snapshot(event.sessionId)?.pendingQuestions?.firstOrNull() }.getOrNull() else null
-                deliverAlert(device, event, latest, workspaces, sessions, silent, kind, tag, ticket, revision, question)
+                if (job != null) { retained = true; job.start() }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { NotificationPosting.logFailure(failure) }
-        finally { NotificationPosting.release(ticket) }
+        finally { if (!retained) NotificationPosting.release(ticket) }
+    }
+    private suspend fun postAlert(device: String, event: NotificationEvent, silent: Boolean, kind: String, tag: String,
+        ticket: NotificationPosting.Ticket, question: dev.dshmobile.app.model.PendingQuestion?): Boolean {
+        // Disk and network are outside the non-suspending posting lane.
+        val store = NotificationStore(this)
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val revision = store.changes.value
+            val latest = store.read()
+            val host = EncryptedStateStore(this).read().host
+            if (host?.deviceId != device || !latest.enabled || latest.deviceId != device ||
+                (event.kind == "attention-needed" && latest.attention[event.sessionId] != event.attentionId)) return false
+            if (revision != store.changes.value) continue
+            val posted: Boolean? = NotificationPosting.paced {
+                if (revision != store.changes.value) null // Re-read current policy outside the lane, never lose a durable event to an unrelated write.
+                else if (!shouldDisplayNotification(event, latest, VisibleNotificationChat.sessionId) || !alertsAllowed()) false
+                else deliverAlert(device, event, latest, workspaceNames, sessionNames, silent, kind, tag, ticket, revision, question)
+                    .takeIf { revision == store.changes.value }
+            }
+            if (posted != null) return posted
+        }
     }
     private fun deliverAlert(device: String, event: NotificationEvent, local: NotificationLocal,
         workspaces: List<dev.dshmobile.app.model.Workspace>, sessions: List<dev.dshmobile.app.model.SessionSummary>,
-        silent: Boolean, kind: String, tag: String, ticket: NotificationPosting.Ticket, revision: Long, question: dev.dshmobile.app.model.PendingQuestion?) {
-        if (silent && sessions.none { it.id == event.sessionId }) return
+        silent: Boolean, kind: String, tag: String, ticket: NotificationPosting.Ticket, revision: Long, question: dev.dshmobile.app.model.PendingQuestion?): Boolean {
         if (kind == ATTENTION) NotificationPosting.cancel(this, tag(device, event.sessionId, ANSWERS), 2)
-        val previous = manager.activeNotifications.find { it.tag == tag && it.id == 2 }
-        val quiet = notificationUpdateSilent(silent, event.eventId, previous?.notification?.extras?.getString(ALERT_EVENT))
-        val channel = notificationChannel(event, local, quiet) ?: return
+        val previous = desiredAlertNotification(tag) ?: manager.activeNotifications.find { it.tag == tag && it.id == 2 }?.notification
+        val sameEvent = previous?.extras?.getString(ALERT_EVENT) == event.eventId
+        val quiet = notificationUpdateSilent(silent, event.eventId, previous?.extras?.getString(ALERT_EVENT))
+        // Enrichment updates the original channel in place; moving channels could re-alert
+        // or bypass a user's channel override. Recovery of a new event still uses silent mode.
+        val channel = previous?.channelId?.takeIf { sameEvent } ?: notificationChannel(event, local, quiet) ?: return false
         val title = localizedString(if (event.kind == "answer-finished") R.string.notif_answer_ready else R.string.notif_needs_decision)
         val open = Intent(this, MainActivity::class.java).setAction("dev.dshmobile.OPEN_CHAT")
             .setData(android.net.Uri.Builder().scheme("dshmobile").authority("chat").appendPath(device).appendPath(event.sessionId).build())
             .putExtra("notificationDevice", device).putExtra("notificationChat", event.sessionId).putExtra("notificationQuestion", question?.callId)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .addFlags(NOTIFICATION_ACTIVITY_FLAGS)
         val tap = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val dismissed = PendingIntent.getBroadcast(this, 0, Intent(this, NotificationDismissedReceiver::class.java)
             .setData(open.data?.buildUpon()?.appendPath(kind)?.build()).putExtra("removedTag", tag), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val chatName = sessions.find { it.id == event.sessionId }?.title ?: localizedString(R.string.app_name)
+        val knownChatName = sessions.find { it.id == event.sessionId }?.title?.trim()?.takeIf { it.isNotEmpty() }
+        val chatName = knownChatName ?: localizedString(R.string.notif_unnamed_chat)
         val public = NotificationCompat.Builder(this, channel).setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(if (question != null) chatName else localizedString(R.string.app_name)).setContentText(if (question != null) null else title).build()
         val names = notificationNames(event, workspaces, sessions)
         val notification = NotificationCompat.Builder(this, channel).setSmallIcon(R.drawable.ic_launcher_foreground)
-            .addExtras(alertLanguageExtras(kind, names)).addExtras(android.os.Bundle().apply { putString(ALERT_EVENT, event.eventId) })
-            .apply { if (question != null) { addExtras(android.os.Bundle().apply { putBoolean("dev.dshmobile.questionAlert", true) }); addAction(0, localizedString(R.string.notif_answer), tap) } }
-            .setContentTitle(if (question != null) chatName else title).setContentText(question?.questions?.firstOrNull()?.question ?: names ?: localizedString(R.string.notif_generic))
+            .addExtras(alertLanguageExtras(kind, names)).addExtras(android.os.Bundle().apply { putString(ALERT_EVENT, event.eventId); putString(ALERT_DEVICE, device); putString(ALERT_CHAT, event.sessionId) })
+            .apply { if (question != null) { addExtras(android.os.Bundle().apply { putBoolean("dev.dshmobile.questionAlert", true); putBoolean("dev.dshmobile.unnamedChat", knownChatName == null) }); addAction(0, localizedString(R.string.notif_answer), tap) } }
+            .setContentTitle(if (question != null) chatName else title).setContentText(question?.questions?.firstOrNull()?.question?.take(180) ?: names ?: localizedString(R.string.notif_open_chat_fallback))
             .setGroup(ALERT_GROUP).setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(public).setContentIntent(tap).setDeleteIntent(dismissed)
             .setOnlyAlertOnce(quiet).setAutoCancel(true).setPriority(NotificationCompat.PRIORITY_HIGH).setSilent(quiet).build()
+        var posted = false
         NotificationPosting.commit(ticket) {
             // No suspension between the final visibility/permission check and notify.
             if (NotificationStore(this).changes.value == revision && shouldDisplayNotification(event, local, VisibleNotificationChat.sessionId, sessions) && alertsAllowed())
-                { manager.notify(tag, 2, notification); updateAlertSummary(this, added = tag to notification) }
+                { manager.notify(tag, 2, notification); updateAlertSummary(this, added = tag to notification); posted = true; notificationEventTrace("notify", event.eventId, event.sequence) }
         }
+        return posted
     }
     override fun onDestroy() {
         running?.cancel(); api?.close(); scope.cancel(); super.onDestroy()

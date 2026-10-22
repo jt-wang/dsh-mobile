@@ -40,12 +40,16 @@ internal object NotificationPosting {
         clearAlertSummaryState()
         safely { context.getSystemService(NotificationManager::class.java).cancelAll() }
     }
+    @Synchronized fun cancelAlerts(context: Context) {
+        pending.filter { it.id == 2 || it.id == 3 }.forEach { it.valid = false }
+        clearAlertSummaryState()
+        safely { context.getSystemService(NotificationManager::class.java).activeNotifications.filter { it.id == 2 || it.id == 3 }.forEach { context.getSystemService(NotificationManager::class.java).cancel(it.tag, it.id) } }
+    }
     fun safely(block: () -> Unit) {
         try { block() } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { logFailure(failure) }
     }
-    suspend fun <T> paced(block: () -> T): T = pacedSuspending { block() }
-    suspend fun <T> pacedSuspending(block: suspend () -> T): T = lane.withLock {
+    suspend fun <T> paced(block: () -> T): T = lane.withLock {
         // A synchronous foreground promotion can move the timestamp while this coroutine waits.
         while (true) {
             val remaining = 260L - (SystemClock.elapsedRealtime() - lastPost)

@@ -72,23 +72,26 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
     // Home owns no chat stream/history projection; a restored chat resumes its read explicitly.
     LaunchedEffect(route) { if (route == "home") model.leaveSession() }
     LaunchedEffect(route, sessionId, state.connection, state.busy, state.observingSession, model.interactionBlocked, state.error) {
-        if (route == "chat" && sessionId != null && chatNeedsSelection(sessionId!!, state, model.interactionBlocked))
+        if (model.notificationChat == null && route == "chat" && sessionId != null && chatNeedsSelection(sessionId!!, state, model.interactionBlocked))
             model.selectSession(sessionId!!)
     }
     fun goBack() {
+        model.cancelNotificationNavigation()
         if (route == "chat") model.leaveSession()
         route = if (route == "settings") previousRoute else "home"
     }
-    LaunchedEffect(model.notificationChat, state.connection, state.lastSyncedAt, state.busy, state.observingSession, model.interactionBlocked, state.error) {
+    LaunchedEffect(model.notificationRevision) {
         val target = model.notificationChat
-        if (target != null && chatNeedsSelection(target, state, model.interactionBlocked)) model.selectNotificationChat(target)
-    }
-    LaunchedEffect(model.notificationChat, state.snapshot?.session?.id, state.busy, state.observingSession, state.snapshotStale, model.interactionBlocked, state.error) {
-        val target = model.notificationChat
-        if (target != null && !model.interactionBlocked && notificationTargetSelected(target, state)) {
+        if (target != null) {
+            // Local validated intent opens the target immediately, even while metadata/history
+            // is offline or busy. Fresh data still gates every action, not route admission.
+            sessionId = target; route = "chat"
             dev.dshmobile.app.data.notificationTrace("target_route_chat")
-            sessionId = target; route = "chat"; model.consumeNotificationChat(target)
+            model.selectNotificationChat(target)
         }
+    }
+    LaunchedEffect(model.notificationChat, model.notificationSelecting, state.snapshot, state.busy, state.observingSession, state.snapshotStale, state.error) {
+        model.notificationChat?.let { model.consumeNotificationChat(it) }
     }
     LaunchedEffect(model.notificationChatList) {
         if (model.notificationChatList) { route = "home"; sessionId = null; project = null; search = ""; model.consumeNotificationChatList() }
@@ -114,11 +117,13 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
         when (route) {
             "settings" -> SettingsScreen(state, model, onBack = ::goBack)
             "chat" -> savedScreens.SaveableStateProvider("chat:${sessionId}") {
-                ChatScreen(state, model, sessionId, onBack = ::goBack, onConnection = { connection = true })
+                val targetState = sessionId?.let { notificationRouteState(it, state, model.notificationChat == it) } ?: state
+                ChatScreen(targetState, model, sessionId, onBack = ::goBack, onConnection = { connection = true })
             }
             else -> savedScreens.SaveableStateProvider("home") {
                 ChatListScreen(state, search, { search = it }, project, { project = it },
                     onSelect = { id ->
+                        model.cancelNotificationNavigation()
                         sessionId = id
                         model.selectSession(id) // Resume observation even for an instant cached reopen.
                         route = "chat"

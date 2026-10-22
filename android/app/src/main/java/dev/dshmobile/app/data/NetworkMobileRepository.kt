@@ -79,6 +79,7 @@ internal class NetworkMobileRepository(
     private var selection: Deferred<Unit>? = null
     private var historyRead: Deferred<SessionSnapshot>? = null
     @Volatile private var selectionRevision = 0L
+    @Volatile private var requestedSessionId: String? = null
     @Volatile private var observingSession = observeRestoredSession
     // An admitted command outlives the local bubble/composition that initiated it.
     private val promptActions = dev.dshmobile.app.model.LocalPromptActions(
@@ -385,7 +386,7 @@ internal class NetworkMobileRepository(
         StartupPerf.mark("list_fresh")
         var historyError: String? = null
         val refreshed = try {
-            if (readHistory && selected != null && observingSession) readObservedSnapshot(network, selected) else null
+            if (readHistory && selected != null && observingSession && (requestedSessionId == null || requestedSessionId == selected)) readObservedSnapshot(network, selected) else null
         } catch (failure: MobileFailure) {
             if (failure.key != "chat_unavailable") throw failure
             // Metadata already authenticated successfully. A projection/size error belongs to
@@ -421,6 +422,7 @@ internal class NetworkMobileRepository(
             selection?.cancel()
             historyRead?.cancel()
             val revision = ++selectionRevision
+            requestedSessionId = sessionId
             observingSession = true
             prefetch.cancel()
             val cached = diskHistory.get(sessionId)?.takeIf { entry ->
@@ -450,7 +452,7 @@ internal class NetworkMobileRepository(
                 throw cancelled
             }
             if (!task.isCancelled) throw cancelled
-        } finally { synchronized(selectionGuard) { if (selection === task) selection = null } }
+        } finally { synchronized(selectionGuard) { if (selection === task) { selection = null; requestedSessionId = null } } }
     }
     override suspend fun leaveSession() {
         synchronized(selectionGuard) {
@@ -458,7 +460,7 @@ internal class NetworkMobileRepository(
             observingSession = false
             mutableState.value = state.value.copy(observingSession = false, snapshotStale = state.value.snapshot != null,
                 error = state.value.error?.takeUnless { it == "chat_unavailable" })
-            selectionRevision++
+            selectionRevision++; requestedSessionId = null
             selection?.cancel(); selection = null
             historyRead?.cancel(); historyRead = null
         }

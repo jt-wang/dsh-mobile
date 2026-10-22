@@ -251,38 +251,56 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
             repository.forget()
         }
     }
+    private val notificationRequests = NotificationTargetRequests()
+    private var notificationRead: kotlinx.coroutines.Job? = null
+    var notificationSelecting by mutableStateOf(false); private set
+    var notificationRevision by mutableStateOf(0L); private set
     var notificationSettings by mutableStateOf(false); private set
-    fun openNotificationSettings() { notificationSettings = true }
+    fun openNotificationSettings() { cancelNotificationNavigation(); notificationSettings = true }
     fun consumeNotificationSettings() { notificationSettings = false }
     var notificationChatList by mutableStateOf(false); private set
-    fun openNotificationChatList() { notificationChat = null; notificationQuestion = null; notificationChatList = true }
+    fun openNotificationChatList() { cancelNotificationNavigation(); notificationChatList = true }
     fun consumeNotificationChatList() { notificationChatList = false }
-    var notificationChat by mutableStateOf<String?>(null)
-        private set
+    var notificationChat by mutableStateOf<String?>(null); private set
     var notificationQuestion by mutableStateOf<String?>(null); private set
+    fun cancelNotificationNavigation() {
+        notificationRequests.next(); notificationRead?.cancel(); notificationRead = null
+        notificationSelecting = false; notificationChat = null; notificationQuestion = null
+    }
     fun openNotificationChat(device: String?, chat: String?, question: String? = null) {
+        if (device == null || chat == null || !dev.dshmobile.app.data.validId(chat)) return
+        cancelNotificationNavigation()
+        val revision = notificationRequests.next()
         viewModelScope.launch {
             val host = dev.dshmobile.app.data.EncryptedStateStore(getApplication()).read().host
-            if (host != null && host.deviceId == device && chat != null && dev.dshmobile.app.data.validId(chat)) {
+            if (notificationRequests.isCurrent(revision) && host != null && host.deviceId == device) {
                 dev.dshmobile.app.data.notificationTrace("target_validated restored=${state.value.draftsRestored}")
                 notificationChat = chat; notificationQuestion = question?.takeIf { dev.dshmobile.app.data.validId(it) }
+                notificationSelecting = true; notificationRevision = revision
             }
         }
     }
     fun selectNotificationChat(target: String) {
-        if (interactionBlocked || state.value.busy) return
-        interactionBlocked = true
-        viewModelScope.launch {
+        if (notificationChat != target || notificationRead?.isActive == true) return
+        val revision = notificationRevision
+        notificationSelecting = true
+        notificationRead = viewModelScope.launch {
             dev.dshmobile.app.data.notificationTrace("target_select_begin")
-            try { editorActions.withLock { repository.selectSession(target) } }
-            finally {
+            try {
+                // Only a presentation read/observer is retired. Admitted mutations and drafts
+                // keep their existing owners and admission lock.
+                repository.leaveSession()
+                editorActions.withLock {
+                    if (notificationRequests.isCurrent(revision)) repository.selectSession(target)
+                }
+            } finally {
                 dev.dshmobile.app.data.notificationTrace("target_select_end selected=${notificationTargetSelected(target, state.value)}")
-                interactionBlocked = false
+                if (notificationRequests.isCurrent(revision)) notificationSelecting = false
             }
         }
     }
     fun consumeNotificationChat(target: String) {
-        if (notificationChat == target && !interactionBlocked && notificationTargetSelected(target, state.value)) notificationChat = null
+        if (notificationChat == target && !notificationSelecting && notificationTargetSelected(target, state.value)) notificationChat = null
     }
     private val notificationResume = NotificationResume(viewModelScope, allowed = {
         val context = getApplication<Application>()

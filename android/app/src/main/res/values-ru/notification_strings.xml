@@ -24,7 +24,8 @@
     <string name="notif_initializing">Подключение к ПК…</string>
     <string name="notif_listening">ПК онлайн · Ждём ответы</string>
     <string name="notif_degraded">Часть событий могла быть пропущена.</string>
-    <string name="notif_offline">ПК не в сети · Переподключение</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_offline">Связь прервана · Переподключение</string>
     <string name="notif_mode_sound">Со звуком</string>
     <string name="notif_mode_silent">Без звука</string>
     <string name="notif_mode_off">Выключены</string>
@@ -36,4 +37,45 @@
     <string name="notif_ongoing_title_offline">ПК не в сети</string>
     <string name="notif_ongoing_ready">Ждём ответы и запросы решения</string>
     <string name="notif_open_settings">Настройки</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_unnamed_chat">Чат</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_open_chat_fallback">Откройте этот чат в приложении</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_summary_channel">Сводка уведомлений чатов</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_title_degraded">На связи · проверка событий</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_title_reconnecting">Переподключение…</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_title_blocked">Уведомления приостановлены</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_connecting_body">Открываем фоновое соединение</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_degraded_body">Связь есть; часть событий могла быть пропущена</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_reconnecting_body">Связь прервана; уведомления могут задерживаться</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_blocked_body">Откройте приложение для проверки доступа и подключения</string>
+    <!-- 0.8.1 provisional -->
+    <plurals name="notif_summary_chats">
+        <item quantity="one">%d чат</item>
+        <item quantity="few">%d чата</item>
+        <item quantity="many">%d чатов</item>
+        <item quantity="other">%d чата</item>
+    </plurals>
+    <!-- 0.8.1 provisional -->
+    <plurals name="notif_summary_answers">
+        <item quantity="one">Ответы в %d чате</item>
+        <item quantity="few">Ответы в %d чатах</item>
+        <item quantity="many">Ответы в %d чатах</item>
+        <item quantity="other">Ответы в %d чата</item>
+    </plurals>
+    <!-- 0.8.1 provisional -->
+    <plurals name="notif_summary_attention">
+        <item quantity="one">Нужно решение в %d чате</item>
+        <item quantity="few">Нужно решение в %d чатах</item>
+        <item quantity="many">Нужно решение в %d чатах</item>
+        <item quantity="other">Нужно решение в %d чата</item>
+    </plurals>
 </resources>
