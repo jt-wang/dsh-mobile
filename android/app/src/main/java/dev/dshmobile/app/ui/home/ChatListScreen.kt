@@ -61,6 +61,7 @@ internal fun ChatListScreen(state: MobileState, query: String, onQuery: (String)
     val groups = remember(visible, locale, now) { groupSessionsByDate(visible, now, locale = locale) }
     val list = rememberLazyListState()
     var searchOpen by rememberSaveable { mutableStateOf(query.isNotEmpty()) }
+    androidx.activity.compose.BackHandler(enabled = searchOpen) { searchOpen = false; onQuery("") }
     val canStart = canCreate(state) && !interactionBlocked
     Scaffold(containerColor = MaterialTheme.colorScheme.background,
         topBar = {
