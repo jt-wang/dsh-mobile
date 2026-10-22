@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_waiting_for_answer">Waiting for your answer</string>
     <string name="mobile_default_device">My Android phone</string>
     <string name="mobile_pair_title">Connect your computer</string>
     <string name="mobile_invitation">Invitation JSON</string>

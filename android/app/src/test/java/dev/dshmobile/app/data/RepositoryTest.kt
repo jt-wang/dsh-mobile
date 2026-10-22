@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
@@ -81,6 +82,44 @@ class RepositoryTest {
             else -> if (request.requestUrl?.encodedPath?.startsWith("/v1/commands/") == true)
                 receipt(request.requestUrl!!.pathSegments.last()) else json("{}", 404)
             }
+        }
+    }
+    @Test fun `manual refresh stays active after capabilities until slow history finishes`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            val entered = CompletableDeferred<Unit>(); val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = { entered.complete(Unit); release.await(5, TimeUnit.SECONDS); json(snapshot()) }
+            val refresh = async(Dispatchers.Default) { repo.refresh() }
+            try {
+                withTimeout(5000) { entered.await() }
+                assertEquals(ConnectionState.ONLINE, repo.state.value.connection)
+                assertTrue(repo.state.value.manualRefreshing)
+            } finally { release.countDown() }
+            refresh.await(); assertFalse(repo.state.value.manualRefreshing)
+            fixture.chatSnapshot = { json("{}") }
+            repo.refresh(); assertFalse(repo.state.value.manualRefreshing)
+        }
+    }
+    @Test fun `cold refresh preserves indicator while publishing restored state`() = runBlocking {
+        withRepository { _, store, _, scope ->
+            val cold = NetworkMobileRepository(store, scope, debug = true)
+            val restoredFlags = mutableListOf<Boolean>()
+            val collector = scope.launch(Dispatchers.Unconfined) { cold.state.collect { if (it.draftsRestored) restoredFlags += it.manualRefreshing } }
+            try {
+                cold.refresh()
+                assertTrue(restoredFlags.size >= 2)
+                assertTrue(restoredFlags.dropLast(1).all { it })
+                assertFalse(restoredFlags.last())
+            } finally { collector.cancel(); cold.close() }
+        }
+    }
+    @Test fun `cancelled manual refresh always clears its indicator`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            val entered = CompletableDeferred<Unit>(); val release = java.util.concurrent.CountDownLatch(1)
+            fixture.chatSnapshot = { entered.complete(Unit); release.await(5, TimeUnit.SECONDS); json(snapshot()) }
+            val refresh = async(Dispatchers.Default) { repo.refresh() }
+            try { withTimeout(5000) { entered.await() }; assertTrue(repo.state.value.manualRefreshing); refresh.cancel(); refresh.join() }
+            finally { release.countDown() }
+            assertFalse(repo.state.value.manualRefreshing)
         }
     }
     @Test fun `unavailable history refresh keeps authorized host online and disables stale host actions`() = runBlocking {
@@ -1113,15 +1152,17 @@ class RepositoryTest {
             repo.refresh(); assertEquals(1, fixture.mutations.size)
         }
     }
-    @Test fun `skip capability is opt in continued questions cannot answer and payload is exclusive`() = runBlocking {
+    @Test fun `skip capability is opt in continued questions can answer and payload is exclusive`() = runBlocking {
         withRepository { repo, _, fixture, _ ->
             fixture.capabilities = fixture.capabilities.replace("\"questions\":false", "\"questions\":true")
             fixture.snapshotText = snapshot().dropLast(1) + """, "pendingQuestions":[{"callId":"call","state":"continued","questions":[{"id":"q","question":"Synthetic?","options":[{"label":"Yes"}]}]}]}"""
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":20}""") }
             repo.refresh(); repo.answer("call", dev.dshmobile.app.model.QuestionAnswer(listOf(dev.dshmobile.app.model.AnswerItem("q", listOf("Yes")))))
-            assertTrue(fixture.mutations.isEmpty())
+            assertEquals(1, fixture.mutations.size)
+            assertTrue(fixture.mutations.single().body.clone().readUtf8().contains("\"selected\":[\"Yes\"]"))
+            fixture.mutations.clear()
             repo.skipQuestion("call"); assertTrue(fixture.mutations.isEmpty())
             fixture.capabilities = fixture.capabilities.replace("\"questions\":true", "\"questions\":true,\"questionSkip\":true")
-            fixture.snapshotText = fixture.snapshotText.replace("\"continued\"", "\"open\"")
             repo.refresh(); repo.skipQuestion("call")
             assertEquals(1, fixture.mutations.size)
             val body = fixture.mutations.single().body.clone().readUtf8()

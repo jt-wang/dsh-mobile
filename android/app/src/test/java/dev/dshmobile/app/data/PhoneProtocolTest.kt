@@ -6,6 +6,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PhoneProtocolTest {
+    @Test fun `session waiting flag defaults false and updates from authoritative snapshots`() {
+        val json = """{"id":"chat","title":"","workspaceId":"w","updatedAt":1,"running":false,"canExecute":true}"""
+        val old = decodeWire<SessionSummary>(json).checked()
+        assertFalse(old.waitingForAnswer); assertNull(old.blank); assertEquals("", old.title)
+        val waiting = decodeWire<SessionSummary>(json.dropLast(1) + """, "waitingForAnswer":true,"blank":true}""").checked()
+        assertTrue(waiting.waitingForAnswer); assertEquals(true, waiting.blank)
+        val state = MobileState(sessions = listOf(old))
+        val pending = SessionSnapshot(waiting, emptyList(), 1, false, "waiting")
+        val replaced = MobileReducer.replaceSnapshot(state, pending, 1)
+        assertTrue(replaced.sessions.single().waitingForAnswer)
+        assertFalse(MobileReducer.replaceSnapshot(replaced, pending.copy(session = old), 2).sessions.single().waitingForAnswer)
+    }
+
     @Test fun `old host omits additive capabilities and snapshot fields`() {
         val caps = decodeWire<CapabilitiesResponse>("""{"protocolVersion":1,"hostName":"Synthetic","upstreamVersion":"old","capabilities":{"sessions":true,"textPrompt":true,"cancel":true,"liveSnapshots":true,"attachments":false,"questions":false,"approvals":false,"push":false}}""")
         assertFalse(caps.capabilities.steer); assertFalse(caps.capabilities.queue)

@@ -21,6 +21,10 @@ import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.components.Spinner
 import dev.dshmobile.app.ui.theme.LocalMobileColors
 
+internal fun questionAnswerable(state: String): Boolean = state in setOf("open", "continued")
+internal fun questionOptionDisplayLabel(label: String): String = label.replace(
+    Regex("""\s*(?:\(\s*(?:recommended|推荐)\s*\)|（\s*(?:recommended|推荐)\s*）|\[\s*(?:recommended|推荐)\s*\]|［\s*(?:recommended|推荐)\s*］)\s*$""", RegexOption.IGNORE_CASE), "")
+
 /** Stateless business boundary: draft and submission belong to the ViewModel/repository. */
 @Composable
 internal fun QuestionBlock(pending: PendingQuestion, draft: QuestionAnswer?, readOnly: Boolean, online: Boolean, submitting: Boolean,
@@ -30,11 +34,11 @@ internal fun QuestionBlock(pending: PendingQuestion, draft: QuestionAnswer?, rea
     var edited by remember(pending.callId) { mutableStateOf(false) }
     LaunchedEffect(draft) { if (!edited && draft != null) local = draft }
     val accents = LocalMobileColors.current
-    if (expired || answered != null || skipped || pending.state == "continued") {
+    if (expired || answered != null || skipped || !questionAnswerable(pending.state)) {
         Row(Modifier.fillMaxWidth().testTag("question_record_${pending.callId}"), verticalAlignment = Alignment.CenterVertically) {
             Icon(if (answered != null) MobileIcons.Check else MobileIcons.Clock, null, Modifier.size(16.dp)); Spacer(Modifier.width(8.dp))
             Column { Text(pending.questions.firstOrNull()?.question.orEmpty(), style = MaterialTheme.typography.bodySmall)
-                Text(if (skipped) stringResource(R.string.mobile_question_skipped) else if (expired || pending.state == "continued") stringResource(R.string.mobile_question_expired) else stringResource(R.string.mobile_question_answer, answered?.answers.orEmpty().flatMap { it.selected + listOfNotNull(it.custom) }.joinToString(", ")), style = MaterialTheme.typography.bodyMedium) }
+                Text(if (skipped) stringResource(R.string.mobile_question_skipped) else if (expired || !questionAnswerable(pending.state)) stringResource(R.string.mobile_question_expired) else stringResource(R.string.mobile_question_answer, answered?.answers.orEmpty().flatMap { it.selected + listOfNotNull(it.custom) }.joinToString(", ")), style = MaterialTheme.typography.bodyMedium) }
         }
         return
     }
@@ -89,7 +93,7 @@ internal fun QuestionBlock(pending: PendingQuestion, draft: QuestionAnswer?, rea
                 Row(Modifier.fillMaxWidth().then(selection).heightIn(min = 48.dp).testTag("question_option_$index"), verticalAlignment = Alignment.CenterVertically) {
                     if (question.multiSelect) Checkbox(selected, null, enabled = enabled, colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.onSurface, checkmarkColor = MaterialTheme.colorScheme.surface))
                     else RadioButton(selected, null, enabled = enabled, colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.onSurface))
-                    Column(Modifier.weight(1f).padding(vertical = 8.dp)) { Text(if (option.recommended) option.label.replace(Regex("\\s*(?:\\((?:Recommended|推荐)\\)|（(?:Recommended|推荐)）)\\s*$", RegexOption.IGNORE_CASE), "") else option.label, style = MaterialTheme.typography.bodyLarge)
+                    Column(Modifier.weight(1f).padding(vertical = 8.dp)) { Text(questionOptionDisplayLabel(option.label), style = MaterialTheme.typography.bodyLarge)
                         if (option.recommended) Text(stringResource(R.string.mobile_question_recommended), style = MaterialTheme.typography.labelSmall)
                         option.description?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
                 }
