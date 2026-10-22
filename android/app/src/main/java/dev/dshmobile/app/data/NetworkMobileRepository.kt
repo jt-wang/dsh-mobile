@@ -664,10 +664,12 @@ internal class NetworkMobileRepository(
         if (state.value.capabilities?.models != true) throw MobileFailure("unsupported")
         return api().models()
     }
-    override suspend fun upload(sessionId: String, attachment: dev.dshmobile.app.model.DraftAttachment, open: () -> java.io.InputStream, progress: (Int) -> Unit): dev.dshmobile.app.model.DraftAttachment {
+    private val uploadQueue = UploadQueue()
+    override suspend fun upload(sessionId: String, attachment: dev.dshmobile.app.model.DraftAttachment, open: () -> java.io.InputStream, progress: (Int) -> Unit): dev.dshmobile.app.model.DraftAttachment = uploadQueue.upload(progress) {
+        // Recheck after waiting: a queued upload must not bypass current grants/state.
         if (state.value.capabilities?.attachments != true || state.value.snapshot?.session?.id != sessionId || !dev.dshmobile.app.model.PhoneRules.canMutate(state.value)) throw MobileFailure("forbidden")
         val receipt = api().upload(sessionId, attachment.name, attachment.mime, attachment.size, open, progress)
-        return attachment.copy(uploadId = receipt.uploadId, expiresAt = receipt.expiresAt)
+        attachment.copy(uploadId = receipt.uploadId, expiresAt = receipt.expiresAt)
     }
     override suspend fun image(sessionId: String, attachmentId: String): ByteArray {
         if (state.value.capabilities?.attachments != true || state.value.connection != ConnectionState.ONLINE) throw MobileFailure("unsupported")
@@ -696,7 +698,7 @@ internal class NetworkMobileRepository(
         sources.map { source ->
             if (!force && source.uploadId != null && source.expiresAt > now()) source else {
                 val open = openAttachment ?: throw MobileFailure("attachment_unavailable")
-                val receipt = api().upload(session, source.name, source.mime, source.size, { open(source) }, {})
+                val receipt = uploadQueue.upload({}) { api().upload(session, source.name, source.mime, source.size, { open(source) }, {}) }
                 val refreshed = source.copy(uploadId = receipt.uploadId, expiresAt = receipt.expiresAt)
                 fun replace(items: List<dev.dshmobile.app.model.DraftAttachment>) = items.map { if (it.localId == source.localId) refreshed else it }
                 // Commit each successful upload before attempting the next one; a later 429 cannot lose it.

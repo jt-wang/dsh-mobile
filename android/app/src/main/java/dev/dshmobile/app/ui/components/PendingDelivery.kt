@@ -18,6 +18,15 @@ import dev.dshmobile.app.ui.MobileViewModel
 import dev.dshmobile.app.ui.theme.LocalMobileColors
 import kotlinx.coroutines.launch
 
+internal fun hasPromptContent(command: dev.dshmobile.app.model.PendingCommand) = !command.text.isNullOrBlank() || command.attachmentCount > 0
+
+@Composable
+internal fun PromptContent(command: dev.dshmobile.app.model.PendingCommand, maxLines: Int = Int.MAX_VALUE) {
+    if (!command.text.isNullOrBlank()) Text(command.text, style = MaterialTheme.typography.bodyMedium, maxLines = maxLines, overflow = TextOverflow.Ellipsis)
+    if (command.attachmentCount > 0) Text(stringResource(R.string.mobile_prompt_attachments, command.attachmentCount),
+        modifier = Modifier.testTag("prompt_attachments_${command.requestId}"), style = MaterialTheme.typography.bodySmall)
+}
+
 /** Also lives on Home: an uncertain create has no chat/composer yet, but must remain resolvable. */
 @Composable
 internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifier: Modifier = Modifier) {
@@ -42,7 +51,7 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
                         color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     val queued = command.status == "queued"
-                    Text(command.text.orEmpty(), style = MaterialTheme.typography.bodyMedium, maxLines = if (queued) 1 else 2, overflow = TextOverflow.Ellipsis)
+                    PromptContent(command, maxLines = if (queued) 1 else 2)
                     // The local-only warning matters when the user is deciding about an unconfirmed prompt;
                     // on an ordinary queued item it doubled the card height.
                     if (!queued) Text(stringResource(R.string.mobile_local_prompt_notice), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -83,6 +92,7 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
                 pending.status in listOf("pending", "sending") -> R.string.mobile_delivery_pending
                 else -> R.string.mobile_delivery_unknown
             }), color = accents.warning, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            if (pending.kind == "send") PromptContent(pending)
             TextButton(onClick = model::resolvePending, enabled = !state.busy, modifier = Modifier.testTag("resolve_pending")) { Text(stringResource(R.string.mobile_check_delivery)) }
             if (pending.status in listOf("uncertain", "accepted")) TextButton(onClick = { abandon = true }, enabled = !state.busy, modifier = Modifier.testTag("abandon_pending")) {
                 Text(stringResource(R.string.mobile_abandon_pending))

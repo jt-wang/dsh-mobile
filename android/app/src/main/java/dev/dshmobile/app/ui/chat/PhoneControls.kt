@@ -36,6 +36,9 @@ import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.components.Spinner
 import dev.dshmobile.app.ui.theme.LocalMobileColors
 
+/** Length-prefixed provider keeps separators inside either host identifier unambiguous. */
+internal fun modelCatalogKey(provider: String, id: String) = "${provider.length}:$provider$id"
+
 @Composable
 internal fun SendControl(enabled: Boolean, working: Boolean, steerSupported: Boolean, onSend: (String?) -> Unit) {
     var menu by remember { mutableStateOf(false) }
@@ -135,7 +138,7 @@ internal fun ModelSheet(catalog: ModelCatalog?, current: ModelSelection?, loadin
             if (catalog?.items?.isEmpty() == true) Text(stringResource(R.string.mobile_model_empty))
             if ((catalog?.items?.size ?: 0) > 8) OutlinedTextField(search, { search = it }, placeholder = { Text(stringResource(R.string.mobile_model_search)) }, modifier = Modifier.fillMaxWidth())
             LazyColumn(Modifier.heightIn(max = 440.dp).selectableGroup()) {
-                items(catalog?.items.orEmpty().filter { search.isBlank() || it.name.contains(search, true) || it.provider.contains(search, true) }, key = { "${it.provider}:${it.id}" }) { item ->
+                items(catalog?.items.orEmpty().filter { search.isBlank() || it.name.contains(search, true) || it.provider.contains(search, true) }, key = { modelCatalogKey(it.provider, it.id) }) { item ->
                     val selected = current?.let { it.provider == item.provider && it.model == item.id } == true
                     Row(Modifier.fillMaxWidth().background(if (selected) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(10.dp))
                         .selectable(selected, enabled = !busy, role = Role.RadioButton, onClick = { onSelect(ModelSelection(item.provider, item.id)) })

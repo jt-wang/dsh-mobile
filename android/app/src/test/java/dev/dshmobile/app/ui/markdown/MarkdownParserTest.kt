@@ -5,6 +5,19 @@ import org.junit.Test
 import java.util.concurrent.TimeUnit
 
 class MarkdownParserTest {
+    @Test fun `table pipes inside escapes or matching code spans stay in their cell`() {
+        val table = parseMarkdown("| Name | Value |\n| --- | --- |\n| a\\|b | `c|d` |\n| ``a`|b`` | end\\| |\n| a\\\\| b |") .blocks.single() as MarkdownBlock.Table
+        assertEquals(listOf("a\\|b", "`c|d`"), table.rows[0])
+        assertEquals(listOf("``a`|b``", "end\\|"), table.rows[1])
+        assertEquals(listOf("a\\\\", "b"), table.rows[2])
+        assertEquals("a|b", parseInline(table.rows[0][0]).joinToString("") { it.text })
+    }
+
+    @Test fun `unmatched backtick does not swallow the rest of a table row`() {
+        val table = parseMarkdown("a | b\n--- | ---\n`unclosed | value").blocks.single() as MarkdownBlock.Table
+        assertEquals(listOf("`unclosed", "value"), table.rows.single())
+    }
+
     @Test(timeout = 2000) fun `maximum length heading with internal spaces parses within frame safety budget`() {
         val text = "# a" + " ".repeat(131_068) + "x"
         val started = System.nanoTime()

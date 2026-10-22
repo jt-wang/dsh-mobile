@@ -106,7 +106,38 @@ private fun closesFence(line: String, opening: FenceMatch): Boolean {
     val trimmed = line.trim()
     return trimmed.length >= opening.length && trimmed.all { it == opening.marker }
 }
-private fun tableCells(line: String): List<String> = line.trim().removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
+private fun tableCells(line: String): List<String> {
+    val value = line.trim()
+    // Index matching-length code delimiters once; unmatched backticks stay literal.
+    val runs = mutableMapOf<Int, MutableList<Int>>()
+    var index = 0
+    while (index < value.length) {
+        if (markdownEscape(value, index)) { index += 2; continue }
+        if (value[index] == '`') {
+            val start = index
+            while (index < value.length && value[index] == '`') index++
+            runs.getOrPut(index - start) { mutableListOf() }.add(start)
+        } else index++
+    }
+    val nextRun = mutableMapOf<Int, Int>()
+    runs.values.forEach { positions -> positions.zipWithNext().forEach { (a, b) -> nextRun[a] = b } }
+    val separators = mutableListOf<Int>()
+    index = 0
+    while (index < value.length) {
+        if (markdownEscape(value, index)) { index += 2; continue }
+        if (value[index] == '`') {
+            val start = index
+            while (index < value.length && value[index] == '`') index++
+            val close = nextRun[start]
+            if (close != null) index = close + index - start
+        } else { if (value[index] == '|') separators += index; index++ }
+    }
+    val cells = mutableListOf<String>()
+    var start = if (separators.firstOrNull() == 0) 1 else 0
+    separators.filter { it >= start }.forEach { end -> cells += value.substring(start, end).trim(); start = end + 1 }
+    if (start < value.length || separators.lastOrNull() != value.lastIndex) cells += value.substring(start).trim()
+    return cells
+}
 private const val ESCAPABLE = "\\`*_{}[]()#+-.!|>~"
 private fun markdownEscape(value: String, index: Int): Boolean = value[index] == '\\' && index + 1 < value.length && value[index + 1] in ESCAPABLE
 private fun tableStart(lines: List<String>, index: Int): Boolean = index + 1 < lines.size && lines[index].contains('|') &&

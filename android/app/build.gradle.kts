@@ -33,6 +33,8 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    testOptions { unitTests.isIncludeAndroidResources = true }
+
     // Built-in Kotlin inherits this JVM target from compileOptions.
     buildFeatures {
         compose = true
@@ -65,6 +67,9 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)
 
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)

@@ -47,6 +47,11 @@ internal fun AttachmentPicker(onDismiss: () -> Unit, count: Int, onPick: (List<U
     val context = LocalContext.current
     var cameraText by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
     var cameraFailed by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    var cameraSettings by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    val activity = generateSequence(context) { (it as? android.content.ContextWrapper)?.baseContext }.filterIsInstance<android.app.Activity>().firstOrNull()
+    val permissionHistory = remember(context) { context.getSharedPreferences("attachment-permissions", Context.MODE_PRIVATE) }
+    fun permanentlyDenied() = permissionHistory.getBoolean("camera-requested", false) && activity != null &&
+        !androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(activity, android.Manifest.permission.CAMERA)
     val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) {
         dev.dshmobile.app.data.notificationTrace("media_photos_result count=${it.size}")
         if (it.isNotEmpty()) onPick(it, false); onDismiss()
@@ -62,7 +67,7 @@ internal fun AttachmentPicker(onDismiss: () -> Unit, count: Int, onPick: (List<U
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) try { cameraText = cameraUri(context).toString(); take.launch(Uri.parse(cameraText!!)) } catch (_: Exception) { cameraFailed = true }
-        else cameraFailed = true
+        else { cameraSettings = permanentlyDenied(); cameraFailed = !cameraSettings }
     }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).navigationBarsPadding().padding(bottom = 20.dp)) {
@@ -70,7 +75,10 @@ internal fun AttachmentPicker(onDismiss: () -> Unit, count: Int, onPick: (List<U
                 TextButton(onClick = {
                     when (action) {
                         0 -> photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                        1 -> if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) permission.launch(android.Manifest.permission.CAMERA)
+                        1 -> if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                            if (permanentlyDenied()) cameraSettings = true
+                            else { permissionHistory.edit().putBoolean("camera-requested", true).apply(); permission.launch(android.Manifest.permission.CAMERA) }
+                        }
                             else try { cameraText = cameraUri(context).toString(); take.launch(Uri.parse(cameraText!!)) } catch (_: Exception) { cameraFailed = true }
                         else -> files.launch(arrayOf("*/*"))
                     }
@@ -80,6 +88,13 @@ internal fun AttachmentPicker(onDismiss: () -> Unit, count: Int, onPick: (List<U
             }
             HorizontalDivider()
             Text(stringResource(R.string.mobile_attach_limits, 20, 20), Modifier.padding(top = 12.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (cameraSettings) {
+                PhoneError(stringResource(R.string.mobile_attach_camera_permission))
+                TextButton(onClick = {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+                    cameraSettings = false
+                }, modifier = Modifier.testTag("attachment_camera_settings")) { Text(stringResource(R.string.mobile_open_app_settings)) }
+            }
             if (cameraFailed) PhoneError(stringResource(R.string.mobile_attach_camera_unavailable))
         }
     }
@@ -96,7 +111,7 @@ internal fun AttachmentChips(items: List<UploadState>, imagesBlocked: Boolean, o
                     decodeBoundedImage({ context.contentResolver.openInputStream(Uri.parse(item.uri)) ?: error("unavailable") }, 256).bitmap
                 }.getOrNull() }
             }
-            val label = if (state.error) stringResource(R.string.mobile_attach_retry, item.name) else if (state.uploading) stringResource(R.string.mobile_attach_uploading, item.name, state.progress) else fileMeta(context, item.name, item.size)
+            val label = if (state.error) stringResource(R.string.mobile_attach_retry, item.name) else if (state.uploading && state.progress < 0) stringResource(R.string.mobile_attach_pending, item.name) else if (state.uploading) stringResource(R.string.mobile_attach_uploading, item.name, state.progress) else fileMeta(context, item.name, item.size)
             Box(Modifier.width(if (image) 64.dp else 208.dp).height(64.dp).clip(RoundedCornerShape(12.dp))
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest).border(if (state.error) 1.5.dp else 1.dp,
                     if (state.error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
@@ -104,14 +119,20 @@ internal fun AttachmentChips(items: List<UploadState>, imagesBlocked: Boolean, o
                 if (image) {
                     bitmap?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize().alpha(if (imagesBlocked) 0.35f else 1f), contentScale = ContentScale.Crop) }
                         ?: Icon(MobileIcons.Image, null, Modifier.align(Alignment.Center))
-                    if (state.uploading) Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f)), contentAlignment = Alignment.Center) { Spinner(size = 24.dp) }
+                    if (state.uploading) Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f)), contentAlignment = Alignment.Center) {
+                        if (state.progress < 0) Text(stringResource(R.string.mobile_attach_waiting), color = androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.labelSmall)
+                        else Spinner(size = 24.dp)
+                    }
                     if (state.error) Icon(MobileIcons.Refresh, null, Modifier.align(Alignment.Center))
                 } else Row(Modifier.fillMaxSize().padding(start = 8.dp, end = 24.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(if (state.error) MobileIcons.Refresh else MobileIcons.File, null, Modifier.size(28.dp)); Spacer(Modifier.width(8.dp))
                     Column { Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
-                        Text(if (state.error) stringResource(R.string.mobile_attach_upload_failed) else fileMeta(context, item.name, item.size), style = MaterialTheme.typography.labelSmall) }
+                        Text(if (state.error) stringResource(R.string.mobile_attach_upload_failed) else if (state.uploading && state.progress < 0) stringResource(R.string.mobile_attach_pending, item.name) else fileMeta(context, item.name, item.size), style = MaterialTheme.typography.labelSmall) }
                 }
-                if (!image && state.uploading) LinearProgressIndicator(progress = { state.progress / 100f }, modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(2.dp))
+                if (!image && state.uploading) {
+                    if (state.progress < 0) LinearProgressIndicator(modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(2.dp))
+                    else LinearProgressIndicator(progress = { state.progress / 100f }, modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(2.dp))
+                }
                 IconButton(onClick = { onRemove(item.localId) }, modifier = Modifier.align(Alignment.TopEnd).size(48.dp).offset(x = 12.dp, y = (-12).dp).testTag("attachment_remove_${item.localId}")) {
                     Icon(MobileIcons.Close, stringResource(R.string.mobile_attach_remove, item.name), Modifier.size(16.dp).background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(20.dp)))
                 }
