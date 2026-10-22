@@ -1,6 +1,6 @@
 import { PhoneProjection, sessionModel, mutationAnswer } from './phone-projection.ts';
 import { createHash } from 'node:crypto';
-import { attachmentRefs, questionsOf, queueOf, record, validateAnswer, UPLOAD_LIMIT, IMAGE_MIMES } from './phone.ts';
+import { attachmentRefs, questionsOf, queueOf, record, validateAnswer, safeFileMime, UPLOAD_LIMIT, IMAGE_MIMES } from './phone.ts';
 import type { PendingQuestion, SessionMutation, ModelCatalog, ModelSelection, PromptOptions, UploadedAttachment, AttachmentRef, ImageMime } from './phone.ts';
 import type { QuestionBridge } from './question-bridge.ts';
 import { realpath, stat } from 'node:fs/promises';
@@ -38,6 +38,7 @@ export interface DshSessionSummary {
   readonly sessionId: string;
   readonly updatedAt: number;
   readonly running: boolean;
+  readonly blank?: boolean;
   readonly agentAvailable: boolean;
   readonly cwd?: string;
   readonly origin?: string;
@@ -106,7 +107,21 @@ export interface DshAdapterOptions {
 const phoneProjections = new WeakMap<Transcript, PhoneProjection>();
 // No upstream API discards an unbound receipt. Keep a service-lifetime budget,
 // including mobile-expired/revoked receipts and uncertain upload failures.
-const receiptBudgets = new WeakMap<object, Map<object, { sessionId: string; receiptId?: string }>>();
+type ReceiptBudget = Map<object, { sessionId: string; receiptId?: string }>;
+const RECEIPT_BUDGET = Symbol.for('dsh-mobile.receipt-budget.v1');
+const FILE_MIMES = Symbol.for('dsh-mobile.file-mimes.v1');
+function fileMimes(service: object): Map<string, string> {
+  const identity = (Reflect.get(service, Symbol.for('cordis.original')) ?? service) as object;
+  let mimes = Reflect.get(identity, FILE_MIMES) as Map<string, string> | undefined;
+  if (!mimes) { mimes = new Map(); Object.defineProperty(identity, FILE_MIMES, { value: mimes }); }
+  return mimes;
+}
+function receiptBudget(service: object): ReceiptBudget {
+  const identity = (Reflect.get(service, Symbol.for('cordis.original')) ?? service) as object;
+  let budget = Reflect.get(identity, RECEIPT_BUDGET) as ReceiptBudget | undefined;
+  if (!budget) { budget = new Map(); Object.defineProperty(identity, RECEIPT_BUDGET, { value: budget }); }
+  return budget;
+}
 interface CanonicalWorkspace extends WorkspaceConfig { key: string }
 interface WireEvent { type: string; seq: number; time: number; data: unknown; ignorable?: true; surfaceOp?: unknown }
 interface SurfaceNode { seq: number; message?: ChatMessage; answerTurn?: number }
@@ -527,7 +542,7 @@ export class DshAdapter implements HostAdapter {
     return key === undefined ? undefined : workspaces.get(key);
   }
   private toSession(row: DshSessionSummary, workspace: CanonicalWorkspace): HostSession {
-    return { id: row.sessionId, title: typeof row.projections?.values.title === 'string' ? row.projections.values.title : 'Untitled session', workspaceId: workspace.id, updatedAt: row.updatedAt, running: row.running, ...(row.projections?.values.modelSelection !== undefined ? { model: sessionModel(record(row.projections.values.modelSelection)?.next) } : {}) };
+    return { id: row.sessionId, title: typeof row.projections?.values.title === 'string' ? row.projections.values.title : '', workspaceId: workspace.id, updatedAt: row.updatedAt, running: row.running, ...(typeof row.blank === 'boolean' ? { blank: row.blank } : {}), waitingForAnswer: questionsOf(record(row.projections?.values.userQuestions)?.active).length > 0 || (this.options.questionBridge?.pending(row.sessionId).length ?? 0) > 0, ...(row.projections?.values.modelSelection !== undefined ? { model: sessionModel(record(row.projections.values.modelSelection)?.next) } : {}) };
   }
   private async permitted(sessionId: string, signal: AbortSignal, expectedWorkspaceId?: string): Promise<{ row: DshSessionSummary; session: HostSession; view: readonly WorkspaceConfig[] }> {
     signal.throwIfAborted();
@@ -660,7 +675,7 @@ export class DshAdapter implements HostAdapter {
       if (!session) {
         const status = this.options.sessionStatus!(sessionId);
         if (typeof status.running !== 'boolean' || !Number.isSafeInteger(status.updatedAt) || status.updatedAt < 0 || !Number.isSafeInteger(header.createdAt) || (header.createdAt as number) < 0) throw new HostError('unavailable');
-        session = { id: sessionId, title: 'Untitled session', workspaceId: '', running: status.running, updatedAt: Math.max(header.createdAt as number, status.updatedAt) };
+        session = { id: sessionId, title: '', workspaceId: '', running: status.running, updatedAt: Math.max(header.createdAt as number, status.updatedAt) };
       }
       const scope = await this.workspaceMap(); view = scope.view;
       const workspace = await this.workspace(header.cwd, scope.workspaces);
@@ -669,6 +684,7 @@ export class DshAdapter implements HostAdapter {
       const counts = this.options.runningSubagentCounts?.();
       session = { ...session, workspaceId: workspace.id, ...(counts ? { runningSubagents: counts.get(sessionId) ?? 0 } : {}) };
       const metadata = object(object(object(frame.projections)?.values)?.sessionListMetadata);
+      if (typeof metadata?.blank === 'boolean') session.blank = metadata.blank;
       if (typeof metadata?.lastPromptAt === 'number') session.updatedAt = Math.max(session.updatedAt, metadata.lastPromptAt);
       if (!Array.isArray(frame.records)) throw new HostError('unavailable');
       retentionCut = Buffer.byteLength(JSON.stringify(frame), 'utf8') > MAX_HISTORY_BYTES;
@@ -885,6 +901,13 @@ export class DshAdapter implements HostAdapter {
     snapshot.messages = snapshot.messages.map(m => { const delivery = m.role === 'user' ? phone?.delivery(m.id) : undefined; return delivery ? { ...m, delivery } : m; });
     const live = this.options.questionBridge?.pending(snapshot.session.id) ?? [];
     if (snapshot.pendingQuestions && live.length) { snapshot.pendingQuestions = [...snapshot.pendingQuestions.filter(q => !live.some(p => p.callId === q.callId)), ...live]; snapshot.activity = 'waiting'; }
+    if (this.options.fileUploads) {
+      const mimes = fileMimes(this.options.fileUploads);
+      const metadata = (ref: AttachmentRef): AttachmentRef => ref.kind === 'file' ? { ...ref, mime: safeFileMime(ref.name, mimes.get(ref.id) ?? ref.mime) } : ref;
+      snapshot.messages = snapshot.messages.map(message => ({ ...message, ...(message.attachments ? { attachments: message.attachments.map(metadata) } : {}) }));
+      if (snapshot.pendingQueue) snapshot.pendingQueue = snapshot.pendingQueue.map(item => ({ ...item, ...(item.attachments ? { attachments: item.attachments.map(metadata) } : {}) }));
+    }
+    snapshot.session.waitingForAnswer = (snapshot.pendingQuestions?.length ?? 0) > 0;
     return snapshot;
   }
   phoneCapabilities() {
@@ -934,8 +957,7 @@ export class DshAdapter implements HostAdapter {
     const active = this.signal(signal), service = this.options.fileUploads;
     if (!service || !Number.isSafeInteger(count) || count < 1 || count > 20) throw new HostError('invalid_request');
     await this.permitted(sessionId, active, expectedWorkspaceId);
-    const identity = (Reflect.get(service, Symbol.for('cordis.original')) ?? service) as object;
-    let budget = receiptBudgets.get(identity); if (!budget) { budget = new Map(); receiptBudgets.set(identity, budget); }
+    const budget = receiptBudget(service);
     // At most 64 reservations and 64 scopes. Unknown/failed resolve never
     // proves retirement, so retain its quota; never refresh transcript history.
     if (service.resolve && this.options.sessionController.resolveAgent) {
@@ -975,10 +997,22 @@ export class DshAdapter implements HostAdapter {
       const key = reserved.slots.shift()!, budget = reserved.budget;
       const reservation = budget.get(key)!;
       if (!input.reservation) token.release();
-      // Once uploadStream starts this slot is uncertain on failure and must not
-      // be released with the remaining pre-admission reservations.
-      const result = await service.uploadStream({ sessionId, data: input.data, signal: active, name: input.name });
+      // The inspected service stores only after reading the source. No byte
+      // delivered (and no completed empty source) proves it never reached storage.
+      let reachedDsh = false;
+      const data = (async function* () {
+        for await (const chunk of input.data) { if (chunk.byteLength) reachedDsh = true; yield chunk; }
+        if (input.size === 0) reachedDsh = true;
+      })();
+      let result: Awaited<ReturnType<typeof service.uploadStream>>;
+      try { result = await service.uploadStream({ sessionId, data, signal: active, name: input.name }); }
+      catch (error) { if (!reachedDsh) budget.delete(key); throw error; }
       reservation.receiptId = result.receiptId;
+      // DSH file refs omit MIME. Keep bounded passive metadata through hot reload;
+      // older/evicted refs still use the safe extension fallback.
+      const mimes = fileMimes(service);
+      mimes.delete(result.file.attachmentId); mimes.set(result.file.attachmentId, safeFileMime(result.file.name, input.mime));
+      while (mimes.size > 4096) mimes.delete(mimes.keys().next().value!);
       return { ref: { id: result.file.attachmentId, name: result.file.name, size: result.file.bytes, mime: input.mime, kind: 'file' }, upstream: { type: 'file', receiptId: result.receiptId } };
     } catch (error) { throw phoneError(error); }
   }
@@ -1001,7 +1035,7 @@ export class DshAdapter implements HostAdapter {
       }
       if (size !== ref.size) throw new HostError('unavailable');
       await this.permitted(sessionId, active, expectedWorkspaceId); active.throwIfAborted(); this.checkCurrent(view, sessionId);
-      return { data: Buffer.concat(chunks), ref: { ...ref, mime: 'application/octet-stream' } };
+      return { data: Buffer.concat(chunks), ref };
     } catch (error) { throw phoneError(error); }
   }
   async image(sessionId: string, attachmentId: string, signal: AbortSignal, expectedWorkspaceId: string): Promise<{ data: Uint8Array; ref: AttachmentRef }> {
@@ -1048,7 +1082,7 @@ export class DshAdapter implements HostAdapter {
       if (service?.resolve && this.options.sessionController.resolveAgent) {
         const resolved = await this.options.sessionController.resolveAgent(sessionId);
         if ('error' in resolved) return;
-        const budget = receiptBudgets.get((Reflect.get(service, Symbol.for('cordis.original')) ?? service) as object);
+        const budget = receiptBudget(service);
         const accepted = new Set((options?.attachments ?? []).flatMap(a => a.upstream.type === 'file' ? [a.upstream.receiptId] : []));
         if (budget) for (const [key, entry] of budget) if (entry.sessionId === sessionId && entry.receiptId && accepted.has(entry.receiptId) && service.resolve(resolved.agent, entry.receiptId) === undefined) budget.delete(key);
       }

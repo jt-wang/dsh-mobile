@@ -10,6 +10,18 @@ import { once } from 'node:events';
 
 const grants = { readWorkspaceIds: ['alpha'], executeWorkspaceIds: ['alpha'] };
 
+test('mobile-created blank exceptions expire, retire on engagement, and remain bounded', t => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mobile-created-'))); let now = 1000;
+  const state = new HostState(join(dir, 'host.sqlite'), { now: () => now });
+  t.after(() => { state.close(); rmSync(dir, { recursive: true, force: true }); });
+  state.rememberMobileSession('engaged'); assert.equal(state.mobileSessionVisible('engaged', true), true);
+  assert.equal(state.mobileSessionVisible('engaged', false), true); assert.equal(state.mobileSessionVisible('engaged', true), false);
+  state.rememberMobileSession('expired'); now += 7 * 24 * 60 * 60_000;
+  assert.equal(state.mobileSessionVisible('expired', true), false); assert.equal(state.mobileSessionVisible('old-host', undefined), true);
+  for (let i = 0; i < 257; i++) state.rememberMobileSession('bounded-' + i);
+  assert.equal(state.mobileSessionVisible('bounded-0', true), false); assert.equal(state.mobileSessionVisible('bounded-256', true), true);
+});
+
 test('OS-released runtime lock excludes another process; crash restart safely recovers without blocking admin access', async t => {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mobile-lock-')));
   const path = join(dir, 'host.sqlite'), requestId = randomUUID();

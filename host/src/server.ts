@@ -181,7 +181,13 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
         await checkScope(deviceId, command.workspaceId, true, command.operation !== 'create');
         dispatched = true;
         let result: { sessionId?: string } | undefined;
-        if (command.operation === 'create') result = await adapter.createSession({ workspaceId: command.workspaceId, requestId: command.requestId, ...(command.presetId ? { presetId: command.presetId } : {}) }, controller.signal, command.workspaceId);
+        if (command.operation === 'create') {
+          // Record the requested ID before upstream admission, and the returned ID
+          // too: a future upstream may adopt a blank desktop session.
+          state.rememberMobileSession('session-' + command.requestId.toLowerCase());
+          result = await adapter.createSession({ workspaceId: command.workspaceId, requestId: command.requestId, ...(command.presetId ? { presetId: command.presetId } : {}) }, controller.signal, command.workspaceId);
+          state.rememberMobileSession(result.sessionId!);
+        }
         else if (command.operation === 'prompt') {
           const attachments: UploadedAttachment[] = [];
           for (const staged of command.staged ?? []) {
@@ -256,7 +262,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     const device = checkKnownScope(deviceId, session.workspaceId, ids, false, true);
     if (typeof session.id !== 'string' || typeof session.title !== 'string' || !Number.isFinite(session.updatedAt) || typeof session.running !== 'boolean') throw new HostError('internal_error');
     const runningSubagents = childCount(session.runningSubagents);
-    return { ...(session.model !== undefined ? { model: sessionModel(session.model) } : {}), id: session.id, title: session.title.slice(0, 256), workspaceId: session.workspaceId, updatedAt: session.updatedAt, running: session.running, ...(runningSubagents !== undefined ? { runningSubagents } : {}), canExecute: allowsWorkspace(device.grants.executeWorkspaceIds, session.workspaceId) };
+    return { ...(session.model !== undefined ? { model: sessionModel(session.model) } : {}), id: session.id, title: session.title.slice(0, 256), workspaceId: session.workspaceId, updatedAt: session.updatedAt, running: session.running, ...(typeof session.blank === 'boolean' ? { blank: session.blank } : {}), waitingForAnswer: session.waitingForAnswer === true, ...(runningSubagents !== undefined ? { runningSubagents } : {}), canExecute: allowsWorkspace(device.grants.executeWorkspaceIds, session.workspaceId) };
   }
   const correlationCache = new Map<string, Map<string, string>>();
   function correlationForDevice(deviceId: string): Map<string, string> {
@@ -598,7 +604,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       const sessions = await adapter.listSessions(signal); signal.throwIfAborted();
       const ids = await workspaceIds(); signal.throwIfAborted();
       const archived = workspaceSource.archivedSessionIds(), current = freshDevice(device.deviceId);
-      const scoped = sessions.filter(session => ids.has(session.workspaceId) && !archived.has(session.id) && allowsWorkspace(current.grants.readWorkspaceIds, session.workspaceId) && (workspaceId === undefined || session.workspaceId === workspaceId)).sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+      const scoped = sessions.filter(session => state.mobileSessionVisible(session.id, session.blank) && ids.has(session.workspaceId) && !archived.has(session.id) && allowsWorkspace(current.grants.readWorkspaceIds, session.workspaceId) && (workspaceId === undefined || session.workspaceId === workspaceId)).sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
       const items = scoped.slice(offset, offset + limit).map(session => sessionForDevice(session, current.deviceId, ids));
       let nextCursor: string | null = null;
       if (offset + limit < scoped.length) {

@@ -35,7 +35,7 @@ All other routes require `Authorization: Bearer <deviceToken>`. Device revoke is
 - `GET /capabilities` → `{protocolVersion:1, hostVersion, hostName, upstreamVersion, capabilities:{sessions:true, textPrompt:true, cancel:true, liveSnapshots:true, steer, queue, rename, models, questions, questionSkip, attachments, fileDownload, approvals:false, push:false}}`. Host plugin 0.7.0 publishes `hostVersion:"0.7.0"` and the separate phone feature flags described in [Phone features](#phone-features-additive-v1-extension-host-plugin-070); `approvals` stays `false`.
 - `GET /workspaces` → `{items:[{id,name,canExecute}]}`. IDs map to owner-selected canonical roots: configured opaque IDs in legacy explicit-list mode, or DSH workspace UUIDs in live registry mode. Registry order matches the sidebar, names are sanitized, missing directories are omitted and the first 100 registrations bound the scope. No raw paths in client responses. Permission policy is host-local; wildcard `['*']` grants cover current/future source workspaces without any new mobile request field.
 - `GET /presets` → `{items:[{id,name}]}`. Empty list means host default only.
-- `GET /sessions?workspaceId=<optional>&limit=50&cursor=<optional>` → `{items:[Session],nextCursor:null|string}`. Maximum limit 100; nextCursor opaque validated cursor. Filter unauthorized sessions before pagination. Exclude subagent sessions and, in registry mode, archived sessions before pagination. Each request resolves distinct cwd bindings anew; no cross-request cached workspace identity may authorize metadata.
+- `GET /sessions?workspaceId=<optional>&limit=50&cursor=<optional>` → `{items:[Session],nextCursor:null|string}`. Maximum limit 100; nextCursor opaque validated cursor. Filter unauthorized sessions before pagination. Exclude subagent sessions and, in registry mode, archived sessions before pagination. Exclude `blank:true` sessions except IDs created by mobile (including a returned adopted ID), retained in host state for seven days, at most 256 IDs, until observed nonblank. Missing `blank` fails open. This index filter does not restrict GET/SSE by ID. Each request resolves distinct cwd bindings anew; no cross-request cached workspace identity may authorize metadata.
 - `GET /sessions/{id}` → `Snapshot` (bounded latest history, max 100 messages). Cold read, do not resume execution merely to read.
 - `GET /sessions/{id}/events` → SSE stream. Send `event: snapshot` with a complete `Snapshot` on open and after material changes; heartbeat comments at most 20 s apart. The first snapshot on every connection replaces client history, including after plugin restart. Bounded active streams/device. No bearer in URL, no Last-Event-ID replay guarantee. Close revoked/unauthorized clients or streams whose registry entry/read grant is removed. Grant rechecks also republish changed `canExecute`, even on idle conversations; grant replacement is local administration, not a new remote endpoint. No lossless low-level event claim.
 - `GET /commands/{requestId}` → `CommandReceipt`; only the issuing device can read its own receipt; 404 means no persisted receipt known, NOT proof that an arbitrary upstream task never ran.
@@ -44,6 +44,8 @@ All other routes require `Authorization: Bearer <deviceToken>`. Device revoke is
 type Session = {
   id: string; title: string; workspaceId: string; updatedAt: number;
   running: boolean; canExecute: boolean;
+  blank?: boolean; // DSH empty-session metadata; absent means unknown
+  waitingForAnswer?: boolean; // open or continued agent question; absent means false
   runningSubagents?: number; // integer >= 0; running delegated descendants
 };
 type Message = {
@@ -63,6 +65,8 @@ type Snapshot = {
   activityDetail?: { turnStartedAt: number; tool?: string };
 };
 ```
+
+Session titles may be empty; clients apply their localized untitled fallback. `waitingForAnswer` is independent of `running` and is included in list items and snapshot sessions; clients update it through the same index refresh and replacement-snapshot path as `running`.
 
 History must respect DSH surface replacements; do not expose discarded intermediate assistant attempts as final answers. Replacement endpoints refer to current surface order, not numeric sequence ranges. If a long, compacted chat's bounded history window cannot resolve an older replacement record within the recovery bounds (16 pages / 16 MiB, see [the architecture](<ARCHITECTURE.md#delivery-and-recovery>)), host plugin 0.7.0 keeps and returns the certain recent tail of messages with `hasMore:true` and the fixed history-cut notice, instead of an empty message list; it does not retain potentially discarded answers. Earlier history of such chats may therefore still require the desktop until full history reconstruction/paging is implemented. Unsupported events, sequence gaps and oversized openings still fail closed. Hidden/tool/unknown event types are not dumped as raw JSON. Agent action approvals, and questions on a host without the `questions` flag, must show a neutral notice to return to the desktop, not silently present an idle task.
 
@@ -147,7 +151,7 @@ Every route requires the device bearer token. Mutations also require the execute
 Snapshots (GET and SSE) additionally carry:
 
 - `pendingQueue` — pending queued messages; their IDs are the `itemId` targets of the queue route;
-- `pendingQuestions` — open agent questions; their `callId` is the answer target. Each option in `pendingQuestions[].questions[].options[]` carries `recommended:boolean`;
+- `pendingQuestions` — open or continued (still answerable) agent questions; their `callId` is the answer target. Each option in `pendingQuestions[].questions[].options[]` carries `recommended:boolean`;
 - `resolvedQuestions: [{callId, outcome:"answered"|"skipped", answers:[{id, selected, custom?}]}]` — the last 20 settled question calls;
 - `model: {provider, id, reasoningEffort?} | null` — also on `session`; on `GET /sessions` list items only when already available;
 - `messages[].attachments`;
@@ -177,9 +181,9 @@ A rename changes the chat title on the host. A model change applies when the nex
 
 Questions come from DSH's `ask_user_question` and are answered through DSH's user-questions service. A question offers options (single or multiple choice) and may allow a free-text answer (`custom`). Each answer entry carries the question `id` and the `selected` option list. Option labels are sent back verbatim. To skip a single question inside a batch, send an empty `selected` without `custom` for it. With the `questionSkip` flag, `skip:true` skips the whole batch; upstream then receives an empty `selected` for each question. A request carries either `answer` or `skip:true`, never both.
 
-`recommended` follows DSH's desktop convention: an option label ending in a "(Recommended)" suffix, or "(推荐)", also with full-width parentheses, case-insensitive. The label itself is unchanged.
+`recommended` follows the trailing "Recommended" (case-insensitive) or "推荐" convention in ASCII/fullwidth parentheses or square brackets, with optional whitespace inside and around the suffix. Options additionally expose `displayLabel` without that suffix. `label` remains unchanged and is the answer token. Older clients may ignore `displayLabel` and apply the same display-only parsing.
 
-A question may also be answered on the computer, or expire when the agent continues without the answer; answering an expired question returns 409 `question_expired`. `resolvedQuestions` reports only `answered` and `skipped` outcomes because DSH keeps no durable "expired" outcome. Legacy blocking questions without a call ID are not answerable from the phone. Devices without the execute grant cannot answer.
+Both `open` and `continued` questions are answerable. A question may also be answered on the computer or become unavailable; answering an expired question returns 409 `question_expired`. `resolvedQuestions` reports only `answered` and `skipped` outcomes because DSH keeps no durable "expired" outcome. Legacy blocking questions without a call ID are not answerable from the phone. Devices without the execute grant cannot answer.
 
 Agent action approvals are not available to plugins and stay desktop-only; `approvals` remains `false`.
 
@@ -197,9 +201,9 @@ The app uploads files to the computer right after the user picks them; the messa
 Send-time admission and unconfirmed receipts:
 
 - Every attachment uploaded to DSH at send time holds a receipt reservation, capped at 20 per session and 64 per host.
-- The caps are counted per running plugin instance. They reset when DSH restarts, which also clears DSH's own unbound receipts; plugin updates are activated by a DSH restart.
+- The caps are keyed to the upstream file-upload service and survive plugin module reloads (including Cordis tracing wrappers). A replacement upstream service starts a new budget; a DSH restart also clears upstream unbound receipts.
 - Slots reserved for a message but never used by an upload (for example, the send failed before uploading) are released immediately.
-- An upload that was started stays reserved until DSH's public API proves the receipt was retired, that is consumed or removed. An acknowledgement of the prompt alone does not release it.
+- A failed upload releases its slot only when no bytes reached DSH and no empty source completed. Once data has reached DSH, an unknown outcome stays reserved until DSH's public API proves the receipt was retired, that is consumed or removed. An acknowledgement of the prompt alone does not release it.
 - Before reserving, the host checks the reservations of all sessions (at most 64) and frees those proven retired.
 - The reservation for all files of a message is made before the command is durably admitted. If it cannot be made, the request gets 429 and no receipt is created. The staged uploads stay available for a retry with the same requestId.
 - At most 16 message dispatches holding attachments run per host at a time. Beyond that the request also gets 429 before admission, with the same retry rules.
@@ -226,6 +230,7 @@ Downloads:
 - Images (`attachments`): at most 2 concurrent downloads per device and 4 per host.
 - Files (`fileDownload`): ≤20 MiB per file and at most 2 concurrent downloads per host.
 - Attachment display names longer than 256 UTF-8 bytes are truncated at a code-point boundary instead of failing the snapshot.
+- File reference `mime` uses passive DSH metadata or the declared upload type (bounded service-lifetime cache of 4,096 IDs); otherwise `.pdf` maps to `application/pdf` and `.txt`, `.log`, `.csv`, `.md` to `text/plain`. Other files, executable/script/HTML/SVG extensions and active-content types fall back to `application/octet-stream`. The HTTP file download remains an attachment served as octet-stream with `nosniff`.
 
 ## Limits and unsupported capabilities
 
