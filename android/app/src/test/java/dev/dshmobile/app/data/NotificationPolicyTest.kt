@@ -47,6 +47,16 @@ class NotificationPolicyTest {
         assertEquals(local.copy(revision = 4), reconcileNotificationSettings(local, NotificationSettings(revision = 4), true))
         assertEquals(NotificationSettings(revision = 4), reconcileNotificationSettings(local, NotificationSettings(revision = 4), false))
     }
+    @Test fun summaryCountsDistinctChatsAndTracksKindsIndependently() {
+        val model = notificationSummary(listOf(NotificationAlertIdentity("a", "chat", "answers"),
+            NotificationAlertIdentity("a", "chat", "attention"), NotificationAlertIdentity("a", "other", "answers")))
+        assertEquals(2, model.chats); assertEquals(2, model.answers); assertEquals(1, model.attention)
+        assertEquals(NotificationSummaryKind.MIXED, model.kind)
+        assertEquals(1, notificationSummary(listOf(NotificationAlertIdentity("a", "chat", "answers"), NotificationAlertIdentity("a", "chat", "attention"))).chats)
+    }
+    @Test fun blankTitlesNeverRenderAnEmptyNameOrSeparator() {
+        assertNull(notificationNames(event("e"), listOf(Workspace("alpha", "Project", false)), listOf(SessionSummary("chat", "  ", "alpha", 0, false, false))))
+    }
     @Test fun textUsesOnlyLocalNamesAndFallsBackWithoutResponseContent() {
         assertEquals("Project · Chat", notificationNames(event("event"), listOf(Workspace("alpha", "Project", false)), listOf(SessionSummary("chat", "Chat", "alpha", 0, false, false))))
         assertNull(notificationNames(event("event"), emptyList(), emptyList()))

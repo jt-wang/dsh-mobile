@@ -30,6 +30,55 @@ async function fixture(t: any) {
   return { state, feed, device, head, event, proof, source, listed: (rows: typeof listed) => { listed = rows; } };
 }
 
+test('irrelevant events do no catalog IO but preserve sequence gaps for the next admitted event', async t => {
+  const f = await fixture(t); await f.feed.idle(); let lists = 0;
+  const list = f.source.list; f.source.list = async () => { lists++; return list(); };
+  await f.event(0, 'turn/start'); await f.event(1, 'assistant/message');
+  for (let i = 0; i < 40; i++) await f.event(i, 'assistant/message', {}, 'excluded');
+  assert.equal(lists, 0);
+  f.proof.completed = [{ turn: 1, sourceSeq: 2 }]; await f.event(2, 'turn/end', { turn: 1, completed: true });
+  assert.equal((await f.feed.page(f.device.deviceId, f.head)).items[0]?.kind, 'answer-finished');
+  await f.event(4, 'assistant/message'); await f.event(5, 'tool/call');
+  assert.equal(f.feed.coverage, 'degraded', 'a gap in skipped types still resets an admitted session');
+});
+
+test('a gap among initial irrelevant envelopes suppresses a completion without inventing authority', async t => {
+  const f = await fixture(t); await f.feed.idle();
+  await f.event(0, 'turn/start'); await f.event(2, 'assistant/message');
+  f.proof.completed = [{ turn: 1, sourceSeq: 3 }]; await f.event(3, 'turn/end', { turn: 1, completed: true });
+  assert.equal(f.feed.coverage, 'degraded');
+  assert.equal((await f.feed.page(f.device.deviceId, f.head)).resetRequired, true);
+});
+
+test('bounded irrelevant-session pressure cannot erase a known gap before admission', async t => {
+  const f = await fixture(t); await f.feed.idle();
+  await f.event(0, 'turn/start'); await f.event(2, 'assistant/message');
+  for (let i = 0; i < 10000; i++) await f.event(0, 'assistant/message', {}, 'excluded-' + i);
+  f.proof.completed = [{ turn: 1, sourceSeq: 3 }]; await f.event(3, 'turn/end', { turn: 1, completed: true });
+  assert.equal(f.feed.coverage, 'degraded');
+  assert.equal((await f.feed.page(f.device.deviceId, f.head)).resetRequired, true);
+});
+
+test('reconciliation retires skipped envelopes already covered by its initial watermark', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t); await f.feed.idle();
+  await f.event(0, 'turn/start'); await f.event(1, 'assistant/message');
+  t.mock.timers.tick(60000); await f.feed.idle();
+  f.proof.completed = [{ turn: 1, sourceSeq: 2 }]; await f.event(2, 'turn/end', { turn: 1, completed: true });
+  assert.equal(f.feed.coverage, 'ready');
+  assert.equal((await f.feed.page(f.device.deviceId, f.head)).items[0]?.kind, 'answer-finished');
+});
+
+test('journal listeners observe only committed events and stop after unsubscribe', async t => {
+  const f = await fixture(t); await f.feed.idle();
+  let wakes = 0, committed = false;
+  const stop = f.feed.onChange(() => { wakes++; committed = !!f.state.readNotificationState<any>('device:' + f.device.deviceId).items.length; });
+  f.proof.completed = [{ turn: 1, sourceSeq: 0 }]; await f.event(0, 'turn/end', { turn: 1, completed: true });
+  assert.equal(committed, true); assert.ok(wakes > 0); const before = wakes;
+  await f.feed.page(f.device.deviceId, f.head); assert.equal(wakes, before, 'read-only page bookkeeping must not create a wake loop');
+  stop(); f.proof.pending = true; await f.event(1, 'tool/call'); assert.equal(wakes, before);
+});
+
 test('coverage recovers from a sequence gap only after a successful authoritative reconcile', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const f = await fixture(t); await f.feed.idle(); assert.equal(f.feed.coverage, 'ready');

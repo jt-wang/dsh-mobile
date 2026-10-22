@@ -24,7 +24,8 @@
     <string name="notif_initializing">Connecting to computer…</string>
     <string name="notif_listening">Computer online · Listening for answers</string>
     <string name="notif_degraded">Some events may have been missed.</string>
-    <string name="notif_offline">Computer offline · Reconnecting</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_offline">Connection interrupted · Reconnecting</string>
     <string name="notif_mode_sound">With sound</string>
     <string name="notif_mode_silent">Silent</string>
     <string name="notif_mode_off">Off</string>
@@ -36,4 +37,39 @@
     <string name="notif_ongoing_title_offline">Computer offline</string>
     <string name="notif_ongoing_ready">Listening for answers and decisions</string>
     <string name="notif_open_settings">Settings</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_unnamed_chat">Chat</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_open_chat_fallback">Open this chat in the app</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_summary_channel">Chat notification summary</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_title_degraded">Connected · checking events</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_title_reconnecting">Reconnecting…</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_title_blocked">Notifications paused</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_connecting_body">Opening the background connection</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_degraded_body">Connected; some events may have been missed</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_reconnecting_body">Connection lost; alerts may be delayed</string>
+    <!-- 0.8.1 provisional -->
+    <string name="notif_ongoing_blocked_body">Open the app to check access and reconnect</string>
+    <!-- 0.8.1 provisional -->
+    <plurals name="notif_summary_chats">
+        <item quantity="one">%d chat</item>
+        <item quantity="other">%d chats</item>
+    </plurals>
+    <!-- 0.8.1 provisional -->
+    <plurals name="notif_summary_answers">
+        <item quantity="one">Answers in %d chat</item>
+        <item quantity="other">Answers in %d chats</item>
+    </plurals>
+    <!-- 0.8.1 provisional -->
+    <plurals name="notif_summary_attention">
+        <item quantity="one">Decisions needed in %d chat</item>
+        <item quantity="other">Decisions needed in %d chats</item>
+    </plurals>
 </resources>

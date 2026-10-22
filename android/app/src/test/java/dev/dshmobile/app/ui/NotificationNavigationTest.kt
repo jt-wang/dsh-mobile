@@ -5,6 +5,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NotificationNavigationTest {
+    @Test fun lateValidationAndCompletionCannotReplaceANewerTap() {
+        val requests = NotificationTargetRequests()
+        val a = requests.next(); val b = requests.next()
+        assertFalse(requests.isCurrent(a)); assertTrue(requests.isCurrent(b))
+        requests.next() // Chat list or Back invalidates both pending targets.
+        assertFalse(requests.isCurrent(b))
+    }
+    @Test fun pendingTargetIsReadOnlyBeforeFreshSelection() {
+        val selected = MobileState(snapshot = SessionSnapshot(SessionSummary("old", "Old", "w", 1, false, true), emptyList(), 1, false, "idle"))
+        val loading = notificationRouteState("new", selected, true)
+        assertNull(loading.snapshot); assertTrue(loading.snapshotStale); assertTrue(loading.busy)
+        assertFalse(dev.dshmobile.app.model.PhoneRules.canMutate(loading))
+        val stale = notificationRouteState("old", selected, true)
+        assertNotNull(stale.snapshot); assertTrue(stale.snapshotStale)
+    }
     @Test fun intentIsNotConsumedUntilTargetSelectionFinishesSuccessfully() {
         val selected = MobileState(observingSession = true,
             snapshot = SessionSnapshot(SessionSummary("new", "Synthetic", "workspace", 1, false, true), emptyList(), 1, false, "idle"))

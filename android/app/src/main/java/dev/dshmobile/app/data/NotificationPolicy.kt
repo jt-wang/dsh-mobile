@@ -67,6 +67,7 @@ internal fun notificationRetryDelay(attempt: Int, retryAfterMs: Long, jitter: Do
     maxOf(retryAfterMs, (minOf(60000L, 1000L shl attempt.coerceIn(0, 6)) * jitter.coerceIn(0.5, 1.0)).toLong())
 internal fun notificationNames(event: NotificationEvent, workspaces: List<Workspace>, sessions: List<SessionSummary>): String? {
     val chat = sessions.find { it.id == event.sessionId && it.workspaceId == event.workspaceId } ?: return null
-    val project = workspaces.find { it.id == event.workspaceId } ?: return null
-    return "${project.name.take(128)} · ${chat.title.take(128)}"
+    val title = chat.title.trim().takeIf { it.isNotEmpty() } ?: return null
+    val project = workspaces.find { it.id == event.workspaceId }?.name?.trim()?.takeIf { it.isNotEmpty() }
+    return listOfNotNull(project?.take(128), title.take(128)).joinToString(" · ")
 }

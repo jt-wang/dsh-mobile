@@ -107,6 +107,26 @@ test('notification routes authenticate, stream real pages, enforce policy revisi
   assert.equal((await request('/notification-events?limit=1&limit=2', deviceToken)).status, 400);
 });
 
+test('notification stream wakes on commit without waiting for its fallback tick', async t => {
+  let listener: any; let cursor = -1;
+  const adapter = new TestAdapter();
+  adapter.notifications = () => ({ subscribe(fn: any) { listener = fn; return () => {}; }, list: async () => adapter.listSessions(),
+    evidence: async () => ({ sessionId: 's-alpha', workspaceId: 'alpha', cursor, pending: false, completed: [{ turn: 1, sourceSeq: 0 }] }) });
+  const { request, pair } = await setup(t, adapter), { deviceToken } = await pair();
+  await request('/notification-settings', deviceToken, 'PUT', { expectedRevision: 0, enabled: true, projects: [], chats: [] });
+  const response = await request('/notification-events/stream', deviceToken), reader = response.body!.getReader();
+  try {
+    await reader.read();
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    // The already-created interval is replaced by a frozen clock on subsequent starts;
+    // sub-second deadline also excludes the real 1s fallback on this stream.
+    cursor = 0; listener('s-alpha', { seq: 0, type: 'turn/end', turn: 1, completed: true, time: Date.now() });
+    let timeout: ReturnType<typeof setTimeout>;
+    const frame = await Promise.race([reader.read(), new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(Error('commit did not wake stream')), 800); })]).finally(() => clearTimeout(timeout));
+    assert.match(new TextDecoder().decode(frame.value), /answer-finished/);
+  } finally { await reader.cancel(); }
+});
+
 test('SSE admission validates and publishes the first watch snapshot without a separate reconstruction', async t => {
   const adapter = new TestAdapter(); let snapshots = 0, watches = 0;
   const get = adapter.snapshot.bind(adapter);

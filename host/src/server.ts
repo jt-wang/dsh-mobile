@@ -464,9 +464,11 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     if (!notifications) throw new HostError('unavailable');
     if (notificationStreams.has(deviceId) || (streamCounts.get(deviceId) ?? 0) >= 3 || streams.size >= 32) throw new HostError('rate_limited');
     notificationStreams.add(deviceId); streamCounts.set(deviceId, (streamCounts.get(deviceId) ?? 0) + 1);
-    let closed = false, timer: ReturnType<typeof setInterval> | undefined, working = false;
+    let closed = false, timer: ReturnType<typeof setInterval> | undefined, working = false, dirty = false;
+    let unsubscribe: (() => void) | undefined;
     const stop = () => {
       if (closed) return; closed = true;
+      unsubscribe?.();
       if (timer) clearInterval(timer); streams.delete(registration); notificationStreams.delete(deviceId);
       const count = (streamCounts.get(deviceId) ?? 1) - 1; if (count) streamCounts.set(deviceId, count); else streamCounts.delete(deviceId);
       signal.removeEventListener('abort', stop); res.off('close', stop); if (res.headersSent && !res.destroyed) res.end();
@@ -475,7 +477,9 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     signal.addEventListener('abort', stop, { once: true }); res.once('close', stop);
     let cursor = after, heartbeat = Date.now(), lastCoverage = '';
     async function send(first = false) {
-      if (working || closed) return; working = true;
+      if (closed) return;
+      if (working) { dirty = true; return; }
+      working = true; dirty = false;
       try {
         const page = await notifications!.page(deviceId, cursor, 100);
         signal.throwIfAborted(); if (closed) return;
@@ -484,11 +488,16 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
           const frame = `event: notification-page\nid: ${page.nextCursor}\ndata: ${JSON.stringify(page)}\n\n`;
           if (Buffer.byteLength(frame) > 128 * 1024 || res.writableLength > 128 * 1024 || !res.write(frame)) { stop(); return; }
           cursor = page.nextCursor; lastCoverage = page.coverage;
+          notifications!.tracePage('sse_sent', page.items);
+          dirty ||= page.hasMore;
         }
         if (Date.now() - heartbeat >= (options.heartbeatMs ?? 15000)) { heartbeat = Date.now(); if (!res.write(': heartbeat\n\n')) stop(); }
       } catch (error) { stop(); if (first) throw error; }
-      finally { working = false; }
+      finally { working = false; if (dirty && !closed) queueMicrotask(() => { void send(); }); }
     }
+    // Subscribe before the first read: a commit racing an in-flight page gets one
+    // coalesced follow-up, never concurrent sends or a missed notification.
+    unsubscribe = notifications.onChange(() => { void send(); });
     try { await send(true); if (!closed) { timer = setInterval(() => { void send(); }, 1000); timer.unref(); } }
     catch (error) { stop(); throw error; }
   }
