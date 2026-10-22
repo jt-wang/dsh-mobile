@@ -19,6 +19,9 @@ import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.components.shortTime
 import dev.dshmobile.app.ui.theme.MonoFamily
 import dev.dshmobile.app.ui.theme.tabular
+import androidx.compose.animation.AnimatedVisibility
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.motionEnabled
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.testTag
@@ -38,7 +41,8 @@ internal fun AgentActivityGroup(group: ChatItem.Activity, onCopy: (String) -> Un
     val label = stringResource(R.string.mobile_agent_activity_count, group.messages.size)
     val disclosure = stringResource(if (expanded) R.string.mobile_activity_expanded else R.string.mobile_activity_collapsed)
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val rotation by animateFloatAsState(if (expanded) 90f else 0f, label = "activity chevron")
+    val motion = motionEnabled
+    val rotation by animateFloatAsState(if (expanded) 90f else 0f, Motion.tween(Motion.Medium, motion), label = "activity chevron")
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.clip(MaterialTheme.shapes.small).clickable(role = Role.Button) { expanded = !expanded }
             .heightIn(min = 48.dp).padding(end = 8.dp).testTag("agent_activity_expander").semantics(mergeDescendants = true) { stateDescription = disclosure },
@@ -47,7 +51,8 @@ internal fun AgentActivityGroup(group: ChatItem.Activity, onCopy: (String) -> Un
             Text(label, style = MaterialTheme.typography.labelLarge, color = muted)
             Icon(MobileIcons.ChevronRight, null, Modifier.size(IconSize.Meta).rotate(rotation), tint = muted)
         }
-        if (expanded) {
+        // Details unfold under the header with the chevron, and fold back the same way.
+        AnimatedVisibility(expanded, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "activity details") {
             val rail = MaterialTheme.colorScheme.outlineVariant
             // A hairline rail keeps expanded service items visually separate from the conversation.
             Column(Modifier.fillMaxWidth().padding(start = 7.dp)

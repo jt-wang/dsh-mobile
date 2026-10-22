@@ -61,11 +61,14 @@ internal fun EmptyState(title: String, body: String, modifier: Modifier = Modifi
     }
 }
 
-/** Synthetic-data marker: a small framed label, so it never reads as a section heading or as content. */
+/**
+ * Synthetic-data marker: a small framed label, so it never reads as a section heading or as content.
+ * It is a provenance disclosure, so it wraps at large font scales instead of cutting "no DSH" off.
+ */
 @Composable
 internal fun DemoBadge(modifier: Modifier = Modifier) {
     Text(stringResource(R.string.mobile_demo_tag), modifier
         .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.extraSmall)
         .padding(horizontal = Spacing.S, vertical = Spacing.XXS).testTag("demo_label"),
-        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }

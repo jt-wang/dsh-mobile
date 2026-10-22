@@ -1,6 +1,7 @@
 package dev.dshmobile.app.ui
 
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
@@ -25,6 +26,8 @@ import dev.dshmobile.app.ui.newchat.NewChatSheet
 import dev.dshmobile.app.ui.pairing.PairingScreen
 import dev.dshmobile.app.ui.settings.SettingsScreen
 import dev.dshmobile.app.ui.theme.LocalMotionEnabled
+import dev.dshmobile.app.ui.theme.Motion
+import androidx.compose.animation.*
 import kotlinx.coroutines.CancellationException
 
 @Composable
@@ -114,9 +117,19 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
     Box(Modifier.fillMaxSize().graphicsLayer {
         if (motion) { scaleX = 1f - backProgress * 0.025f; scaleY = 1f - backProgress * 0.025f; alpha = 1f - backProgress * 0.1f }
     }) {
-        when (route) {
+        // Shared-axis transition between the three screens; depth decides the direction. The leaving
+        // screen keeps the last state it showed, so it never flashes an empty or unavailable layout.
+        AnimatedContent(targetState = Screen(route, sessionId),
+            modifier = Modifier.fillMaxSize().background(androidx.compose.material3.MaterialTheme.colorScheme.background), transitionSpec = { screenTransition(initialState, targetState, motion) },
+            contentKey = { if (it.route == "chat") "chat:${it.sessionId}" else it.route }, label = "screen") { screen ->
+        val leaving = transition.targetState == EnterExitState.PostExit
+        val held = remember { arrayOf(state) }
+        if (!leaving) held[0] = state
+        val state = held[0]
+        when (screen.route) {
             "settings" -> SettingsScreen(state, model, onBack = ::goBack)
-            "chat" -> savedScreens.SaveableStateProvider("chat:${sessionId}") {
+            "chat" -> savedScreens.SaveableStateProvider("chat:${screen.sessionId}") {
+                val sessionId = screen.sessionId
                 val targetState = sessionId?.let { notificationRouteState(it, state, model.notificationChat == it) } ?: state
                 ChatScreen(targetState, model, sessionId, onBack = ::goBack, onConnection = { connection = true })
             }
@@ -134,12 +147,29 @@ private fun PairedApp(state: MobileState, model: MobileViewModel) {
                     pendingDelivery = { PendingDelivery(state, model, Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) })
             }
         }
+        }
     }
     if (newChat) NewChatSheet(state, preferredProject = project, task = model.newTaskText, onTask = model::editNewTask,
         onDismiss = { newChat = false }, onCreate = { workspace, preset ->
             newChat = false; beforeCreate = state.snapshot?.session?.id; creating = true; model.createSession(workspace, preset, model.newTaskText)
         })
     if (connection) ConnectionDetails(state, onDismiss = { connection = false }, onRefresh = model::refresh)
+}
+
+/** Navigation target as AnimatedContent state: the leaving chat keeps its own session id. */
+@androidx.compose.runtime.Immutable
+internal data class Screen(val route: String, val sessionId: String?)
+
+private fun screenDepth(route: String) = when (route) { "home" -> 0; "chat" -> 1; else -> 2 }
+
+/** Material shared X axis: a short slide (1/10 width) under a fade-through; instant without motion. */
+internal fun screenTransition(from: Screen, to: Screen, motion: Boolean): ContentTransform {
+    if (!motion) return EnterTransition.None togetherWith ExitTransition.None
+    val forward = screenDepth(to.route) >= screenDepth(from.route)
+    val enter = Motion.tween<androidx.compose.ui.unit.IntOffset>(Motion.Long, true)
+    if (screenDepth(to.route) == screenDepth(from.route)) return fadeIn(Motion.tween(Motion.Medium, true)) togetherWith fadeOut(Motion.tween(Motion.Short, true))
+    return (slideInHorizontally(enter) { width -> if (forward) width / 10 else -width / 10 } + fadeIn(Motion.tween(Motion.Medium, true, delay = 60))) togetherWith
+        (slideOutHorizontally(enter) { width -> if (forward) -width / 10 else width / 10 } + fadeOut(Motion.tween(Motion.Short, true)))
 }
 
 /** Exhaustive known-key map; unknown content is never echoed into UI. */

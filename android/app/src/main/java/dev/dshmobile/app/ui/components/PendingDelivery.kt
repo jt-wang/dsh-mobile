@@ -17,16 +17,32 @@ import androidx.compose.ui.text.style.TextOverflow
 import dev.dshmobile.app.ui.MobileViewModel
 import dev.dshmobile.app.ui.theme.LocalMobileColors
 import kotlinx.coroutines.launch
+import androidx.compose.animation.AnimatedVisibility
+import dev.dshmobile.app.ui.MobileIcons
+import dev.dshmobile.app.ui.theme.AnimatedKeyed
+import dev.dshmobile.app.ui.theme.IconSize
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.Spacing
+import dev.dshmobile.app.ui.theme.motionEnabled
 
 internal fun hasPromptContent(command: dev.dshmobile.app.model.PendingCommand) = !command.text.isNullOrBlank() || command.attachmentCount > 0
 
 @Composable
 internal fun PromptContent(command: dev.dshmobile.app.model.PendingCommand, maxLines: Int = Int.MAX_VALUE) {
     if (!command.text.isNullOrBlank()) Text(command.text, style = MaterialTheme.typography.bodyMedium, maxLines = maxLines, overflow = TextOverflow.Ellipsis)
-    if (command.attachmentCount > 0) Text(stringResource(R.string.mobile_prompt_attachments, command.attachmentCount),
-        modifier = Modifier.testTag("prompt_attachments_${command.requestId}"), style = MaterialTheme.typography.bodySmall)
-    command.attachmentNames.forEach { name ->
-        Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    // Attachments read as one group: a paper-clip gutter, the count as its heading and the names as a
+    // quieter list aligned under it, so an attachment-only prompt still has a clear shape.
+    if (command.attachmentCount > 0 || command.attachmentNames.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(vertical = Spacing.XXS),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.S)) {
+        val muted = MaterialTheme.colorScheme.onSurfaceVariant
+        Icon(MobileIcons.Attach, null, Modifier.padding(top = Spacing.XXS).size(IconSize.Meta), tint = muted)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.XXS)) {
+            if (command.attachmentCount > 0) Text(stringResource(R.string.mobile_prompt_attachments, command.attachmentCount),
+                modifier = Modifier.testTag("prompt_attachments_${command.requestId}"), style = MaterialTheme.typography.labelLarge)
+            command.attachmentNames.forEach { name ->
+                Text(name, style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
     }
 }
 
@@ -36,8 +52,11 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
     val accents = LocalMobileColors.current
     // Accepted inbox prompts are informational local bubbles, not delivery warnings.
     val snapshot = state.snapshot
-    state.acceptedPrompts.filter { snapshot != null && it.sessionId == snapshot.session.id && !MobileReducer.reconcilesPrompt(it, snapshot) }.forEach { command ->
-        key(command.requestId) {
+    val motion = motionEnabled
+    // Cards slide open when a prompt is accepted and fold away once the transcript confirms or the user hides it.
+    AnimatedKeyed(state.acceptedPrompts.filter { snapshot != null && it.sessionId == snapshot.session.id && !MobileReducer.reconcilesPrompt(it, snapshot) },
+        key = { it.requestId }, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion)) { command ->
+        run {
             val scope = rememberCoroutineScope()
             var confirmResend by remember { mutableStateOf(false) }
             var acting by remember { mutableStateOf(false) }
@@ -58,7 +77,9 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
                     // The local-only warning matters when the user is deciding about an unconfirmed prompt;
                     // on an ordinary queued item it doubled the card height.
                     if (!queued) Text(stringResource(R.string.mobile_local_prompt_notice), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Actions wrap as whole buttons onto a second line instead of breaking a label in two.
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.S)) {
                         TextButton(onClick = {
                             acting = true
                             scope.launch { try { actions?.dismiss?.invoke(command.requestId) } finally { acting = false } }
@@ -83,7 +104,16 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
     if (MobileReducer.blockingPromptCount(state) >= MobileReducer.MAX_ACCEPTED_PROMPTS) {
         Text(stringResource(R.string.mobile_queue_full), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    val pending = state.pending ?: return
+    val heldPending = remember { arrayOfNulls<dev.dshmobile.app.model.PendingCommand>(1) }
+    if (state.pending != null) heldPending[0] = state.pending
+    AnimatedVisibility(state.pending != null, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "pending delivery") {
+        heldPending[0]?.let { PendingCard(it, state, model, modifier) }
+    }
+}
+
+@Composable
+private fun PendingCard(pending: dev.dshmobile.app.model.PendingCommand, state: MobileState, model: MobileViewModel, modifier: Modifier) {
+    val accents = LocalMobileColors.current
     var abandon by remember(pending.requestId) { mutableStateOf(false) }
     Surface(color = accents.warningContainer, shape = MaterialTheme.shapes.medium, modifier = modifier) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {

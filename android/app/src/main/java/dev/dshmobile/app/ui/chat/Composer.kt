@@ -26,6 +26,10 @@ import dev.dshmobile.app.ui.components.*
 import androidx.compose.ui.text.style.TextOverflow
 import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.theme.LocalMobileColors
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.animateSize
+import dev.dshmobile.app.ui.theme.motionEnabled
+import androidx.compose.animation.AnimatedVisibility
 
 @Composable
 internal fun Composer(state: MobileState, model: MobileViewModel, onCancel: () -> Unit, onModels: () -> Unit = {}) {
@@ -40,10 +44,15 @@ internal fun Composer(state: MobileState, model: MobileViewModel, onCancel: () -
     var picking by androidx.compose.runtime.saveable.rememberSaveable(session) { mutableStateOf(false) }
     val keyboardOpen = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
     val inputEnabled = canEditDraft(state, model.interactionBlocked)
+    val motion = motionEnabled
     Surface(color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Queue and delivery cards above the field grow and shrink smoothly instead of shoving the field.
+            // With the keyboard down there is room for a whole delivery card (actions included); with it up the
+            // timeline keeps priority and the stack scrolls within 180dp as before.
+            val stackMax = if (keyboardOpen) 180.dp else maxOf(180.dp, with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp() } * 0.4f)
+            Column(Modifier.fillMaxWidth().animateSize(motion).heightIn(max = stackMax).verticalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 QueueGroup(if (state.capabilities?.queue == true) state.snapshot?.pendingQueue.orEmpty() else emptyList(), PhoneRules.canMutate(state) && !model.interactionBlocked,
                     state.snapshot?.session?.running == true, model.phoneAction, model.phoneError, keyboardOpen, model.phoneErrorAction, state.capabilities?.steer == true, model::queueAction)
                 PendingDelivery(if (state.capabilities?.queue == true) state.copy(acceptedPrompts = state.acceptedPrompts.filter { p -> state.snapshot?.pendingQueue.orEmpty().none { q -> q.requestId == p.requestId } }) else state, model)
@@ -58,7 +67,14 @@ internal fun Composer(state: MobileState, model: MobileViewModel, onCancel: () -
                     placeholder = stringResource(if (running) R.string.mobile_message_queued_hint else R.string.mobile_message),
                     enabled = inputEnabled, modifier = Modifier.testTag("message_input"),
                     leading = if (state.capabilities?.attachments == true) ({ IconButton(onClick = { picking = true }, enabled = PhoneRules.canMutate(state) && !model.interactionBlocked) { Icon(MobileIcons.Attach, stringResource(R.string.mobile_attach), Modifier.size(24.dp)) } }) else null,
-                    header = if (attachments.isNotEmpty()) ({ AttachmentChips(attachments, imagesBlocked, { id -> session?.let { model.phone.remove(it, id) } }, { id -> session?.let { model.phone.retry(it, id) } }) }) else null) {
+                    header = {
+                        // The chip band opens above the text and folds away with its last chip still showing.
+                        val held = remember(session) { arrayOf(attachments) }
+                        if (attachments.isNotEmpty()) held[0] = attachments
+                        AnimatedVisibility(attachments.isNotEmpty(), enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "attachment chips") {
+                            AttachmentChips(held[0], imagesBlocked, { id -> session?.let { model.phone.remove(it, id) } }, { id -> session?.let { model.phone.retry(it, id) } })
+                        }
+                    }) {
                     // Secondary Stop retains ChatScreen's existing confirmation callback.
                     // Stop is the tonal twin of Send: same 40dp disc in a 48dp target, filled only by the surface tone.
                     if (running) FilledTonalIconButton(onClick = onCancel, enabled = canCancel(state) && !model.interactionBlocked, shape = CircleShape,

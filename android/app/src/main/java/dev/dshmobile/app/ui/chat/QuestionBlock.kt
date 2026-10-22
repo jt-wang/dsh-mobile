@@ -20,6 +20,26 @@ import dev.dshmobile.app.model.*
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.components.Spinner
 import dev.dshmobile.app.ui.theme.LocalMobileColors
+import dev.dshmobile.app.ui.theme.ControlSize
+import dev.dshmobile.app.ui.theme.Spacing
+import dev.dshmobile.app.ui.theme.animateSize
+import dev.dshmobile.app.ui.theme.motionEnabled
+import androidx.compose.foundation.border
+import androidx.compose.ui.draw.clip
+
+/**
+ * "Recommended" as a small framed tag under the option label (the same quiet frame as the demo
+ * marker), with a check glyph so it reads as a property of the option and not as more label text.
+ */
+@Composable
+private fun RecommendedMark() {
+    val tone = MaterialTheme.colorScheme.onSurface
+    Row(Modifier.border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.extraSmall).padding(start = Spacing.XS + Spacing.XXS, end = Spacing.S, top = Spacing.XXS, bottom = Spacing.XXS),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.XS)) {
+        Icon(MobileIcons.Check, null, Modifier.size(12.dp), tint = tone)
+        Text(stringResource(R.string.mobile_question_recommended), style = MaterialTheme.typography.labelMedium, color = tone)
+    }
+}
 
 internal fun questionAnswerable(state: String): Boolean = state in setOf("open", "continued")
 internal fun questionOptionDisplayLabel(label: String): String = label.replace(
@@ -54,7 +74,7 @@ internal fun QuestionBlock(pending: PendingQuestion, draft: QuestionAnswer?, rea
     Column(Modifier.fillMaxWidth().testTag("question_${pending.callId}").semantics {
         heading(); liveRegion = LiveRegionMode.Polite
         customActions = if (step > 0) listOf(CustomAccessibilityAction(previous) { step--; true }) else emptyList()
-    }.pointerInput(step) {
+    }.animateSize(motionEnabled).pointerInput(step) {
         var distance = 0f
         detectHorizontalDragGestures(onDragStart = { distance = 0f }, onHorizontalDrag = { _, amount -> distance += amount }, onDragEnd = { if (distance > 80 && step > 0) step-- })
     }, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -90,17 +110,26 @@ internal fun QuestionBlock(pending: PendingQuestion, draft: QuestionAnswer?, rea
                 }
                 val selection = if (question.multiSelect) Modifier.toggleable(selected, enabled, Role.Checkbox) { action() }
                     else Modifier.selectable(selected, enabled = enabled, role = Role.RadioButton, onClick = action)
-                Row(Modifier.fillMaxWidth().then(selection).heightIn(min = 48.dp).testTag("question_option_$index"), verticalAlignment = Alignment.CenterVertically) {
-                    if (question.multiSelect) Checkbox(selected, null, enabled = enabled, colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.onSurface, checkmarkColor = MaterialTheme.colorScheme.surface))
-                    else RadioButton(selected, null, enabled = enabled, colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.onSurface))
-                    Column(Modifier.weight(1f).padding(vertical = 8.dp)) { Text(questionOptionDisplayLabel(option.label), style = MaterialTheme.typography.bodyLarge)
-                        if (option.recommended) Text(stringResource(R.string.mobile_question_recommended), style = MaterialTheme.typography.labelSmall)
+                // Control and text column share a 12dp gutter; the control sits on the label's first line
+                // rather than floating in the middle of a tall multi-line option.
+                Row(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).then(selection).heightIn(min = 48.dp).testTag("question_option_$index"),
+                    verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(Spacing.M)) {
+                    Box(Modifier.size(width = ControlSize.StatusCell + Spacing.XS, height = ControlSize.TouchTarget), contentAlignment = Alignment.Center) {
+                        if (question.multiSelect) Checkbox(selected, null, enabled = enabled, colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.onSurface, checkmarkColor = MaterialTheme.colorScheme.surface))
+                        else RadioButton(selected, null, enabled = enabled, colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.onSurface))
+                    }
+                    Column(Modifier.weight(1f).heightIn(min = ControlSize.TouchTarget).padding(vertical = Spacing.M, horizontal = 0.dp).padding(end = Spacing.S),
+                        verticalArrangement = Arrangement.spacedBy(Spacing.XS, Alignment.CenterVertically)) {
+                        Text(questionOptionDisplayLabel(option.label), style = MaterialTheme.typography.bodyLarge)
+                        if (option.recommended) RecommendedMark()
                         option.description?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
                 }
             }
-            if (question.allowFreeText) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                if (question.multiSelect) Checkbox(!answer.custom.isNullOrBlank(), null, enabled = enabled)
-                else RadioButton(!answer.custom.isNullOrBlank(), null, enabled = enabled)
+            if (question.allowFreeText) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.M)) {
+                Box(Modifier.size(width = ControlSize.StatusCell + Spacing.XS, height = ControlSize.TouchTarget), contentAlignment = Alignment.Center) {
+                    if (question.multiSelect) Checkbox(!answer.custom.isNullOrBlank(), null, enabled = enabled)
+                    else RadioButton(!answer.custom.isNullOrBlank(), null, enabled = enabled)
+                }
                 TextField(answer.custom.orEmpty(), { change(answer.copy(custom = PhoneRules.boundedAnswerText(it).takeIf { text -> text.isNotEmpty() }, selected = if (question.multiSelect) answer.selected else emptyList())) },
                     enabled = enabled, placeholder = { Text(stringResource(R.string.mobile_question_other_hint)) }, shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
                     modifier = Modifier.weight(1f).testTag("question_custom"), colors = TextFieldDefaults.colors(focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,

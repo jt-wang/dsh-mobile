@@ -35,6 +35,12 @@ import dev.dshmobile.app.model.*
 import dev.dshmobile.app.ui.MobileIcons
 import dev.dshmobile.app.ui.components.Spinner
 import dev.dshmobile.app.ui.components.shortTime
+import androidx.compose.animation.AnimatedVisibility
+import dev.dshmobile.app.ui.theme.ControlSize
+import dev.dshmobile.app.ui.theme.IconSize
+import dev.dshmobile.app.ui.theme.Motion
+import dev.dshmobile.app.ui.theme.Spacing
+import dev.dshmobile.app.ui.theme.motionEnabled
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -195,23 +201,46 @@ internal fun ImageViewer(refs: List<AttachmentRef>, initial: Int, cache: ImageMe
                 bitmap?.let { Image(it.asImageBitmap(), stringResource(R.string.mobile_image_description, index + 1, refs.size, ref.name), Modifier.fillMaxSize().graphicsLayer { scaleX = scale; scaleY = scale; translationX = if (scale > 1) x else 0f; translationY = if (scale > 1) y else 0f }, contentScale = ContentScale.Fit) }
                     ?: if (failed) TextButton(onClick = { retry++ }) { Text(stringResource(R.string.mobile_media_retry), color = Color.White) } else Spinner(size = 24.dp)
             }
-            if (panels || exploring) {
-                Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().background(Color.Black.copy(alpha = 0.4f)).statusBarsPadding(), verticalAlignment = Alignment.CenterVertically) {
+            // Chrome fades instead of popping; with touch exploration it stays on so TalkBack can reach it.
+            val chrome = panels || exploring
+            val motion = motionEnabled
+            AnimatedVisibility(chrome, Modifier.align(Alignment.TopCenter), enter = Motion.panelIn(motion), exit = Motion.panelOut(motion), label = "viewer top") {
+                Row(Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.4f)).statusBarsPadding(), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onClose, modifier = Modifier.testTag("viewer_close")) { Icon(MobileIcons.Close, stringResource(R.string.mobile_activity_close), tint = Color.White) }
                     Text("${index + 1} / ${refs.size}", Modifier.weight(1f), color = Color.White)
                     IconButton(onClick = { scope.launch { try { shareImage(context, ref, requireNotNull(bytes)) } catch (_: Exception) { snackbar.showSnackbar(failure) } } }, enabled = bytes != null, modifier = Modifier.testTag("viewer_share")) { Icon(MobileIcons.Share, stringResource(R.string.mobile_viewer_share), tint = Color.White) }
                     IconButton(onClick = { if (android.os.Build.VERSION.SDK_INT < 29) saveDocument(ref, requireNotNull(bytes)) else scope.launch { try { saveImage(context, ref, requireNotNull(bytes)); snackbar.showSnackbar(saved) } catch (_: Exception) { snackbar.showSnackbar(failure) } } }, enabled = bytes != null, modifier = Modifier.testTag("viewer_save")) { Icon(MobileIcons.Download, stringResource(R.string.mobile_viewer_save), tint = Color.White) }
                 }
-                Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Color.Black.copy(alpha = 0.4f)).navigationBarsPadding().padding(16.dp)) {
-                    if (exploring && refs.size > 1) Row {
-                        TextButton(onClick = { index-- }, enabled = index > 0, modifier = Modifier.testTag("viewer_previous")) { Text(previous, color = Color.White) }
-                        TextButton(onClick = { index++ }, enabled = index < refs.lastIndex, modifier = Modifier.testTag("viewer_next")) { Text(next, color = Color.White) }
+            }
+            AnimatedVisibility(chrome, Modifier.align(Alignment.BottomStart), enter = Motion.panelIn(motion), exit = Motion.panelOut(motion), label = "viewer bottom") {
+                Column(Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.4f)).navigationBarsPadding().padding(horizontal = Spacing.L, vertical = Spacing.M),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.M)) {
+                    // Explore-by-touch stepping: two equal outlined buttons, chevron on the outer edge, so the pair
+                    // reads as previous/next at any length or font scale; a disabled end dims rather than vanishing.
+                    if (exploring && refs.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.M)) {
+                        ViewerStep(previous, MobileIcons.ChevronLeft, leading = true, enabled = index > 0, modifier = Modifier.weight(1f).testTag("viewer_previous")) { index-- }
+                        ViewerStep(next, MobileIcons.ChevronRight, leading = false, enabled = index < refs.lastIndex, modifier = Modifier.weight(1f).testTag("viewer_next")) { index++ }
                     }
-                    Text(ref.name, color = Color.White); Text("${decoded?.width ?: 0} × ${decoded?.height ?: 0} · ${android.text.format.Formatter.formatShortFileSize(context, ref.size)}" + (timestamp?.let { " · ${shortTime(it)}" } ?: ""), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                    Column(verticalArrangement = Arrangement.spacedBy(Spacing.XXS)) {
+                        Text(ref.name, color = Color.White, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        Text("${decoded?.width ?: 0} × ${decoded?.height ?: 0} · ${android.text.format.Formatter.formatShortFileSize(context, ref.size)}" + (timestamp?.let { " · ${shortTime(it)}" } ?: ""), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
         }
+}
+
+@Composable
+private fun ViewerStep(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, leading: Boolean, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = ControlSize.TouchTarget),
+        shape = MaterialTheme.shapes.medium, border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = if (enabled) 0.5f else 0.18f)),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White, disabledContentColor = Color.White.copy(alpha = 0.38f)),
+        contentPadding = PaddingValues(horizontal = Spacing.M, vertical = Spacing.S)) {
+        if (leading) { Icon(icon, null, Modifier.size(IconSize.Row)); Spacer(Modifier.width(Spacing.XS)) }
+        Text(label, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelLarge, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        if (!leading) { Spacer(Modifier.width(Spacing.XS)); Icon(icon, null, Modifier.size(IconSize.Row)) }
+    }
 }
 
 /** SAF export on API26–28: persist only a private temporary path across recreation, never bytes. */
