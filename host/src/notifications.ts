@@ -20,6 +20,12 @@ export interface NotificationEvent {
 export interface NotificationSettings { revision: number; enabled: boolean; projects: { workspaceId: string; enabled: boolean }[]; chats: { sessionId: string; enabled: boolean }[] }
 interface Journal { epoch: string; sequence: number; settings: NotificationSettings; items: NotificationEvent[]; scope?: string; attentionSessions?: string[] }
 interface SourceState { seq: number; attentionId?: string }
+type TraceStage = 'source_received' | 'producer_begin' | 'producer_end' | 'journal_committed' | 'sse_sent';
+/** Opt-in diagnostics: fixed labels, numeric metadata and a one-way event correlation only. */
+export function notificationTrace(stage: TraceStage, fields: { seq?: number; queue?: number; durationMs?: number; event?: string; count?: number } = {}): void {
+  if (process.env.DSH_MOBILE_NOTIFICATION_TRACE !== '1') return;
+  console.debug(JSON.stringify({ component: 'DSHNotification', stage, timeMs: Date.now(), ...fields }));
+}
 const RETENTION = 7 * 86400_000;
 const relevant = new Set(['turn/end', 'approval/asked', 'approval/decided', 'tool/call', 'tool/result', 'user/message']);
 const idValid = (s: unknown): s is string => typeof s === 'string' && Buffer.byteLength(s) <= 256 && !!s && !['__proto__', 'constructor', 'prototype'].includes(s) && !/[\/\\\x00-\x1f\x7f]/.test(s);
@@ -50,8 +56,24 @@ export class NotificationFeed {
   private coverageRevision = 0;
   private recoveryScan = false;
   private readonly recoveryPending = new Set<string>();
+  // Irrelevant envelopes are not membership evidence. Bounded, transient sequence cuts are
+  // reconciled only after the next relevant event passes a fresh membership check.
+  private readonly skipped = new Map<string, { first: number; last: number; gap: boolean }>();
+  private readonly listeners = new Set<() => void>();
+  private wakeQueued = false;
+  onChange(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  private changed(): void {
+    if (this.wakeQueued || this.lifetime.signal.aborted) return;
+    this.wakeQueued = true;
+    queueMicrotask(() => { this.wakeQueued = false; if (!this.lifetime.signal.aborted) for (const listener of this.listeners) { try { listener(); } catch { /* Observers cannot roll back a committed journal. */ } } });
+  }
+  tracePage(stage: 'sse_sent', items: NotificationEvent[]): void {
+    if (process.env.DSH_MOBILE_NOTIFICATION_TRACE !== '1') return;
+    for (const event of items) notificationTrace(stage, { event: createHash('sha256').update(event.eventId).digest('hex').slice(0, 12), seq: event.sequence });
+  }
   private degrade(): void {
-    this.coverage = 'degraded'; this.coverageRevision++; this.recoveryScan = true;
+    const previous = this.coverage; this.coverage = 'degraded'; this.coverageRevision++; this.recoveryScan = true;
+    if (previous !== this.coverage) this.changed();
   }
   baselineReady = false;
   private batch: Map<string, Journal> | undefined;
@@ -68,6 +90,7 @@ export class NotificationFeed {
       if (this.lifetime.signal.aborted || !this.activated || !this.enabledDevices()) return;
       if (!idValid(id) || !Number.isSafeInteger(event.seq) || event.seq < 0 || !Number.isSafeInteger(event.time) || event.time < 0 || typeof event.type !== 'string' || event.type.length > 128) { this.degrade(); return; }
       if (this.queue.length >= 4096) { this.degrade(); this.overflow = true; return; }
+      notificationTrace('source_received', { seq: event.seq, queue: this.queue.length });
       this.queue.push({ id, event });
       if (this.started) this.schedule();
     });
@@ -112,7 +135,7 @@ export class NotificationFeed {
         }
         if (pendingBefore !== this.pendingCut()) this.resetJournals();
         this.state.writeNotificationState('producer', this.watermarks);
-        this.coverage = this.coverage === 'degraded' ? 'degraded' : 'ready';
+        this.coverage = this.coverage === 'degraded' ? 'degraded' : 'ready'; this.changed();
       } catch { if (!activation.signal.aborted) { this.degrade(); this.resetJournals(); } }
       finally { if (this.activation === activation && !activation.signal.aborted) { this.baselineReady = true; this.initializing = false; this.schedule(); } }
     });
@@ -125,7 +148,10 @@ export class NotificationFeed {
     const proofs = new Map<string, NotificationEvidence>(); // Drain-local, bounded by the queued session set; no stale cross-drain authority.
     while (this.queue.length && !this.lifetime.signal.aborted) {
       const next = this.queue.shift()!;
+      const tracing = process.env.DSH_MOBILE_NOTIFICATION_TRACE === '1', started = tracing ? performance.now() : 0;
+      if (tracing) notificationTrace('producer_begin', { seq: next.event.seq, queue: this.queue.length });
       try { await this.accept(next.id, next.event, proofs); } catch { this.degrade(); }
+      finally { if (tracing) notificationTrace('producer_end', { seq: next.event.seq, durationMs: Math.round(performance.now() - started) }); }
     }
     if (!this.lifetime.signal.aborted) {
       if (this.overflow) { this.resetJournals(); this.overflow = false; await this.reconcile(); }
@@ -136,17 +162,28 @@ export class NotificationFeed {
     do { await this.work; } while ((this.scheduled || this.queue.length) && !this.lifetime.signal.aborted);
   }
   private async accept(id: string, event: NotificationSource, proofs: Map<string, NotificationEvidence>): Promise<void> {
-    // Global events include excluded subagents. Establish current membership before
-    // sequence bookkeeping; absence is not source failure or a feed gap.
+    if (event.time < this.baselineAt) return;
+    const previous = this.watermarks[id];
+    if (previous && event.seq <= previous.seq) return;
+    if (!relevant.has(event.type)) {
+      const skipped = this.skipped.get(id);
+      if (!skipped) {
+        if (this.skipped.size >= 10000) this.skipped.delete(this.skipped.keys().next().value!);
+        this.skipped.set(id, { first: event.seq, last: event.seq, gap: false });
+      } else if (event.seq > skipped.last) { skipped.gap ||= event.seq !== skipped.last + 1; skipped.last = event.seq; }
+      return;
+    }
+    // Only relevant events pay for fresh membership/permission authority. Excluded
+    // sessions never introduce producer watermarks or gaps in the ordinary feed.
     const sessions = await this.source.list(this.signal());
     const listed = sessions.find(s => s.id === id);
-    if (!listed) { proofs.delete(id); return; }
+    if (!listed) { proofs.delete(id); this.skipped.delete(id); return; }
     const old = this.watermarks[id];
     if (event.time < this.baselineAt || (old && event.seq <= old.seq)) return;
-    const gap = !!old && event.seq !== old.seq + 1;
+    const skipped = this.skipped.get(id); this.skipped.delete(id);
+    const gap = !!skipped?.gap || (skipped ? (event.seq !== skipped.last + 1 || (!!old && skipped.first !== old.seq + 1)) : !!old && event.seq !== old.seq + 1);
     if (gap) { this.degrade(); this.resetJournals(); }
     if (!old && Object.keys(this.watermarks).length >= 10000) { this.degrade(); return; }
-    if (!relevant.has(event.type)) { this.watermarks[id] = { ...old, seq: event.seq }; return; }
     let proof = proofs.get(id);
     if (!proof || proof.workspaceId !== listed.workspaceId || proof.cursor < event.seq || (this.source.evidenceCurrent && !this.source.evidenceCurrent(proof))) {
       proof = await this.source.evidence(id, this.signal(), listed);
@@ -169,6 +206,11 @@ export class NotificationFeed {
     if (!gap && event.type === 'turn/end' && event.completed && proof.completed.some(e => e.turn === event.turn && e.sourceSeq === event.seq)) this.emit(proof, event, 'answer-finished');
     this.watermarks[id] = { ...current, seq: event.seq };
     this.state.writeNotificationStates([['producer', this.watermarks], ...[...this.batch].map(([deviceId, journal]): [string, unknown] => ['device:' + deviceId, journal])]);
+    if (this.batch.size) {
+      if (process.env.DSH_MOBILE_NOTIFICATION_TRACE === '1') for (const journal of this.batch.values()) for (const item of journal.items.filter(e => e.sessionId === id && e.sourceSeq === event.seq))
+        notificationTrace('journal_committed', { event: createHash('sha256').update(item.eventId).digest('hex').slice(0, 12), seq: item.sequence });
+      this.changed();
+    }
     } finally { this.batch = undefined; }
   }
   private async reconcile(): Promise<void> {
@@ -228,10 +270,13 @@ export class NotificationFeed {
       const queued = this.queue.filter(e => e.id === session.id).map(e => e.event.seq);
       const seq = old?.seq ?? (queued.length ? Math.min(...queued) - 1 : proof.cursor);
       this.watermarks[session.id] = { seq, ...(attentionId ? { attentionId } : {}) };
+      const skipped = this.skipped.get(session.id);
+      if (skipped && skipped.last <= seq) this.skipped.delete(session.id);
+      else if (skipped && skipped.first <= seq) skipped.first = seq + 1;
     }
     this.state.writeNotificationState('producer', this.watermarks);
     if (!this.baselineReady) { this.baselineReady = true; this.degrade(); }
-    if (this.coverage === 'degraded' && revision === this.coverageRevision && !this.recoveryScan && !this.recoveryPending.size && !this.lazyRetry.size && !this.overflow && !this.queue.length && !budget.aborted) this.coverage = 'ready';
+    if (this.coverage === 'degraded' && revision === this.coverageRevision && !this.recoveryScan && !this.recoveryPending.size && !this.lazyRetry.size && !this.overflow && !this.queue.length && !budget.aborted) { this.coverage = 'ready'; this.changed(); }
   }
   private retryLazy(id: string, pass: number): void {
     const failures = Math.min((this.lazyRetry.get(id)?.failures ?? 0) + 1, 4);
@@ -270,9 +315,9 @@ export class NotificationFeed {
     this.save(deviceId, j);
     if (!this.enabledDevices() || !hadEnabled) {
       this.activation?.abort(); this.activated = false; this.initializing = false; this.baselineReady = false;
-      this.queue = []; this.lazyIdle = []; this.lazyRetry.clear();
+      this.queue = []; this.skipped.clear(); this.lazyIdle = []; this.lazyRetry.clear();
     }
-    this.activate(); return j.settings;
+    this.activate(); if (!same) this.changed(); return j.settings;
   }
   private emissionAllowed(key: string, limit: number): boolean {
     const now = Date.now();
@@ -291,7 +336,7 @@ export class NotificationFeed {
       if (!this.emissionAllowed('device:' + device.deviceId, 120)) { this.degrade(); j.epoch = randomUUID(); j.items = []; this.save(device.deviceId, j); continue; }
       j.items = j.items.filter(e => e.occurredAt > Date.now() - RETENTION);
       j.items.push({ version: 1, eventId: randomUUID(), sequence: ++j.sequence, occurredAt: source.time, expiresAt: Date.now() + 86400_000, workspaceId: proof.workspaceId, sessionId: proof.sessionId, kind, sourceSeq: source.seq, ...(attentionId ? { attentionId } : {}), ...(kind === 'answer-finished' ? { turn: source.turn! } : {}) });
-      j.items = j.items.slice(-2000); this.save(device.deviceId, j);
+      j.items = j.items.slice(-2000); this.save(device.deviceId, j); if (!this.batch) this.changed();
     }
   }
   private resetJournals(): void {
@@ -299,6 +344,7 @@ export class NotificationFeed {
       const j = this.journal(d.deviceId); if (!j.settings.enabled) continue;
       j.epoch = randomUUID(); j.items = []; this.save(d.deviceId, j);
     }
+    if (!this.batch) this.changed();
   }
   private cursor(deviceId: string, epoch: string, sequence: number): string {
     const body = `${epoch}:${sequence}`;
@@ -347,5 +393,5 @@ export class NotificationFeed {
     if (Buffer.byteLength(JSON.stringify(page)) > 128 * 1024 - 512) throw new HostError('payload_too_large');
     return page;
   }
-  async close(): Promise<void> { this.lifetime.abort(); this.dispose?.(); if (this.timer) clearInterval(this.timer); await this.work; }
+  async close(): Promise<void> { this.lifetime.abort(); this.listeners.clear(); this.dispose?.(); if (this.timer) clearInterval(this.timer); await this.work; }
 }
