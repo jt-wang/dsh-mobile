@@ -41,7 +41,7 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
     var unread by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val threshold = with(LocalDensity.current) { 96.dp.toPx() }
-    val unconfirmed = pending?.takeIf { it.kind == "send" && it.sessionId == snapshot.session.id && !it.text.isNullOrBlank() && snapshot.messages.none { message -> message.requestId == it.requestId } }
+    val unconfirmed = pending?.takeIf { it.kind == "send" && it.sessionId == snapshot.session.id && dev.dshmobile.app.ui.components.hasPromptContent(it) && snapshot.messages.none { message -> message.requestId == it.requestId } }
     // Classify off the composition thread; keep prior overlapping groups for stable identities.
     val projection by produceState<TimelineProjection?>(null, TimelineInputKey(snapshot.messages)) {
         val input = snapshot.messages
@@ -103,8 +103,9 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
             items(timeline, key = { if (it is ChatItem.Activity) "activity:${it.id}" else LazyItemKeys.message(it.id) },
                 contentType = { if (it is ChatItem.Activity) "activity" else "message" }) { item ->
                 when (item) {
-                    is ChatItem.Message -> if (media != null && item.message.attachments.isNotEmpty()) media(item.message) else MessageItem(item.message, onCopy, searchQuery,
-                        selectedMatch?.takeIf { it.messageId == item.id })
+                    is ChatItem.Message -> MessageItem(item.message, onCopy, searchQuery,
+                        selectedMatch?.takeIf { it.messageId == item.id },
+                        attachments = if (media != null && item.message.attachments.isNotEmpty()) ({ media(item.message) }) else null)
                     is ChatItem.Activity -> AgentActivityGroup(item, onCopy)
                 }
             }
@@ -112,7 +113,7 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
             unconfirmed?.let { command -> item(key = LazyItemKeys.pending(command.requestId)) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(stringResource(R.string.mobile_unconfirmed_message), style = MaterialTheme.typography.labelMedium)
-                    SelectionContainer { Text(command.text.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    SelectionContainer { dev.dshmobile.app.ui.components.PromptContent(command) }
                 }
             } }
         }

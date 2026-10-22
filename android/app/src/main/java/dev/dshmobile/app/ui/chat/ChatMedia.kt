@@ -75,14 +75,15 @@ private suspend fun decodeImage(bytes: ByteArray, max: Int): Bitmap = withContex
 
 @Composable
 internal fun MediaMessage(message: ChatMessage, cache: ImageMemoryCache, onCopy: (String) -> Unit, onFile: ((AttachmentRef) -> Unit)? = null, onOpen: (List<AttachmentRef>, Int) -> Unit) {
-    val user = message.role == "user"
+    MessageItem(message, onCopy, attachments = { MediaAttachments(message, cache, onFile, onOpen) })
+}
+
+@Composable
+internal fun MediaAttachments(message: ChatMessage, cache: ImageMemoryCache, onFile: ((AttachmentRef) -> Unit)? = null, onOpen: (List<AttachmentRef>, Int) -> Unit) {
     val images = message.attachments.filter { it.kind == "image" }
     val files = message.attachments.filter { it.kind != "image" }
     val context = LocalContext.current
-    Column(Modifier.fillMaxWidth().testTag("message:${message.id}"), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
-        Surface(color = if (user) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.background,
-            shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth(0.78f)) {
-            Column(Modifier.padding(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Column(Modifier.fillMaxWidth().padding(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 if (images.size == 1) MediaImage(images[0], cache, Modifier.fillMaxWidth().aspectRatio(1.3f).clip(RoundedCornerShape(16.dp)), stringResource(R.string.mobile_image_description, 1, 1, images[0].name)) { onOpen(images, 0) }
                 else images.take(4).chunked(2).forEachIndexed { row, refs -> Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     refs.forEachIndexed { col, ref ->
@@ -100,15 +101,10 @@ internal fun MediaMessage(message: ChatMessage, cache: ImageMemoryCache, onCopy:
                         Text(fileMeta(context, file.name, file.size), style = MaterialTheme.typography.labelSmall) }
                     if (onFile != null) IconButton(onClick = { onFile(file) }, modifier = Modifier.testTag("file_open_${file.id}")) { Icon(MobileIcons.Download, stringResource(R.string.mobile_file_open)) }
                 } }
-                if (message.text.isNotEmpty()) androidx.compose.foundation.text.selection.SelectionContainer { Text(message.text, Modifier.padding(horizontal = 12.dp, vertical = 7.dp), style = MaterialTheme.typography.bodyLarge) }
-            }
-        }
-        if (message.delivery == "steer") Text(stringResource(R.string.mobile_message_steered), style = MaterialTheme.typography.labelSmall)
-        Text(shortTime(message.createdAt), Modifier.padding(4.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
-/** Full-screen destination: the caller removes the chat screen while this route is active. */
+/** Full-screen viewer, shown over the retained chat subtree. */
 @Composable
 internal fun ImageViewer(refs: List<AttachmentRef>, initial: Int, cache: ImageMemoryCache, timestamp: Long? = null, onClose: () -> Unit) {
     var index by remember { mutableIntStateOf(initial) }
@@ -131,7 +127,8 @@ internal fun ImageViewer(refs: List<AttachmentRef>, initial: Int, cache: ImageMe
     val saveDocument = rememberDocumentSaver(snackbar)
     BackHandler(onBack = onClose)
     val view = androidx.compose.ui.platform.LocalView.current
-    val window = generateSequence(context) { (it as? android.content.ContextWrapper)?.baseContext }.filterIsInstance<android.app.Activity>().firstOrNull()?.window
+    val window = (view.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+        ?: generateSequence(context) { (it as? android.content.ContextWrapper)?.baseContext }.filterIsInstance<android.app.Activity>().firstOrNull()?.window
     val accessibility = context.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
     var exploring by remember { mutableStateOf(accessibility.isTouchExplorationEnabled) }
     DisposableEffect(accessibility) {
@@ -161,6 +158,7 @@ internal fun ImageViewer(refs: List<AttachmentRef>, initial: Int, cache: ImageMe
         val offset = ViewerGeometry.zoom(x, y, scale, next, point.x, point.y, viewport.width.toFloat(), viewport.height.toFloat(), decoded?.width ?: 0, decoded?.height ?: 0)
         scale = next; x = offset.x; y = offset.y
     }
+    val previous = stringResource(R.string.mobile_viewer_previous); val next = stringResource(R.string.mobile_viewer_next)
     val zoomIn = stringResource(R.string.mobile_viewer_zoom_in); val zoomOut = stringResource(R.string.mobile_viewer_zoom_out)
     val saved = stringResource(R.string.mobile_viewer_saved); val failure = stringResource(R.string.mobile_file_unavailable)
         Box(Modifier.fillMaxSize().background(Color.Black).testTag("image_viewer").semantics { paneTitle = ref.name }) {
@@ -188,7 +186,12 @@ internal fun ImageViewer(refs: List<AttachmentRef>, initial: Int, cache: ImageMe
                     if (zoom != 1f || pan != androidx.compose.ui.geometry.Offset.Zero) event.changes.forEach { it.consume() }
                     } while (event.changes.any { it.pressed })
                 }
-            }.semantics { customActions = listOf(CustomAccessibilityAction(zoomIn) { zoomTo((scale + 0.5f).coerceAtMost(5f)); true }, CustomAccessibilityAction(zoomOut) { zoomTo((scale - 0.5f).coerceAtLeast(1f)); true }) }, contentAlignment = Alignment.Center) {
+            }.testTag("viewer_image").semantics { customActions = buildList {
+                if (index > 0) add(CustomAccessibilityAction(previous) { index--; true })
+                if (index < refs.lastIndex) add(CustomAccessibilityAction(next) { index++; true })
+                add(CustomAccessibilityAction(zoomIn) { zoomTo((scale + 0.5f).coerceAtMost(5f)); true })
+                add(CustomAccessibilityAction(zoomOut) { zoomTo((scale - 0.5f).coerceAtLeast(1f)); true })
+            } }, contentAlignment = Alignment.Center) {
                 bitmap?.let { Image(it.asImageBitmap(), stringResource(R.string.mobile_image_description, index + 1, refs.size, ref.name), Modifier.fillMaxSize().graphicsLayer { scaleX = scale; scaleY = scale; translationX = if (scale > 1) x else 0f; translationY = if (scale > 1) y else 0f }, contentScale = ContentScale.Fit) }
                     ?: if (failed) TextButton(onClick = { retry++ }) { Text(stringResource(R.string.mobile_media_retry), color = Color.White) } else Spinner(size = 24.dp)
             }
@@ -200,6 +203,10 @@ internal fun ImageViewer(refs: List<AttachmentRef>, initial: Int, cache: ImageMe
                     IconButton(onClick = { if (android.os.Build.VERSION.SDK_INT < 29) saveDocument(ref, requireNotNull(bytes)) else scope.launch { try { saveImage(context, ref, requireNotNull(bytes)); snackbar.showSnackbar(saved) } catch (_: Exception) { snackbar.showSnackbar(failure) } } }, enabled = bytes != null, modifier = Modifier.testTag("viewer_save")) { Icon(MobileIcons.Download, stringResource(R.string.mobile_viewer_save), tint = Color.White) }
                 }
                 Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Color.Black.copy(alpha = 0.4f)).navigationBarsPadding().padding(16.dp)) {
+                    if (exploring && refs.size > 1) Row {
+                        TextButton(onClick = { index-- }, enabled = index > 0, modifier = Modifier.testTag("viewer_previous")) { Text(previous, color = Color.White) }
+                        TextButton(onClick = { index++ }, enabled = index < refs.lastIndex, modifier = Modifier.testTag("viewer_next")) { Text(next, color = Color.White) }
+                    }
                     Text(ref.name, color = Color.White); Text("${decoded?.width ?: 0} × ${decoded?.height ?: 0} · ${android.text.format.Formatter.formatShortFileSize(context, ref.size)}" + (timestamp?.let { " · ${shortTime(it)}" } ?: ""), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
                 }
             }

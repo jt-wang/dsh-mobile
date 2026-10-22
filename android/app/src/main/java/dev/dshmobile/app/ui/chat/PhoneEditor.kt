@@ -14,6 +14,25 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import java.util.UUID
 
+internal fun attachmentDisplayName(raw: String, mime: String?, fallback: String): String {
+    var name = raw.substringAfterLast('/').substringAfterLast('\\').filterNot { it.isISOControl() }.trim()
+    val extension = name.substringAfterLast('.', "").takeIf { name.contains('.') && it.length in 1..12 && it.all(Char::isLetterOrDigit) }
+    val stem = if (extension != null) name.dropLast(extension.length + 1) else name
+    val meaningless = stem.none(Char::isLetter) || stem.lowercase() in setOf("attachment", "image", "photo", "file", "unnamed", "unknown")
+    if (mime?.startsWith("image/") == true && meaningless) {
+        val suffix = extension ?: when (mime) { "image/jpeg" -> "jpeg"; "image/png" -> "png"; "image/webp" -> "webp"; "image/gif" -> "gif"; else -> "" }
+        name = fallback + if (suffix.isNotEmpty()) ".$suffix" else ""
+    }
+    if (name.isBlank()) name = "attachment"
+    val suffix = extension?.let { ".$it" }.orEmpty()
+    var boundedStem = if (suffix.isNotEmpty() && name.endsWith(suffix)) name.dropLast(suffix.length) else name
+    while ((boundedStem + suffix).toByteArray(Charsets.UTF_8).size > 256) {
+        val last = boundedStem.lastIndex
+        boundedStem = boundedStem.dropLast(if (last > 0 && boundedStem[last].isLowSurrogate() && boundedStem[last - 1].isHighSurrogate()) 2 else 1)
+    }
+    return boundedStem + suffix
+}
+
 /** ViewModel-owned editor: URI metadata is encrypted by the repository, bytes never enter saved state. */
 internal class PhoneEditor(private val context: Context, private val repository: MobileRepository, private val scope: CoroutineScope) {
     private val uploads = Semaphore(2)
@@ -25,7 +44,6 @@ internal class PhoneEditor(private val context: Context, private val repository:
     private var cleaned = false
     private var previousDrafts = emptyMap<String, List<DraftAttachment>>()
     private var knownSources = emptyList<DraftAttachment>()
-    private val expiredFiles = mutableSetOf<String>()
     init {
         // Safe before encrypted draft restore: only expired exports, never camera sources.
         scope.launch(Dispatchers.IO) {
@@ -68,14 +86,6 @@ internal class PhoneEditor(private val context: Context, private val repository:
             cleaned = true
             scope.launch(Dispatchers.IO) { TemporaryMedia.cleanup(context, retained) }
         }
-        items.forEach { (_, values) -> values.filter { it.attachment.temporary }.forEach { item ->
-            if (expiredFiles.add(item.attachment.localId)) scope.launch {
-                val uri = Uri.parse(item.attachment.uri)
-                val age = withContext(Dispatchers.IO) { java.io.File(TemporaryMedia.directory(context), uri.lastPathSegment.orEmpty()).lastModified() }
-                delay((age + TemporaryMedia.CAMERA_TTL_MS - System.currentTimeMillis()).coerceAtLeast(0))
-                clean(item.attachment)
-            }
-        } }
     }
     fun inSession(id: String?) = items[id].orEmpty()
     private fun update(session: String, id: String, change: (UploadState) -> UploadState) {
@@ -108,9 +118,9 @@ internal class PhoneEditor(private val context: Context, private val repository:
                             val buffer = ByteArray(32768); size = 0
                             while (size <= PhoneRules.FILE_LIMIT) { val n = input.read(buffer); if (n < 0) break; size += n }
                         }
-                        name = name.substringAfterLast('/').substringAfterLast('\\').filterNot { it.isISOControl() }.ifBlank { "attachment" }
-                        while (name.toByteArray().size > 256) name = name.dropLast(1)
-                        DraftAttachment(UUID.randomUUID().toString(), uri.toString(), name, size, PhoneRules.uploadMime(context.contentResolver.getType(uri)), temporary = temporary)
+                        val mime = context.contentResolver.getType(uri)
+                        name = attachmentDisplayName(name, mime, context.getString(R.string.mobile_attach_photo_name, inSession(session).size + 1))
+                        DraftAttachment(UUID.randomUUID().toString(), uri.toString(), name, size, PhoneRules.uploadMime(mime), temporary = temporary)
                     }
                     if (!PhoneRules.canAddAttachment(inSession(session).map { it.attachment.size }, item.size)) {
                         if (item.size > PhoneRules.FILE_LIMIT) { large++; skippedLarge = large }
@@ -132,7 +142,7 @@ internal class PhoneEditor(private val context: Context, private val repository:
         if (jobs[id]?.isActive == true) return
         jobs[id] = scope.launch {
             error = null; skippedLarge = 0
-            update(session, id) { it.copy(uploading = true, error = false, progress = 0) }
+            update(session, id) { it.copy(uploading = true, error = false, progress = -1) }
             try {
                 uploads.withPermit {
                     val source = inSession(session).singleOrNull { it.attachment.localId == id }?.attachment ?: return@withPermit

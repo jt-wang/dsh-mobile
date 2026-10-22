@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_attach_photo_name">Фото %1$d</string>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_attach_pending">«%1$s»: ожидает загрузки</string>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_prompt_attachments">Вложения: %1$d</string>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_viewer_previous">Предыдущая картинка</string>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_viewer_next">Следующая картинка</string>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_attach_camera_permission">Для съёмки нужен доступ к камере. Разрешите его в настройках приложения или выберите готовое фото.</string>
+    <!-- 0.8.1 provisional -->
+    <string name="mobile_attach_waiting">Ожидает</string>
+</resources>

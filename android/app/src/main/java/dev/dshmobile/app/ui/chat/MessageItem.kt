@@ -30,7 +30,8 @@ import dev.dshmobile.app.ui.theme.Spacing
 import dev.dshmobile.app.ui.theme.tabular
 
 @Composable
-internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQuery: String = "", selectedMatch: SearchMatch? = null) {
+internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQuery: String = "", selectedMatch: SearchMatch? = null,
+    attachments: (@Composable () -> Unit)? = null) {
     val user = message.role == "user"
     var menu by remember(message.id) { mutableStateOf(false) }
     var selecting by remember(message.id) { mutableStateOf(false) }
@@ -53,9 +54,14 @@ internal fun MessageItem(message: ChatMessage, onCopy: (String) -> Unit, searchQ
         .semantics { customActions = messageActions.map { action -> CustomAccessibilityAction(labels.getValue(action)) { perform(action); true } } },
         horizontalAlignment = if (user) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         val content: @Composable () -> Unit = {
-            if (searchQuery.isNotBlank()) SearchableMessageText(message, searchQuery, selectedMatch)
-            else if (user) Text(message.text, style = MaterialTheme.typography.bodyLarge)
-            else MarkdownContent(message.text, onCopy, selectable = false)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                attachments?.invoke()
+                if (message.text.isNotEmpty()) {
+                    if (searchQuery.isNotBlank()) SearchableMessageText(message, searchQuery, selectedMatch)
+                    else if (user) Text(message.text, style = MaterialTheme.typography.bodyLarge)
+                    else MarkdownContent(message.text, onCopy, selectable = false)
+                }
+            }
         }
         if (user) Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.large,
             modifier = Modifier.fillMaxWidth(0.86f).wrapContentWidth(Alignment.End)) {

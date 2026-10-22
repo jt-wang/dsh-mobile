@@ -70,12 +70,6 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
     LaunchedEffect(snapshot?.session?.id, currentModel) { if (currentModel != null && state.capabilities?.models == true && model.modelCatalog == null) model.loadModels() }
     val modelName = currentModel?.let { selected -> model.modelCatalog?.items?.find { it.provider == selected.provider && it.id == selected.model }?.name ?: selected.model }
     val header = snapshot?.session ?: state.sessions.firstOrNull { it.id == requestedSession }
-    if (viewer != null) {
-        val (refs, index) = viewer!!
-        val timestamp = snapshot?.messages?.firstOrNull { message -> message.attachments.any { a -> a.id == refs.firstOrNull()?.id } }?.createdAt
-        ImageViewer(refs, index, imageCache, timestamp) { viewer = null }
-        return
-    }
     Scaffold(containerColor = MaterialTheme.colorScheme.background, snackbarHost = { SnackbarHost(snackbars) },
         topBar = { CenterAlignedTopAppBar(navigationIcon = {
             IconButton(onClick = onBack, modifier = Modifier.testTag("chat_drawer")) { Icon(MobileIcons.ChevronLeft, stringResource(R.string.mobile_chats), Modifier.size(IconSize.Action)) }
@@ -172,7 +166,7 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
                                 Modifier.testTag("question_record_${resolved.callId}"), style = MaterialTheme.typography.bodyMedium)
                         } }
                     }) else null,
-                    media = if (state.capabilities?.attachments == true) ({ message -> MediaMessage(message, imageCache, onCopy, onFile = if (state.capabilities?.fileDownload == true && state.connection == ConnectionState.ONLINE) ({ file ->
+                    media = if (state.capabilities?.attachments == true) ({ message -> MediaAttachments(message, imageCache, onFile = if (state.capabilities?.fileDownload == true && state.connection == ConnectionState.ONLINE) ({ file ->
                         scope.launch {
                             downloads.acquire()
                             try {
@@ -191,6 +185,10 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
             }
         }
     }
+    viewer?.let { (refs, index) ->
+        val timestamp = snapshot?.messages?.firstOrNull { message -> message.attachments.any { a -> a.id == refs.firstOrNull()?.id } }?.createdAt
+        ChatViewerOverlay(refs, index, imageCache, timestamp) { viewer = null }
+    }
     if (rename && header != null) RenameDialog(header.title, model.phoneAction == "rename", model.phoneError != null && model.phoneErrorAction == "rename", { rename = false }) { title -> model.rename(title) { rename = false } }
     if (models) ModelSheet(model.modelCatalog, currentModel, model.modelsLoading, model.modelsFailed, model.phoneAction == "model", imagesNeeded,
         model::loadModels, { models = false }) { selection -> model.selectModel(selection) { models = false } }
@@ -198,6 +196,14 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
         text = { Text(stringResource(R.string.mobile_cancel_explanation)) },
         confirmButton = { TextButton(onClick = { cancel = false; model.cancelRun(haptic) }, enabled = snapshot != null && canCancel(visibleState) && !model.interactionBlocked, modifier = Modifier.testTag("stop_run_confirm")) { Text(stringResource(R.string.mobile_cancel_run)) } },
         dismissButton = { TextButton(onClick = { cancel = false }) { Text(stringResource(R.string.mobile_keep_running)) } })
+}
+
+/** Separate window retains the chat list, classification and follow state underneath. */
+@Composable
+internal fun ChatViewerOverlay(refs: List<AttachmentRef>, index: Int, cache: ImageMemoryCache, timestamp: Long? = null, onClose: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onClose, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        ImageViewer(refs, index, cache, timestamp, onClose)
+    }
 }
 
 @Composable
