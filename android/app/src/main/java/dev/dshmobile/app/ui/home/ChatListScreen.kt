@@ -3,9 +3,7 @@ package dev.dshmobile.app.ui.home
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.layout.Layout
 import dev.dshmobile.app.ui.theme.Motion
 import dev.dshmobile.app.ui.theme.motionEnabled
 import androidx.compose.foundation.border
@@ -242,16 +240,10 @@ private fun SessionRow(session: SessionSummary, project: String, timestamp: Stri
     val work = sessionWorkLabel(session, stringResource(R.string.mobile_working),
         stringResource(R.string.mobile_subagents_working, session.runningSubagents), stringResource(R.string.mobile_subagents_count, session.runningSubagents), stringResource(R.string.mobile_waiting_for_answer))
     val readOnlyLabel = if (readOnly) stringResource(R.string.mobile_read_only) else null
-    val warning = LocalMobileColors.current.warning
-    // Same words as before; only the waiting phrase takes the amber status hue, matching the glyph.
-    val details = remember(project, work, readOnlyLabel, session.waitingForAnswer, warning) {
-        buildAnnotatedString {
-            listOfNotNull(project, work, readOnlyLabel).forEachIndexed { index, part ->
-                if (index > 0) append(" · ")
-                if (session.waitingForAnswer && part == work) withStyle(SpanStyle(color = warning)) { append(part) } else append(part)
-            }
-        }
-    }
+    // The status is what the user must read, so it is never the part that gets cut: the project (with the
+    // read-only note) yields first, and when even that leaves no room the status takes its own line.
+    val lead = listOfNotNull(project, readOnlyLabel).joinToString(" · ")
+    val statusColor = if (session.waitingForAnswer) LocalMobileColors.current.warning else muted
     Row(modifier.fillMaxWidth().heightIn(min = 64.dp).clickable(enabled = enabled, onClick = onClick)
         .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 12.dp).testTag("session_${session.id}"),
         horizontalArrangement = Arrangement.spacedBy(Spacing.M), verticalAlignment = Alignment.Top) {
@@ -275,15 +267,72 @@ private fun SessionRow(session: SessionSummary, project: String, timestamp: Stri
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(session.title.ifBlank { stringResource(R.string.mobile_untitled) }, Modifier.fillMaxWidth(), style = MaterialTheme.typography.titleMedium,
                 color = if (enabled) MaterialTheme.colorScheme.onSurface else muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(details, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(timestamp, style = MaterialTheme.typography.labelSmall.tabular(), color = muted, maxLines = 1)
-            }
+            SessionMeta(lead, work, statusColor, timestamp, muted)
         }
     }
 }
 
 private enum class RowStatus { WAITING, WORKING, IDLE }
+
+/**
+ * Second row line: `project · status ……… time`. The status is measured at full width and always shown whole;
+ * the project ellipsizes to make room. If the project would drop below [MIN_LEAD] (large fonts, long statuses),
+ * the status moves to its own line under `project ……… time` and may wrap there instead of being cut.
+ */
+@Composable
+private fun SessionMeta(lead: String, status: String?, statusColor: Color, timestamp: String, muted: Color) {
+    val body = MaterialTheme.typography.bodySmall
+    // An ellipsized Text still reports the full width it was given; the separator follows the drawn ellipsis.
+    val leadEnd = remember { IntArray(1) }
+    Layout(contents = listOf(
+        { Text(lead, style = body, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            onTextLayout = { leadEnd[0] = kotlin.math.ceil(it.getLineRight(0)).toInt() }) },
+        { if (status != null) Text(" · ", style = body, color = muted, maxLines = 1) },
+        { if (status != null) Text(status, style = body, color = statusColor) },
+        { Text(timestamp, style = MaterialTheme.typography.labelSmall.tabular(), color = muted, maxLines = 1) },
+    )) { (leadM, sepM, statusM, timeM), constraints ->
+        val width = constraints.maxWidth
+        val gap = Spacing.S.roundToPx()
+        val time = timeM.first().measure(androidx.compose.ui.unit.Constraints(maxWidth = width))
+        val room = (width - time.width - gap).coerceAtLeast(0)
+        val statusPart = statusM.firstOrNull()
+        if (statusPart == null) {
+            val leadP = leadM.first().measure(androidx.compose.ui.unit.Constraints(maxWidth = room))
+            val h = maxOf(leadP.height, time.height)
+            return@Layout layout(width, h) {
+                leadP.place(0, (h - leadP.height) / 2); time.place(width - time.width, (h - time.height) / 2)
+            }
+        }
+        val sep = sepM.first().measure(androidx.compose.ui.unit.Constraints(maxWidth = room))
+        val statusWide = statusPart.maxIntrinsicWidth(androidx.compose.ui.unit.Constraints.Infinity)
+        val leadWide = leadM.first().maxIntrinsicWidth(androidx.compose.ui.unit.Constraints.Infinity)
+        val leadRoom = room - sep.width - statusWide
+        if (leadRoom >= minOf(leadWide, MIN_LEAD.roundToPx())) {
+            val leadP = leadM.first().measure(androidx.compose.ui.unit.Constraints(maxWidth = leadRoom))
+            val statusP = statusPart.measure(androidx.compose.ui.unit.Constraints.fixedWidth(statusWide))
+            val h = maxOf(leadP.height, statusP.height, time.height)
+            layout(width, h) {
+                leadP.place(0, (h - leadP.height) / 2)
+                val x = minOf(leadP.width, leadEnd[0])
+                sep.place(x, (h - sep.height) / 2)
+                statusP.place(x + sep.width, (h - statusP.height) / 2)
+                time.place(width - time.width, (h - time.height) / 2)
+            }
+        } else {
+            val leadP = leadM.first().measure(androidx.compose.ui.unit.Constraints(maxWidth = room))
+            val statusP = statusPart.measure(androidx.compose.ui.unit.Constraints(maxWidth = width))
+            val first = maxOf(leadP.height, time.height)
+            val spacing = Spacing.XXS.roundToPx()
+            layout(width, first + spacing + statusP.height) {
+                leadP.place(0, (first - leadP.height) / 2); time.place(width - time.width, (first - time.height) / 2)
+                statusP.place(0, first + spacing)
+            }
+        }
+    }
+}
+
+/** Shortest project fragment still worth showing beside a status (a word plus an ellipsis). */
+private val MIN_LEAD = 72.dp
 
 /** "Needs your decision": the question outline in the warning hue, sized so its circle matches the 14dp ring and spinner. */
 @Composable

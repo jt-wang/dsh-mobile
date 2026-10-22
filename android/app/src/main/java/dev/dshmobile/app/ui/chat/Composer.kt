@@ -27,7 +27,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import dev.dshmobile.app.ui.theme.IconSize
 import dev.dshmobile.app.ui.theme.LocalMobileColors
 import dev.dshmobile.app.ui.theme.Motion
-import dev.dshmobile.app.ui.theme.animateSize
 import dev.dshmobile.app.ui.theme.motionEnabled
 import androidx.compose.animation.AnimatedVisibility
 
@@ -48,11 +47,12 @@ internal fun Composer(state: MobileState, model: MobileViewModel, onCancel: () -
     Surface(color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            // Queue and delivery cards above the field grow and shrink smoothly instead of shoving the field.
+            // Queue and delivery cards animate their own entry, exit and disclosure; the stack itself must not add a
+            // second, lagging size animation on top (it showed as an empty card shrinking after its rows had gone).
             // With the keyboard down there is room for a whole delivery card (actions included); with it up the
             // timeline keeps priority and the stack scrolls within 180dp as before.
             val stackMax = if (keyboardOpen) 180.dp else maxOf(180.dp, with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp() } * 0.4f)
-            Column(Modifier.fillMaxWidth().animateSize(motion).heightIn(max = stackMax).verticalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.fillMaxWidth().heightIn(max = stackMax).verticalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 QueueGroup(if (state.capabilities?.queue == true) state.snapshot?.pendingQueue.orEmpty() else emptyList(), PhoneRules.canMutate(state) && !model.interactionBlocked,
                     state.snapshot?.session?.running == true, model.phoneAction, model.phoneError, keyboardOpen, model.phoneErrorAction, state.capabilities?.steer == true, model::queueAction)
                 PendingDelivery(if (state.capabilities?.queue == true) state.copy(acceptedPrompts = state.acceptedPrompts.filter { p -> state.snapshot?.pendingQueue.orEmpty().none { q -> q.requestId == p.requestId } }) else state, model)
