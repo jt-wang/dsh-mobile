@@ -50,6 +50,15 @@ test('a gap among initial irrelevant envelopes suppresses a completion without i
   assert.equal((await f.feed.page(f.device.deviceId, f.head)).resetRequired, true);
 });
 
+test('bounded irrelevant-session pressure cannot erase a known gap before admission', async t => {
+  const f = await fixture(t); await f.feed.idle();
+  await f.event(0, 'turn/start'); await f.event(2, 'assistant/message');
+  for (let i = 0; i < 10000; i++) await f.event(0, 'assistant/message', {}, 'excluded-' + i);
+  f.proof.completed = [{ turn: 1, sourceSeq: 3 }]; await f.event(3, 'turn/end', { turn: 1, completed: true });
+  assert.equal(f.feed.coverage, 'degraded');
+  assert.equal((await f.feed.page(f.device.deviceId, f.head)).resetRequired, true);
+});
+
 test('reconciliation retires skipped envelopes already covered by its initial watermark', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const f = await fixture(t); await f.feed.idle();

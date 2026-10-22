@@ -59,6 +59,7 @@ export class NotificationFeed {
   // Irrelevant envelopes are not membership evidence. Bounded, transient sequence cuts are
   // reconciled only after the next relevant event passes a fresh membership check.
   private readonly skipped = new Map<string, { first: number; last: number; gap: boolean }>();
+  private skippedEvicted = false; // Without a prior admitted watermark, eviction cannot prove sequence continuity.
   private readonly listeners = new Set<() => void>();
   private wakeQueued = false;
   onChange(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
@@ -168,7 +169,7 @@ export class NotificationFeed {
     if (!relevant.has(event.type)) {
       const skipped = this.skipped.get(id);
       if (!skipped) {
-        if (this.skipped.size >= 10000) this.skipped.delete(this.skipped.keys().next().value!);
+        if (this.skipped.size >= 10000) { this.skippedEvicted = true; this.skipped.delete(this.skipped.keys().next().value!); }
         this.skipped.set(id, { first: event.seq, last: event.seq, gap: false });
       } else if (event.seq > skipped.last) { skipped.gap ||= event.seq !== skipped.last + 1; skipped.last = event.seq; }
       return;
@@ -181,7 +182,7 @@ export class NotificationFeed {
     const old = this.watermarks[id];
     if (event.time < this.baselineAt || (old && event.seq <= old.seq)) return;
     const skipped = this.skipped.get(id); this.skipped.delete(id);
-    const gap = !!skipped?.gap || (skipped ? (event.seq !== skipped.last + 1 || (!!old && skipped.first !== old.seq + 1)) : !!old && event.seq !== old.seq + 1);
+    const gap = (this.skippedEvicted && !old) || !!skipped?.gap || (skipped ? (event.seq !== skipped.last + 1 || (!!old && skipped.first !== old.seq + 1)) : !!old && event.seq !== old.seq + 1);
     if (gap) { this.degrade(); this.resetJournals(); }
     if (!old && Object.keys(this.watermarks).length >= 10000) { this.degrade(); return; }
     let proof = proofs.get(id);
@@ -315,7 +316,7 @@ export class NotificationFeed {
     this.save(deviceId, j);
     if (!this.enabledDevices() || !hadEnabled) {
       this.activation?.abort(); this.activated = false; this.initializing = false; this.baselineReady = false;
-      this.queue = []; this.skipped.clear(); this.lazyIdle = []; this.lazyRetry.clear();
+      this.queue = []; this.skipped.clear(); this.skippedEvicted = false; this.lazyIdle = []; this.lazyRetry.clear();
     }
     this.activate(); if (!same) this.changed(); return j.settings;
   }
