@@ -125,7 +125,10 @@ function receiptBudget(service: object): ReceiptBudget {
     // empty service when an older module's private WeakMap cannot be recovered.
     try {
       const staged = Reflect.get(identity, 'stagedFiles');
-      const sessions = Reflect.get(identity, 'ctx')?.sessions?.list();
+      const ctx = Reflect.get(identity, 'ctx');
+      // Cordis property access requires inject; its public get() explicitly does not.
+      // Enumerate Sessions, not Agents: detached Agents can leave live staged receipts.
+      const sessions = (typeof ctx?.get === 'function' ? ctx.get('sessions') : ctx?.sessions)?.list();
       if (!(staged instanceof WeakMap) || !Array.isArray(sessions) || sessions.length > 4096) throw new Error('unknown receipt inventory');
       for (const session of sessions) {
         if (typeof session?.id !== 'string' || typeof session !== 'object' || session === null) throw new Error('unknown receipt scope');

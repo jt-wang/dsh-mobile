@@ -9,6 +9,73 @@ import { attachmentRefs, questionsOf } from '../src/phone.ts';
 import { createDshAdapter } from '../src/dsh-adapter.ts';
 import { opening, summary, requestId } from './fixtures/rc2.ts';
 import { legacyModule } from './fixtures/legacy-module.ts';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+// Real upstream services and Cordis tracing/injection, isolated from the host/profile.
+test('installed FileUploads seeds empty and legacy receipt budgets through its real Cordis context', { skip: !process.env.DSH_MOBILE_CORDIS_MODULE }, async t => {
+  const require = createRequire(process.env.DSH_MOBILE_CORDIS_MODULE!);
+  const load = (name: string) => import(pathToFileURL(require.resolve(name)).href);
+  const { Context } = await load('@deepseek-ai/cordis');
+  const { FileUploads } = await load('@deepseek-ai/dsh-client-file-upload');
+  const { SessionStore } = await load('@deepseek-ai/dsh-session');
+  const { AgentRegistry } = await load('@deepseek-ai/dsh-agent');
+  const { AttachmentStore } = await load('@deepseek-ai/dsh-attachment');
+  const { createScope } = await load('@deepseek-ai/dsh-scope');
+  for (const prior of [0, 20]) await t.test(prior ? 'twenty actual 0.7.0 uploads survive replacement' : 'fresh service has no prior mobile module and admits files', async t => {
+    const ctx = new Context();
+    t.after(() => ctx.fiber.dispose());
+    // No gateway/server or disk storage: only the two registration seams FileUploads requires.
+    ctx.provide('commands', { registerFileReceiptResolver() { return () => {}; } });
+    ctx.provide('connection', { fetch: { register() { return () => {}; } } });
+    class MemoryAttachments extends AttachmentStore {
+      async saveFileStream(request: any) {
+        let bytes = 0; for await (const chunk of request.data) bytes += chunk.length;
+        return { attachmentId: randomUUID(), name: request.name, bytes };
+      }
+    }
+    for (const plugin of [SessionStore, AgentRegistry, MemoryAttachments, FileUploads]) await ctx.plugin(plugin);
+    const sessions = ctx.get('sessions'), agents = ctx.get('agents');
+    const session = sessions.create(summary.sessionId);
+    const agent: any = { id: session.id, session };
+    const scope = createScope(ctx, agent); agent.ctx = scope.ctx;
+    const detach = agents.enter(agent);
+    t.after(() => { detach(); return scope.dispose(); });
+    const service = ctx.get('fileUploads');
+    const identity = Reflect.get(service, Symbol.for('cordis.original'));
+    assert.ok(identity, 'use actual Cordis tracing service, not a synthetic wrapper');
+    assert.equal(Reflect.get(identity, Symbol.for('dsh-mobile.receipt-budget.v1')), undefined);
+    // Do not inject sessions into FileUploads: test the installed plugin's own declared inject.
+    assert.throws(() => Reflect.get(identity, 'ctx').sessions, /without inject/);
+    assert.deepEqual(Reflect.get(identity, 'ctx').get('sessions').list(), [session]);
+    const { adapter, row, frame, signal } = await setup(t, { fileUploads: service, resolveAgent: async () => ({ agent }) });
+    const input = () => ({ size: 3, mime: 'text/plain', name: 'synthetic.txt', data: (async function* () { yield Buffer.from('abc'); })() });
+    if (prior) {
+      adapter.dispose();
+      const legacy = await legacyModule('dsh-adapter', t);
+      const old = await legacy.createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'w', name: 'Synthetic', path: row.cwd }],
+        sessionController: { async list() { return { items: [row] }; }, async *follow() { yield frame; }, async page() {}, async projections() {}, async create() {}, async prompt() {}, cancel() {}, async attachment() {} },
+        fileUploads: service, attachments: ctx.get('attachments') });
+      try { for (let i = 0; i < prior; i++) await old.upload(row.sessionId, input(), signal, 'w'); }
+      finally { old.dispose(); }
+      // Agent teardown does not retire Session receipts. Enumerating only agents would miss all twenty.
+      detach();
+      assert.equal(agents.list().length, 0);
+      const { adapter: next, row: nextRow, signal: nextSignal } = await setup(t, { fileUploads: ctx.get('fileUploads') });
+      await assert.rejects(next.reserveFileUploads(nextRow.sessionId, 1, nextSignal, 'w'), { code: 'rate_limited' });
+      const budget = Reflect.get(identity, Symbol.for('dsh-mobile.receipt-budget.v1'));
+      assert.equal(budget.size, prior);
+      assert.deepEqual(new Set([...budget.values()].map((entry: any) => entry.sessionId)), new Set([session.id]));
+      assert.deepEqual(new Set([...budget.values()].map((entry: any) => entry.receiptId)), new Set(identity.stagedFiles.get(session).keys()));
+    } else {
+      const reservation = await adapter.reserveFileUploads(row.sessionId, 1, signal, 'w'); reservation.release();
+      assert.equal(Reflect.get(identity, Symbol.for('dsh-mobile.receipt-budget.v1')).size, 0, 'fresh inventory must not saturate fail-closed sentinels');
+      await adapter.upload(row.sessionId, input(), signal, 'w');
+      assert.equal(identity.stagedFiles.get(session).size, 1, 'real FileUploads accepted bytes and minted a receipt');
+      assert.equal(Reflect.get(identity, Symbol.for('dsh-mobile.receipt-budget.v1')).size, 1);
+    }
+  });
+});
 
 async function setup(t: any, hooks: { pollIntervalMs?: number; beforeFollow?: () => Promise<void>; events?: import('../src/dsh-adapter.ts').DshAdapterOptions['events']; fileUploads?: import('../src/dsh-adapter.ts').DshAdapterOptions['fileUploads']; resolveAgent?: () => Promise<{ agent: unknown }>; attachments?: import('../src/dsh-adapter.ts').DshAdapterOptions['attachments'] } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'phone-adapter-'))); await mkdir(join(root, 'w'));
