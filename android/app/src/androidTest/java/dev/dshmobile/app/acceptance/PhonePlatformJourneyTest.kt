@@ -148,14 +148,26 @@ class PhonePlatformJourneyTest {
             // API 30 uses DocumentsUI fallback rather than the platform Photo Picker.
             if (android.os.Build.VERSION.SDK_INT < 33) {
                 clickSystem("Show roots", "Показать корни", "Открыть список")
-                val imagesRoot = awaitNode { node -> node.isVisibleToUser && node.viewIdResourceName?.endsWith(":id/title") == true && node.text?.toString() in listOf("Images", "Изображения") }
-                var rootRow: AccessibilityNodeInfo? = imagesRoot
-                while (rootRow != null && !rootRow.isClickable) rootRow = rootRow.parent
-                check(requireNotNull(rootRow).performAction(AccessibilityNodeInfo.ACTION_CLICK))
-                val pictures = awaitNode { it.isVisibleToUser && it.text?.toString() == "Pictures" }
-                var folder: AccessibilityNodeInfo? = pictures
-                while (folder != null && folder.viewIdResourceName?.endsWith(":id/item_root") != true) folder = folder.parent
-                check(requireNotNull(folder).performAction(AccessibilityNodeInfo.ACTION_CLICK))
+                fun clickDocumentEntry(labels: List<String>, folder: Boolean = false) {
+                    instrumentation.uiAutomation.waitForIdle(500, 3000)
+                    val entry = awaitNode { node ->
+                        var parent = node.parent
+                        while (parent != null && parent.viewIdResourceName?.endsWith(":id/item_root") != true) parent = parent.parent
+                        node.isVisibleToUser && node.viewIdResourceName?.endsWith(":id/title") == true && node.text?.toString() in labels && (!folder || parent != null)
+                    }
+                    var target = entry
+                    if (folder) {
+                        while (target.viewIdResourceName?.endsWith(":id/item_root") != true) target = requireNotNull(target.parent)
+                        check(target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+                        return
+                    }
+                    val bounds = android.graphics.Rect(); target.getBoundsInScreen(bounds)
+                    instrumentation.uiAutomation.executeShellCommand("input tap ${bounds.centerX()} ${bounds.centerY()}").use { descriptor ->
+                        android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() }
+                    }
+                }
+                clickDocumentEntry(listOf("Images", "Изображения"))
+                clickDocumentEntry(listOf("Pictures"), folder = true)
             }
             // Do not match explanatory text «доступ ... фотографиям» as a photo tile.
             val photo = awaitNode { node -> node.isVisibleToUser && (node.text?.toString() == "phone08-synthetic.png" || node.contentDescription?.startsWith("phone08-synthetic.png,") == true || node.contentDescription?.startsWith("Фото, дата") == true || node.contentDescription?.startsWith("Photo taken") == true) }
