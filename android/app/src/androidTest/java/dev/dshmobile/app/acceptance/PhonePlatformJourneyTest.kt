@@ -148,7 +148,10 @@ class PhonePlatformJourneyTest {
             // API 30 uses DocumentsUI fallback rather than the platform Photo Picker.
             if (android.os.Build.VERSION.SDK_INT < 33) {
                 clickSystem("Show roots", "Показать корни", "Открыть список")
-                clickSystem("Images", "Изображения")
+                val imagesRoot = awaitNode { node -> node.isVisibleToUser && node.viewIdResourceName?.endsWith(":id/title") == true && node.text?.toString() in listOf("Images", "Изображения") }
+                var rootRow: AccessibilityNodeInfo? = imagesRoot
+                while (rootRow != null && !rootRow.isClickable) rootRow = rootRow.parent
+                check(requireNotNull(rootRow).performAction(AccessibilityNodeInfo.ACTION_CLICK))
                 val pictures = awaitNode { it.isVisibleToUser && it.text?.toString() == "Pictures" }
                 var folder: AccessibilityNodeInfo? = pictures
                 while (folder != null && folder.viewIdResourceName?.endsWith(":id/item_root") != true) folder = folder.parent
