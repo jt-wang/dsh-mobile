@@ -114,6 +114,21 @@ class PhoneProtocolTest {
         assertFalse(state.possiblyUsedUploads.containsKey("expired"))
         assertEquals(601000L, state.uploadProtectionUntil)
     }
+    @Test fun `pending and accepted attachment names survive encrypted state serialization without paths`() {
+        val source = DraftAttachment("local", "content://synthetic/private", "C:\\private\\notes.txt", 4, "text/plain", "upload", 9999999999999)
+        val command = StoredCommand("00000000-0000-4000-8000-000000000001", "send", "chat", "", uploadIds = listOf("upload"), attachmentSources = listOf(source))
+        val restored = decodeStoredState(mobileJson.encodeToString(StoredState(pending = command, acceptedPrompts = listOf(command.copy(status = "accepted")))))
+        assertEquals(listOf("notes.txt"), restored.pending!!.presentation().attachmentNames)
+        assertEquals(listOf("notes.txt"), restored.acceptedPrompts.single().presentation().attachmentNames)
+        assertEquals(emptyList<String>(), decodeStoredState("""{"pending":{"requestId":"r","kind":"send","uploadIds":["u"]}}""").pending!!.presentation().attachmentNames)
+    }
+    @Test fun `attachment presentation bounds UTF8 names at code points and omits unnamed sources`() {
+        val sources = List(25) { DraftAttachment("local$it", "content://synthetic/$it", "/private/" + "😀".repeat(100), 4, "text/plain") }
+        val names = StoredCommand("r", "send", attachmentSources = sources).presentation().attachmentNames
+        assertEquals(20, names.size)
+        assertTrue(names.all { it == "😀".repeat(64) })
+        assertTrue(StoredCommand("r", "send", attachmentSources = listOf(sources.first().copy(name = "/private/\n"))).presentation().attachmentNames.isEmpty())
+    }
     @Test fun `title limit counts UTF8 bytes and rejects controls`() {
         assertTrue(PhoneRules.validTitle("я".repeat(128)))
         assertFalse(PhoneRules.validTitle("я".repeat(129)))

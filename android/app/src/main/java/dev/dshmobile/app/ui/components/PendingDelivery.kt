@@ -25,6 +25,9 @@ internal fun PromptContent(command: dev.dshmobile.app.model.PendingCommand, maxL
     if (!command.text.isNullOrBlank()) Text(command.text, style = MaterialTheme.typography.bodyMedium, maxLines = maxLines, overflow = TextOverflow.Ellipsis)
     if (command.attachmentCount > 0) Text(stringResource(R.string.mobile_prompt_attachments, command.attachmentCount),
         modifier = Modifier.testTag("prompt_attachments_${command.requestId}"), style = MaterialTheme.typography.bodySmall)
+    command.attachmentNames.forEach { name ->
+        Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 /** Also lives on Home: an uncertain create has no chat/composer yet, but must remain resolvable. */

@@ -52,7 +52,15 @@ internal data class StoredCommand(
     val skip: Boolean = false,
     val attachmentSources: List<dev.dshmobile.app.model.DraftAttachment> = emptyList(),
 ) {
-    fun presentation() = PendingCommand(requestId, kind, sessionId, text, status, uploadIds.orEmpty().size, delivery)
+    // Sources are already persisted with the exact command. Legacy commands default to no names.
+    fun presentation() = PendingCommand(requestId, kind, sessionId, text, status, uploadIds.orEmpty().size, delivery,
+        attachmentSources.take(20).mapNotNull { source ->
+            var name = source.name.substringAfterLast('/').substringAfterLast('\\').filterNot { it.isISOControl() }.trim()
+            while (name.toByteArray(Charsets.UTF_8).size > 256) {
+                name = name.dropLast(if (name.length > 1 && name.last().isLowSurrogate() && name[name.lastIndex - 1].isHighSurrogate()) 2 else 1)
+            }
+            name.takeIf { it.isNotBlank() }
+        })
 }
 
 internal fun validAttachmentDraft(item: dev.dshmobile.app.model.DraftAttachment): Boolean =

@@ -99,6 +99,27 @@ class RepositoryTest {
             repo.refresh(); assertFalse(repo.state.value.manualRefreshing)
         }
     }
+    @Test fun `notification target during manual metadata refresh skips old history and preserves refresh lifetime`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            val entered = CompletableDeferred<Unit>(); val release = java.util.concurrent.CountDownLatch(1)
+            fixture.metadataGate = { entered.complete(Unit); release.await(5, TimeUnit.SECONDS) }
+            val oldGets = fixture.requests.count { it.path == "/v1/sessions/chat" }
+            val refresh = scope.async { repo.refresh() }
+            var navigation: kotlinx.coroutines.Deferred<Unit>? = null
+            try {
+                withTimeout(5000) { entered.await() }
+                assertTrue(repo.state.value.manualRefreshing)
+                navigation = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.selectSession("other") }
+                assertTrue(repo.state.value.manualRefreshing)
+            } finally { release.countDown() }
+            refresh.await(); navigation!!.await()
+            assertFalse(repo.state.value.manualRefreshing)
+            assertEquals(oldGets, fixture.requests.count { it.path == "/v1/sessions/chat" })
+            assertEquals(1, fixture.requests.count { it.path == "/v1/sessions/other" })
+            assertEquals("other", repo.state.value.snapshot?.session?.id)
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
     @Test fun `cold refresh preserves indicator while publishing restored state`() = runBlocking {
         withRepository { _, store, _, scope ->
             val cold = NetworkMobileRepository(store, scope, debug = true)
@@ -1191,6 +1212,27 @@ class RepositoryTest {
             repo.refresh(); repo.rename("Synthetic title"); val id = store.value.pending?.requestId
             repo.resolvePending(); repo.refresh()
             assertNotNull(id); assertEquals(id, store.value.pending?.requestId); assertEquals(1, fixture.mutations.size)
+        }
+    }
+    @Test fun `attachment only names remain visible across pending receipt and cleared editor sources`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            fixture.capabilities = fixture.capabilities.replace("\"attachments\":false", "\"attachments\":true")
+            repo.refresh()
+            repo.saveAttachments("chat", listOf(dev.dshmobile.app.model.DraftAttachment("local", "content://synthetic/source", "/private/notes.txt", 4, "text/plain", "upload", Long.MAX_VALUE)))
+            val entered = CompletableDeferred<Unit>(); val release = java.util.concurrent.CountDownLatch(1)
+            fixture.message = { request ->
+                entered.complete(Unit); release.await(5, TimeUnit.SECONDS)
+                json("""{"requestId":"${requestId(request)}","status":"accepted","updatedAt":20}""")
+            }
+            val send = scope.async { repo.sendMessage("", null, listOf("upload")) }
+            try {
+                withTimeout(5000) { entered.await() }
+                assertEquals(listOf("notes.txt"), repo.state.value.pending?.attachmentNames)
+            } finally { release.countDown() }
+            send.await()
+            assertNull(repo.state.value.pending)
+            assertTrue(store.value.attachmentDrafts.isEmpty())
+            assertEquals(listOf("notes.txt"), repo.state.value.acceptedPrompts.single().attachmentNames)
         }
     }
     @Test fun `discard staged uploads best effort but never delete admitted sources`() = runBlocking {

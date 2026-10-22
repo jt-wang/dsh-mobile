@@ -45,6 +45,7 @@ data class LocalPromptActions(val dismiss: suspend (String) -> Unit, val resend:
 data class PendingCommand(
     val requestId: String, val kind: String, val sessionId: String?, val text: String?, val status: String,
     val attachmentCount: Int = 0, val delivery: String? = null,
+    val attachmentNames: List<String> = emptyList(),
 )
 @Serializable
 data class MobileCapabilities(

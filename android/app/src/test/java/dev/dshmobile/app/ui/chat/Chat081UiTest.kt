@@ -47,6 +47,20 @@ class Chat081UiTest {
         compose.onNodeWithTag("prompt_attachments_p").assertTextEquals(app.getString(R.string.mobile_prompt_attachments, 3))
     }
 
+    @Test fun `attachment names appear for pending timeline and accepted prompts without text`() {
+        var accepted by mutableStateOf(false)
+        val command = PendingCommand("p", "send", "s", "", "sending", 2, attachmentNames = listOf("notes.txt", "Фото 1.jpg"))
+        compose.setContent { MaterialTheme {
+            if (accepted) PromptContent(command.copy(status = "accepted"))
+            else ChatTimeline(SessionSnapshot(session, emptyList(), 1, false, "idle"), command, {})
+        } }
+        compose.onNodeWithText("notes.txt").assertExists()
+        compose.onNodeWithText("Фото 1.jpg").assertExists()
+        compose.runOnIdle { accepted = true }
+        compose.onNodeWithText("notes.txt").assertExists()
+        compose.onNodeWithText("Фото 1.jpg").assertExists()
+    }
+
     @Test fun `media message retains markdown copy as text selection and provisional marker`() {
         val message = ChatMessage("m", "assistant", "**Bold**", 1, provisional = true, attachments = listOf(file))
         var copied = ""
