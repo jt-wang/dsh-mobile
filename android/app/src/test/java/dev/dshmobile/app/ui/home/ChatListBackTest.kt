@@ -3,7 +3,7 @@ package dev.dshmobile.app.ui.home
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
-import androidx.compose.ui.platform.LocalContext
+import androidx.activity.compose.LocalActivity
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import dev.dshmobile.app.model.*
@@ -24,7 +24,7 @@ class ChatListBackTest {
         lateinit var activity: ComponentActivity
         val sessions = (1..50).map { SessionSummary("s$it", "Synthetic $it", "w", it.toLong(), false, true) }
         compose.setContent {
-            activity = LocalContext.current as ComponentActivity
+            activity = requireNotNull(LocalActivity.current) as ComponentActivity
             MaterialTheme {
                 ChatListScreen(MobileState(sessions = sessions), query, { query = it }, null, {}, {}, {}, {}, {}, {}, false, {})
             }
