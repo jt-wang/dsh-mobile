@@ -500,6 +500,27 @@ class RepositoryTest {
             assertTrue(fixture.mutations.isEmpty())
         }
     }
+    @Test fun `reconnect retries failed notification target without refreshing previous chat`() = runBlocking {
+        withRepository { repo, store, fixture, _ ->
+            repo.updateDraft("A draft survives")
+            fixture.index = """{"items":[${session()},${session().replace("\"id\":\"chat\"", "\"id\":\"other\"")}],"nextCursor":null}"""
+            fixture.otherSnapshot = { MockResponse().setResponseCode(503) }
+            repo.leaveSession(); repo.selectSession("other")
+            assertNotNull(repo.state.value.error)
+            assertEquals("chat", store.value.selectedSessionId)
+            val previousGets = fixture.requests.count { it.path == "/v1/sessions/chat" }
+            fixture.otherSnapshot = { json(snapshot("""[{"id":"fresh-B","role":"assistant","text":"B recovered","createdAt":20}]""", cursor = 2).replace("\"id\":\"chat\"", "\"id\":\"other\"")) }
+            // Same refresh boundary used by automatic reconnect, not a second selectSession call.
+            repo.refresh()
+            assertEquals("A must never refresh under B's route", previousGets, fixture.requests.count { it.path == "/v1/sessions/chat" })
+            assertEquals("other", store.value.selectedSessionId)
+            assertEquals("fresh-B", repo.state.value.snapshot?.messages?.single()?.id)
+            assertTrue(dev.dshmobile.app.ui.notificationTargetSelected("other", repo.state.value))
+            assertTrue(dev.dshmobile.app.model.MobileReducer.canSend(repo.state.value, "B draft"))
+            assertEquals("A draft survives", store.value.drafts["chat"])
+            assertTrue(fixture.mutations.isEmpty())
+        }
+    }
     @Test fun `notification navigation retries cold offline failure without a command or losing drafts`() = runBlocking {
         withRepository { repo, store, fixture, _ ->
             repo.updateDraft("draft survives navigation")

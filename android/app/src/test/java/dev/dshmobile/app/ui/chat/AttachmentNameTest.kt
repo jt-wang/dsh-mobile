@@ -11,6 +11,10 @@ class AttachmentNameTest {
         assertEquals("Photo 6.jpeg", attachmentDisplayName("", "image/jpeg", "Photo 6"))
         assertEquals("Photo 7.jpg", attachmentDisplayName("attachment.jpg", "image/jpeg", "Photo 7"))
     }
+    @Test fun `app camera random names use localized neutral names`() {
+        assertEquals("Photo 3.jpg", attachmentDisplayName("camera-random.jpg", "image/jpeg", "Photo 3", temporary = true))
+        assertEquals("Фото 2.jpg", attachmentDisplayName("camera-6ed36d4c-433e-4f2c-884c-fd5e8dcda3f5.jpg", "image/jpeg", "Фото 2", temporary = true))
+    }
     @Test fun `meaningful names and non images remain unchanged after sanitizing`() {
         assertEquals("holiday.jpg", attachmentDisplayName("/picked/holiday.jpg", "image/jpeg", "Photo 1"))
         assertEquals("2026-invoice.pdf", attachmentDisplayName("2026-invoice.pdf", "application/pdf", "Photo 1"))

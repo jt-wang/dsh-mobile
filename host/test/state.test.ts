@@ -7,8 +7,31 @@ import { HostState, hashSecret, validateGrants } from '../src/state.ts';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { legacyModule } from './fixtures/legacy-module.ts';
 
 const grants = { readWorkspaceIds: ['alpha'], executeWorkspaceIds: ['alpha'] };
+
+test('0.7.0 accepted creates seed bounded blank exceptions exactly once on upgrade', async t => {
+  const { HostState: OldState } = await legacyModule('state', t);
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'mobile-upgrade-'))), path = join(dir, 'host.sqlite');
+  let now = 1_800_000_000_000;
+  const old = new OldState(path, { now: () => now });
+  const device = old.consumePairing(old.createPairing(grants).pairingToken, 'Synthetic phone');
+  const record = (id: string, status = 'accepted') => { const request = randomUUID(); old.admitCommand(device.deviceId, request, 'create', hashSecret(id), 'alpha'); old.finishCommand(device.deviceId, request, status, { result: { sessionId: id } }); };
+  record('expired'); now += 7 * 24 * 60 * 60_000;
+  for (let i = 0; i < 257; i++) { now++; record('legacy-' + i); }
+  record('rejected', 'rejected'); old.close();
+  let updated = new HostState(path, { now: () => now });
+  t.after(() => { updated.close(); rmSync(dir, { recursive: true, force: true }); });
+  assert.equal(updated.mobileSessionVisible('legacy-256', true), true);
+  assert.equal(updated.mobileSessionVisible('legacy-1', true), true);
+  for (const id of ['legacy-0', 'expired', 'rejected']) assert.equal(updated.mobileSessionVisible(id, true), false);
+  updated.mobileSessionVisible('legacy-256', false); updated.close();
+  updated = new HostState(path, { now: () => now });
+  assert.equal(updated.mobileSessionVisible('legacy-256', true), false, 'reopen must not resurrect engaged exceptions');
+  now += 7 * 24 * 60 * 60_000;
+  assert.equal(updated.mobileSessionVisible('legacy-1', true), false);
+});
 
 test('mobile-created blank exceptions expire, retire on engagement, and remain bounded', t => {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mobile-created-'))); let now = 1000;

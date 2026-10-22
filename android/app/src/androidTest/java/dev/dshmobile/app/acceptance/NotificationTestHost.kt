@@ -20,6 +20,8 @@ internal class NotificationTestHost : AutoCloseable {
     @Volatile var namesDelayMs = 0L
     @Volatile var blocked = false
     @Volatile var twoChats = false
+    @Volatile var failOtherHistory = false
+    val historyRequests = java.util.concurrent.CopyOnWriteArrayList<String>()
     @Volatile var slowEnrichment = false
     private val snapshotCalls = java.util.concurrent.atomic.AtomicInteger()
     val enrichmentEntered = java.util.concurrent.CountDownLatch(1)
@@ -30,12 +32,13 @@ internal class NotificationTestHost : AutoCloseable {
                 val session = """{"id":"chat","title":"Synthetic","workspaceId":"w","updatedAt":1,"running":true,"canExecute":true}"""
                 val question = """{"callId":"question","state":"open","questions":[{"id":"q","question":"Which synthetic check?","options":[{"label":"Unit tests"}],"multiSelect":true}]}"""
                 fun json(text: String) = MockResponse().setHeader("Content-Type", "application/json").setBody(text)
+                if (request.requestUrl!!.encodedPath in setOf("/v1/sessions/chat", "/v1/sessions/other")) historyRequests += request.requestUrl!!.encodedPath
                 return when (request.requestUrl!!.encodedPath) {
                     "/v1/capabilities" -> json("""{"protocolVersion":1,"hostName":"Synthetic","upstreamVersion":"fixture","capabilities":{"sessions":true,"textPrompt":true,"cancel":true,"liveSnapshots":false,"attachments":false,"questions":true,"approvals":false,"push":false,"notifications":true}}""")
                     "/v1/workspaces" -> json("""{"items":[{"id":"w","name":"Synthetic","canExecute":true}]}""").setBodyDelay(namesDelayMs, java.util.concurrent.TimeUnit.MILLISECONDS)
                     "/v1/presets" -> json("""{"items":[]}""")
                     "/v1/sessions" -> json("""{"items":[$session${if (twoChats) "," + session.replace("\"id\":\"chat\"", "\"id\":\"other\"") else ""}],"nextCursor":null}""")
-                    "/v1/sessions/other" -> json("""{"session":${session.replace("\"id\":\"chat\"", "\"id\":\"other\"")},"messages":[],"cursor":2,"hasMore":false,"activity":"idle"}""")
+                    "/v1/sessions/other" -> if (failOtherHistory) MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) else json("""{"session":${session.replace("\"id\":\"chat\"", "\"id\":\"other\"")},"messages":[],"cursor":2,"hasMore":false,"activity":"idle"}""")
                     "/v1/sessions/chat" -> { val first = snapshotCalls.incrementAndGet() == 1; if (slowEnrichment && first) enrichmentEntered.countDown(); json("""{"session":$session,"messages":[],"cursor":1,"hasMore":false,"activity":"waiting","pendingQuestions":${if (resolved) "[]" else "[$question]"},"resolvedQuestions":${if (resolved) """[{"callId":"question","outcome":"answered","answers":[{"id":"q","selected":["Unit tests"]}]}]""" else "[]"}}""").setBodyDelay(if (slowEnrichment && first) 5000 else historyDelayMs, java.util.concurrent.TimeUnit.MILLISECONDS) }
                     "/v1/sessions/chat/answers" -> { resolved = true; json("""{"requestId":"${JSONObject(request.body.readUtf8()).getString("requestId")}","status":"accepted","updatedAt":20}""") }
                     "/v1/notification-settings" -> json("""{"revision":1,"enabled":true,"projects":[],"chats":[]}""")

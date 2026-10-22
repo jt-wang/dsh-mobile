@@ -119,7 +119,33 @@ function fileMimes(service: object): Map<string, string> {
 function receiptBudget(service: object): ReceiptBudget {
   const identity = (Reflect.get(service, Symbol.for('cordis.original')) ?? service) as object;
   let budget = Reflect.get(identity, RECEIPT_BUDGET) as ReceiptBudget | undefined;
-  if (!budget) { budget = new Map(); Object.defineProperty(identity, RECEIPT_BUDGET, { value: budget }); }
+  if (!budget) {
+    budget = new Map();
+    // Inspected rc.2 stores staged receipts by live Agent.session. Never assume an
+    // empty service when an older module's private WeakMap cannot be recovered.
+    try {
+      const staged = Reflect.get(identity, 'stagedFiles');
+      const sessions = Reflect.get(identity, 'ctx')?.sessions?.list();
+      if (!(staged instanceof WeakMap) || !Array.isArray(sessions) || sessions.length > 4096) throw new Error('unknown receipt inventory');
+      for (const session of sessions) {
+        if (typeof session?.id !== 'string' || typeof session !== 'object' || session === null) throw new Error('unknown receipt scope');
+        const receipts = staged.get(session);
+        if (receipts === undefined) continue;
+        if (!(receipts instanceof Map)) throw new Error('unknown receipt inventory');
+        for (const id of receipts.keys()) {
+          if (typeof id !== 'string' || !id) throw new Error('unknown receipt id');
+          const entry = { sessionId: session.id, receiptId: id }; budget.set(entry, entry);
+          if (budget.size > 64) throw new Error('receipt inventory beyond bound');
+        }
+      }
+    } catch {
+      // Fail closed for this upstream service lifetime; restart with an inspected
+      // empty service is required when its existing inventory cannot be proved.
+      budget.clear();
+      for (let i = 0; i < 64; i++) { const entry = { sessionId: '' }; budget.set(entry, entry); }
+    }
+    Object.defineProperty(identity, RECEIPT_BUDGET, { value: budget });
+  }
   return budget;
 }
 interface CanonicalWorkspace extends WorkspaceConfig { key: string }

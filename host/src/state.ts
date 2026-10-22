@@ -82,7 +82,24 @@ export class HostState {
       pending_since INTEGER
     ) STRICT;
     CREATE TABLE IF NOT EXISTS relay_status (route_id TEXT PRIMARY KEY, connected INTEGER NOT NULL, ready INTEGER NOT NULL, generation TEXT, updated_at INTEGER NOT NULL) STRICT;
-    PRAGMA user_version = 3;`);
+    `);
+    this.transaction(() => {
+      const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version);
+      if (version < 4) {
+        const ttl = 7 * 24 * 60 * 60_000, now = this.now();
+        // Retain the original acceptance age; reopening cannot renew or resurrect exceptions.
+        this.db.prepare(`INSERT INTO mobile_created_sessions(id,expires_at)
+          SELECT json_extract(result,'$.sessionId'), MAX(updated_at)+?
+          FROM commands WHERE operation='create' AND status='accepted' AND updated_at>?
+            AND json_valid(result) AND json_type(result,'$.sessionId')='text'
+            AND length(json_extract(result,'$.sessionId')) BETWEEN 1 AND 256
+          GROUP BY json_extract(result,'$.sessionId') ORDER BY MAX(updated_at) DESC LIMIT 256
+          ON CONFLICT(id) DO UPDATE SET expires_at=MAX(expires_at,excluded.expires_at)`).run(ttl, now - ttl);
+        this.db.prepare('DELETE FROM mobile_created_sessions WHERE expires_at<=?').run(now);
+        this.db.exec('DELETE FROM mobile_created_sessions WHERE id NOT IN (SELECT id FROM mobile_created_sessions ORDER BY expires_at DESC, rowid DESC LIMIT 256)');
+        this.db.exec('PRAGMA user_version = 4');
+      }
+    });
   }
 
   private transaction<T>(fn: () => T): T {

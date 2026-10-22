@@ -324,7 +324,13 @@ internal class NetworkMobileRepository(
         val index: HostApi.SessionIndex,
     )
     private suspend fun refreshLocked(readHistory: Boolean = true) {
-        try { refreshFromHostLocked(readHistory) }
+        try {
+            val target = requestedSessionId?.takeIf { observingSession && readHistory }
+            val revision = selectionRevision
+            refreshFromHostLocked(readHistory && target == null)
+            if (target != null && revision == selectionRevision && observingSession)
+                selectLocked(target, revision, metadataReady = true)
+        }
         catch (cancelled: CancellationException) {
             // A navigation-owned refresh can be cancelled during metadata GETs. The closed stream
             // and incomplete handshake are not ONLINE, and SYNCING must not survive its owner.
@@ -415,10 +421,10 @@ internal class NetworkMobileRepository(
         if (stored.pending != null) resolveLocked(reloadSnapshot = false)
         // When observing, a successful GET does not mean the stream recovered. Reset only on
         // a real SSE snapshot; otherwise repeated stream-open failures would retry forever.
-        if (snapshot == null || !caps.capabilities.liveSnapshots) reconnectAttempt = 0
+        if (requestedSessionId == null && (snapshot == null || !caps.capabilities.liveSnapshots)) reconnectAttempt = 0
         if (foreground && state.value.connection == ConnectionState.ONLINE) {
             startObserver()
-            if (prefetchEnabled) prefetch.start(sessions.filterNot { observingSession && it.id == selected })
+            if (prefetchEnabled && requestedSessionId == null) prefetch.start(sessions.filterNot { observingSession && it.id == selected })
         }
     }
     override suspend fun selectSession(sessionId: String) {
@@ -456,7 +462,7 @@ internal class NetworkMobileRepository(
                 throw cancelled
             }
             if (!task.isCancelled) throw cancelled
-        } finally { synchronized(selectionGuard) { if (selection === task) { selection = null; requestedSessionId = null } } }
+        } finally { synchronized(selectionGuard) { if (selection === task) selection = null } }
     }
     override suspend fun leaveSession() {
         synchronized(selectionGuard) {
@@ -487,13 +493,13 @@ internal class NetworkMobileRepository(
             null
         } finally { synchronized(selectionGuard) { if (historyRead === task) historyRead = null } }
     }
-    private suspend fun selectLocked(sessionId: String, revision: Long) {
+    private suspend fun selectLocked(sessionId: String, revision: Long, metadataReady: Boolean = false) {
         restoreLocked()
         if (!foreground) throw MobileFailure("offline_no_send")
         if (!validId(sessionId)) throw MobileFailure("invalid_selection")
         // Navigation owns the target GET below; metadata recovery must not project the old chat
         // (or GET this same target twice). Durable receipt recovery inside refresh is unchanged.
-        if (state.value.connection != ConnectionState.ONLINE || state.value.sessions.none { it.id == sessionId }) refreshLocked(readHistory = false)
+        if (!metadataReady && (state.value.connection != ConnectionState.ONLINE || state.value.sessions.none { it.id == sessionId })) refreshLocked(readHistory = false)
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         if (revision != selectionRevision || !observingSession) return
         stopObserver()
@@ -516,6 +522,7 @@ internal class NetworkMobileRepository(
                 mutableState.value = state.value.copy(sessions = state.value.sessions + snapshot.session)
             }
             persist(stored.copy(selectedSessionId = sessionId))
+            synchronized(selectionGuard) { if (revision == selectionRevision) requestedSessionId = null }
             mutableState.value = MobileReducer.replaceSnapshot(state.value, snapshot, now()).copy(
                 draft = draftFor(sessionId), busy = false,
             )

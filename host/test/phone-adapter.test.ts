@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { attachmentRefs, questionsOf } from '../src/phone.ts';
 import { createDshAdapter } from '../src/dsh-adapter.ts';
 import { opening, summary, requestId } from './fixtures/rc2.ts';
+import { legacyModule } from './fixtures/legacy-module.ts';
 
 async function setup(t: any, hooks: { pollIntervalMs?: number; beforeFollow?: () => Promise<void>; events?: import('../src/dsh-adapter.ts').DshAdapterOptions['events']; fileUploads?: import('../src/dsh-adapter.ts').DshAdapterOptions['fileUploads']; resolveAgent?: () => Promise<{ agent: unknown }>; attachments?: import('../src/dsh-adapter.ts').DshAdapterOptions['attachments'] } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'phone-adapter-'))); await mkdir(join(root, 'w'));
@@ -16,7 +17,9 @@ async function setup(t: any, hooks: { pollIntervalMs?: number; beforeFollow?: ()
   const calls: any[] = [];
   const controller = { async list() { return { items: [row] }; }, async *follow(_r: any, signal: AbortSignal) { try { await hooks.beforeFollow?.(); yield structuredClone(frame); } finally { assert.ok(signal.aborted); } }, async page() { return {}; }, async projections() { return frame.projections; }, async create() { return { sessionId: row.sessionId }; }, async prompt(r: any) { calls.push(r); }, cancel() {}, async rename(r: any) { calls.push(r); }, async updateQueue(r: any) { calls.push(r); }, async selectModel(r: any) { calls.push(r); }, async modelCatalog() { return { default: { provider: 'p', model: 'm' }, groups: [{ id: 'p', models: [{ id: 'm', name: 'Synthetic model' }] }] }; }, async attachment(r: any) { calls.push(r); return { attachment: { attachmentId: 'image', mediaType: 'image/png' as const, bytes: 3 }, data: 'YWJj' }; } };
   let answered: any;
-  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', events: hooks.events, pollIntervalMs: hooks.pollIntervalMs ?? 60000, workspaces: [{ id: 'w', name: 'Synthetic', path: frame.header.cwd }], sessionController: { ...controller, ...(hooks.resolveAgent ? { resolveAgent: hooks.resolveAgent } : {}) }, modelInfo: async () => ({ inputModalities: ['text', 'image'] }), questionBridge: { pending: () => [], answer: () => false, close() {} }, answerContinued: async (...args) => { answered = args; return true; }, fileUploads: { async uploadStream(r) { let size = 0; for await (const data of r.data) size += data.length; return { receiptId: 'receipt', file: { attachmentId: 'file', name: r.name!, bytes: size } }; } }, ...(hooks.fileUploads ? { fileUploads: hooks.fileUploads } : {}), attachments: { async validateImage(r) { assert.equal(r.mediaType, 'image/png'); }, async *readFileStream(ref) { assert.equal(ref.attachmentId, 'file'); assert.equal(ref.name, 'synthetic.txt'); yield Buffer.from('abc'); } }, ...(hooks.attachments ? { attachments: hooks.attachments } : {}) });
+  // Synthetic services start with an inspectable empty upstream inventory.
+  if (hooks.fileUploads && !Reflect.get(hooks.fileUploads, Symbol.for('cordis.original'))) Object.assign(hooks.fileUploads, { stagedFiles: new WeakMap(), ctx: { sessions: { list: () => [] } } });
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', events: hooks.events, pollIntervalMs: hooks.pollIntervalMs ?? 60000, workspaces: [{ id: 'w', name: 'Synthetic', path: frame.header.cwd }], sessionController: { ...controller, ...(hooks.resolveAgent ? { resolveAgent: hooks.resolveAgent } : {}) }, modelInfo: async () => ({ inputModalities: ['text', 'image'] }), questionBridge: { pending: () => [], answer: () => false, close() {} }, answerContinued: async (...args) => { answered = args; return true; }, fileUploads: { ...{ stagedFiles: new WeakMap(), ctx: { sessions: { list: () => [] } } }, async uploadStream(r) { let size = 0; for await (const data of r.data) size += data.length; return { receiptId: 'receipt', file: { attachmentId: 'file', name: r.name!, bytes: size } }; } }, ...(hooks.fileUploads ? { fileUploads: hooks.fileUploads } : {}), attachments: { async validateImage(r) { assert.equal(r.mediaType, 'image/png'); }, async *readFileStream(ref) { assert.equal(ref.attachmentId, 'file'); assert.equal(ref.name, 'synthetic.txt'); yield Buffer.from('abc'); } }, ...(hooks.attachments ? { attachments: hooks.attachments } : {}) });
   t.after(async () => { adapter.dispose(); await rm(root, { recursive: true, force: true }); });
   return { adapter, frame, row, calls, answered: () => answered, signal: new AbortController().signal };
 }
@@ -48,8 +51,36 @@ test('watch refresh publishes waiting when a continued question appears and clea
   } finally { abort.abort(); await iterator.return?.(); }
 });
 
+test('0.7.0 to current upgrade counts upstream staged receipts before admitting files', async t => {
+  const legacy = await legacyModule('dsh-adapter', t);
+  const agent = { session: { id: summary.sessionId } }, staged = new Map<string, unknown>();
+  const original = { stagedFiles: new WeakMap([[agent.session, staged]]), ctx: { sessions: { list: () => [agent.session] } } };
+  let serial = 0;
+  const service = () => ({ [Symbol.for('cordis.original')]: original, resolve(_a: unknown, id: string) { return staged.has(id) ? {} : undefined; }, async uploadStream(r: any) { for await (const _chunk of r.data) {} const receiptId = 'legacy-' + serial++; staged.set(receiptId, { file: {} }); return { receiptId, file: { attachmentId: 'file', name: 'test.txt', bytes: 3 } }; } });
+  const { adapter, row, frame, signal } = await setup(t, { fileUploads: service(), resolveAgent: async () => ({ agent }) });
+  const options = () => ({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'w', name: 'Synthetic', path: row.cwd }], sessionController: { async list() { return { items: [row] }; }, async *follow() { yield frame; }, async page() {}, async projections() {}, async create() { return { sessionId: row.sessionId }; }, async prompt() {}, cancel() {}, async attachment() {}, async resolveAgent() { return { agent }; } }, fileUploads: service(), attachments: { async validateImage() {} } });
+  adapter.dispose();
+  const old = await legacy.createDshAdapter(options());
+  const input = () => ({ size: 3, mime: 'text/plain', name: 'test.txt', data: (async function* () { yield Buffer.from('abc'); })() });
+  for (let i = 0; i < 20; i++) await old.upload(row.sessionId, input(), signal, 'w');
+  old.dispose();
+  const next = await createDshAdapter(options()); t.after(() => next.dispose());
+  await assert.rejects(next.upload(row.sessionId, input(), signal, 'w'), { code: 'rate_limited' });
+  assert.equal(staged.size, 20);
+  staged.delete('legacy-0');
+  await next.upload(row.sessionId, input(), signal, 'w');
+  assert.equal(staged.size, 20, 'proven retired legacy receipt releases one slot');
+});
+
+test('uninspectable pre-upgrade receipt inventory fails closed without reading upload bytes', async t => {
+  let reads = 0;
+  const { adapter, row, signal } = await setup(t, { fileUploads: { [Symbol.for('cordis.original')]: {}, async uploadStream() { throw new Error('must not upload'); } } as any });
+  await assert.rejects(adapter.upload(row.sessionId, { size: 3, mime: 'text/plain', name: 'test.txt', data: (async function* () { reads++; yield Buffer.from('abc'); })() }, signal, 'w'), { code: 'rate_limited' });
+  assert.equal(reads, 0);
+});
+
 test('receipt budget survives module reimport and fresh cordis tracing wrappers', async t => {
-  const original = {}, live = new Set<string>(); let serial = 0;
+  const original = { stagedFiles: new WeakMap(), ctx: { sessions: { list: () => [] } } }, live = new Set<string>(); let serial = 0;
   const service = () => ({ [Symbol.for('cordis.original')]: original, resolve(_a: unknown, id: string) { return live.has(id) ? {} : undefined; }, async uploadStream(r: any) { for await (const _chunk of r.data) {} const receiptId = 'reload-' + serial++; live.add(receiptId); return { receiptId, file: { attachmentId: 'file', name: 'test.txt', bytes: 3 } }; } });
   const { adapter, row, frame, signal } = await setup(t, { fileUploads: service(), resolveAgent: async () => ({ agent: {} }) });
   const input = () => ({ size: 3, mime: 'text/plain', name: 'test.txt', data: (async function* () { yield Buffer.from('abc'); })() });

@@ -14,11 +14,11 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import java.util.UUID
 
-internal fun attachmentDisplayName(raw: String, mime: String?, fallback: String): String {
+internal fun attachmentDisplayName(raw: String, mime: String?, fallback: String, temporary: Boolean = false): String {
     var name = raw.substringAfterLast('/').substringAfterLast('\\').filterNot { it.isISOControl() }.trim()
     val extension = name.substringAfterLast('.', "").takeIf { name.contains('.') && it.length in 1..12 && it.all(Char::isLetterOrDigit) }
     val stem = if (extension != null) name.dropLast(extension.length + 1) else name
-    val meaningless = stem.none(Char::isLetter) || stem.lowercase() in setOf("attachment", "image", "photo", "file", "unnamed", "unknown")
+    val meaningless = temporary || stem.none(Char::isLetter) || stem.lowercase() in setOf("attachment", "image", "photo", "file", "unnamed", "unknown")
     if (mime?.startsWith("image/") == true && meaningless) {
         val suffix = extension ?: when (mime) { "image/jpeg" -> "jpeg"; "image/png" -> "png"; "image/webp" -> "webp"; "image/gif" -> "gif"; else -> "" }
         name = fallback + if (suffix.isNotEmpty()) ".$suffix" else ""
@@ -119,7 +119,7 @@ internal class PhoneEditor(private val context: Context, private val repository:
                             while (size <= PhoneRules.FILE_LIMIT) { val n = input.read(buffer); if (n < 0) break; size += n }
                         }
                         val mime = context.contentResolver.getType(uri)
-                        name = attachmentDisplayName(name, mime, context.getString(R.string.mobile_attach_photo_name, inSession(session).size + 1))
+                        name = attachmentDisplayName(name, mime, context.getString(R.string.mobile_attach_photo_name, inSession(session).size + 1), temporary = temporary)
                         DraftAttachment(UUID.randomUUID().toString(), uri.toString(), name, size, PhoneRules.uploadMime(mime), temporary = temporary)
                     }
                     if (!PhoneRules.canAddAttachment(inSession(session).map { it.attachment.size }, item.size)) {

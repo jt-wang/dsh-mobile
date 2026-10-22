@@ -49,6 +49,39 @@ class NotificationPendingIntentTest {
             compose.onAllNodesWithTag("question_question").assertCountEquals(0)
         } finally { host.closeScenario(scenario); context.stopService(service) }
     }
+    @Test fun failedNotificationTargetRecoversOnReconnectWithoutAnotherTap() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        host.twoChats = true
+        // Persist A as the previous selected chat before the Activity handles B.
+        val owner = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+        val repository = NetworkMobileRepository(EncryptedStateStore(context), owner, true)
+        try { runBlocking { repository.setForeground(true); repository.restore(); repository.selectSession("chat") } }
+        finally { repository.close(); owner.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
+        host.failOtherHistory = true
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        try {
+            android.app.PendingIntent.getActivity(context, 91, Intent(context, MainActivity::class.java)
+                .putExtra("notificationDevice", "synthetic").putExtra("notificationChat", "other")
+                .addFlags(NOTIFICATION_ACTIVITY_FLAGS), android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT).send()
+            compose.waitUntil(10000) { host.historyRequests.contains("/v1/sessions/other") }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithTag("chat_screen").fetchSemanticsNodes().isNotEmpty() &&
+                    (compose.onAllNodesWithTag("message_input").fetchSemanticsNodes().isEmpty() ||
+                        try { compose.onNodeWithTag("message_input").assertIsNotEnabled(); true } catch (_: AssertionError) { false })
+            }
+            val oldReads = host.historyRequests.count { it == "/v1/sessions/chat" }
+            host.failOtherHistory = false
+            try {
+                compose.waitUntil(15000) { try { compose.onNodeWithTag("message_input").assertIsEnabled(); true } catch (_: AssertionError) { false } }
+            } catch (failure: Throwable) {
+                throw AssertionError("History requests: ${host.historyRequests}; selected: ${runBlocking { EncryptedStateStore(context).read().selectedSessionId }}; UI: ${compose.onRoot(useUnmergedTree = true).printToString()}", failure)
+            }
+            assertEquals(oldReads, host.historyRequests.count { it == "/v1/sessions/chat" })
+            assertEquals("other", runBlocking { EncryptedStateStore(context).read().selectedSessionId })
+            assertTrue(host.historyRequests.count { it == "/v1/sessions/other" } >= 2)
+        } finally { host.closeScenario(scenario) }
+    }
     @Test fun delayedHistoryShowsTargetBeforeNetworkCompletes() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
