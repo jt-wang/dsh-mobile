@@ -21,24 +21,38 @@ class MainActivity : ComponentActivity() {
         dev.dshmobile.app.data.refreshNotificationChannelNames(dev.dshmobile.app.locale.appLanguageContext(this))
     }
 
-    private var notificationIntent by androidx.compose.runtime.mutableStateOf<android.content.Intent?>(null)
+    private var notificationIntent by androidx.compose.runtime.mutableStateOf<dev.dshmobile.app.data.NotificationIntentTarget?>(null)
+    private var consumedDelivery: String? = null
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("notificationConsumedDelivery", consumedDelivery)
+        super.onSaveInstanceState(outState)
+    }
+    private fun acceptNotificationIntent(value: android.content.Intent, restoredDelivery: String? = null) {
+        // Save only consumption identity, never a restorable navigation target.
+        val delivery = dev.dshmobile.app.data.notificationDeliveryIdentity(value)
+        notificationIntent = dev.dshmobile.app.data.consumeNotificationIntent(value, delivery != null && delivery == restoredDelivery)
+        consumedDelivery = delivery ?: restoredDelivery
+        setIntent(value)
+    }
     override fun onNewIntent(intent: android.content.Intent) {
         dev.dshmobile.app.data.notificationTrace("activity_new_intent chat=${intent.hasExtra("notificationChat")} question=${intent.hasExtra("notificationQuestion")}")
-        super.onNewIntent(intent); setIntent(intent); notificationIntent = intent
+        super.onNewIntent(intent); acceptNotificationIntent(intent)
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         dev.dshmobile.app.data.StartupPerf.start()
         super.onCreate(savedInstanceState)
         dev.dshmobile.app.data.notificationTrace("activity_create saved=${savedInstanceState != null} chat=${intent.hasExtra("notificationChat")} question=${intent.hasExtra("notificationQuestion")}")
-        notificationIntent = intent
+        acceptNotificationIntent(intent, savedInstanceState?.getString("notificationConsumedDelivery"))
         enableEdgeToEdge()
         setContent {
             MobileTheme {
                 val model: MobileViewModel = viewModel()
                 androidx.compose.runtime.LaunchedEffect(notificationIntent) {
-                    if (notificationIntent?.getBooleanExtra("notificationSettings", false) == true) model.openNotificationSettings()
-                    if (notificationIntent?.getBooleanExtra("notificationChatList", false) == true) model.openNotificationChatList()
-                    model.openNotificationChat(notificationIntent?.getStringExtra("notificationDevice"), notificationIntent?.getStringExtra("notificationChat"), notificationIntent?.getStringExtra("notificationQuestion"))
+                    val target = notificationIntent ?: return@LaunchedEffect
+                    if (target.settings) model.openNotificationSettings()
+                    if (target.chatList) model.openNotificationChatList()
+                    model.openNotificationChat(target.device, target.chat, target.question)
+                    notificationIntent = null
                 }
                 MobileApp(model)
             }

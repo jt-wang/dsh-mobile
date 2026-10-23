@@ -202,6 +202,37 @@ class HostApiTest {
             } finally { api.close() }
         }
     }
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun `silent notification socket times out and reconnects from durable cursor`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody(": heartbeat\n\n").setHeader("Content-Length", "100000")
+                .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.KEEP_OPEN))
+            // Keep the first body incomplete without EOF, so this tests socket read timeout, not close.
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody("event: notification-page\ndata: {\"version\":1,\"epoch\":\"epoch\",\"items\":[],\"nextCursor\":\"head\",\"hasMore\":false,\"resetRequired\":false,\"coverage\":\"ready\"}\n\n"))
+            val api = api(server)
+            val first = CompletableDeferred<String>()
+            val start = System.nanoTime()
+            val source = api.observeNotifications("durable", {}, { key, _ -> first.complete(key) })
+            try {
+                assertEquals("network_unavailable", withTimeout(30_000) { first.await() })
+                val elapsed = (System.nanoTime() - start) / 1_000_000
+                assertTrue("elapsed=$elapsed", elapsed in 24_000..29_000)
+                source.cancel(); api.closeAndAwait()
+                val fresh = api(server)
+                val page = CompletableDeferred<NotificationPage>()
+                // A finite fixture body emits onClosed after onPage. Await the page, not a race
+                // between the independently completed page and EOF-failure deferreds.
+                val next = fresh.observeNotifications("durable", { page.complete(it) }, { _, _ -> })
+                try { assertEquals("head", withTimeout(5000) { page.await() }.nextCursor) }
+                finally { next.cancel(); fresh.closeAndAwait() }
+                assertEquals("/v1/notification-events/stream?after=durable", server.takeRequest(1, TimeUnit.SECONDS)!!.path)
+                assertEquals("/v1/notification-events/stream?after=durable", server.takeRequest(1, TimeUnit.SECONDS)!!.path)
+            } finally { source.cancel(); api.close() }
+        }
+    }
+
     private fun api(server: MockWebServer) = HostApi(HostEndpoint(server.url("/").newBuilder().host("localhost").build().toString().removeSuffix("/")), "synthetic-device-token-for-tests")
     private fun json(body: String, status: Int = 200) = MockResponse().setResponseCode(status).setHeader("Content-Type", "application/json").setBody(body)
     private fun session(id: String) = """{"id":"$id","title":"Synthetic","workspaceId":"workspace","updatedAt":10,"running":false,"canExecute":true}"""

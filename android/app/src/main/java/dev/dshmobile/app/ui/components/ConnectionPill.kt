@@ -8,6 +8,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
 import dev.dshmobile.app.ui.theme.Motion
 import dev.dshmobile.app.ui.theme.animateSize
@@ -28,7 +29,13 @@ import dev.dshmobile.app.ui.theme.LocalMobileColors
 import dev.dshmobile.app.ui.theme.Spacing
 
 @Composable
-internal fun connectionLabel(connection: ConnectionState): String = stringResource(when (connection) {
+internal fun displayedConnection(connection: ConnectionState): ConnectionState {
+    val stream = dev.dshmobile.app.data.NotificationStreamStatus.status.collectAsState().value
+    return dev.dshmobile.app.data.notificationHeaderConnection(connection, stream)
+}
+
+@Composable
+internal fun connectionLabel(connection: ConnectionState): String = stringResource(when (displayedConnection(connection)) {
     ConnectionState.ONLINE -> R.string.mobile_pc_online
     ConnectionState.CONNECTING -> R.string.mobile_connecting
     ConnectionState.SYNCING -> R.string.mobile_short_syncing
@@ -40,7 +47,7 @@ internal fun connectionLabel(connection: ConnectionState): String = stringResour
 
 /** The status dot is the only place connection colour appears; the label always carries the meaning. */
 @Composable
-internal fun connectionColor(connection: ConnectionState): Color = when (connection) {
+internal fun connectionColor(connection: ConnectionState): Color = when (displayedConnection(connection)) {
     ConnectionState.ONLINE -> LocalMobileColors.current.success
     ConnectionState.REVOKED, ConnectionState.INCOMPATIBLE -> MaterialTheme.colorScheme.error
     ConnectionState.OFFLINE, ConnectionState.DISCONNECTED -> LocalMobileColors.current.warningIndicator

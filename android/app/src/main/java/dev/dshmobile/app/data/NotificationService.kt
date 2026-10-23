@@ -22,12 +22,28 @@ import kotlin.random.Random
 class NotificationService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + NotificationPosting.errors)
     private var running: Job? = null
-    private var api: HostApi? = null
+    @Volatile private var api: HostApi? = null
+    private val reconnect = NotificationReconnect()
+    private val networkChanges = NotificationNetworkChanges { reconnect.networkChanged() }
+    private val connectivity by lazy { getSystemService(android.net.ConnectivityManager::class.java) }
+    private val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: android.net.Network) = networkChanges.available(network)
+        override fun onLost(network: android.net.Network) = networkChanges.lost(network)
+        override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+            // Transport/validation changes also matter: a VPN may keep its Network ID across Wi-Fi/LTE.
+            val route = listOf(caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI),
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR),
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN),
+                caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+            networkChanges.capabilities(network, route)
+        }
+    }
     private val enrichments = mutableMapOf<String, Job>()
     private val enrichmentSlots = kotlinx.coroutines.sync.Semaphore(2)
     @Volatile private var workspaceNames = emptyList<dev.dshmobile.app.model.Workspace>()
     @Volatile private var sessionNames = emptyList<dev.dshmobile.app.model.SessionSummary>()
     @Volatile private var connectionStatus = "initializing"
+        set(value) { field = value; NotificationStreamStatus.status.value = value }
     private val manager by lazy { getSystemService(NotificationManager::class.java) }
     private fun localizedString(id: Int) = dev.dshmobile.app.locale.appLanguageContext(this).getString(id)
     private fun refreshLanguage() = refreshNotificationLanguage(this)
@@ -41,6 +57,7 @@ class NotificationService : Service() {
             })
         }
         refreshLanguage()
+        connectivity.registerDefaultNetworkCallback(networkCallback)
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Android's foreground-start obligation must be fulfilled before any cancellation/stop path.
@@ -58,7 +75,7 @@ class NotificationService : Service() {
             return START_NOT_STICKY
         }
         if (!alertsAllowed()) { stopSelf(); return START_NOT_STICKY }
-        if (running?.isActive != true) running = scope.launch { monitor() }
+        if (running?.isActive != true) running = scope.launch { reconnect.run { monitor() } }
         return START_NOT_STICKY
     }
     private fun connectionNotification(status: String): android.app.Notification {
@@ -80,6 +97,9 @@ class NotificationService : Service() {
     private suspend fun monitor() {
         val store = NotificationStore(this)
         ensureNotificationChannels(dev.dshmobile.app.locale.appLanguageContext(this))
+        connectionStatus = "reconnecting"
+        store.update { it.copy(monitoringStatus = connectionStatus) }
+        postNotification(this, null, 1, connectionNotification(connectionStatus))
         var attempt = 0
         var resyncedDegradedEpoch: String? = null
         while (currentCoroutineContext().isActive) {
@@ -134,20 +154,16 @@ class NotificationService : Service() {
                     page.items.forEach { notificationEventTrace("received", it.eventId, it.sequence) }
                     if (EncryptedStateStore(this).read().host?.deviceId != host.deviceId) break
                     if (page.resetRequired || System.currentTimeMillis() - namesAt > 60000) refreshNames()
-                    var applied: AppliedNotifications? = null
-                    val updated = store.update { current ->
-                        if (!current.enabled || current.deviceId != host.deviceId) throw MobileFailure("not_paired")
-                        current.applyPage(page, System.currentTimeMillis()).also { applied = it }.state
+                    // Stream liveness is independent of paced alert posting / optional metadata.
+                    if (connectionStatus != page.coverage) {
+                        connectionStatus = page.coverage
+                        postNotification(this, null, 1, connectionNotification(connectionStatus))
                     }
+                    val updated = deliverNotificationPage(page, System.currentTimeMillis(), store::read, store::update,
+                        post = { event, projected, silent -> show(host.deviceId, event, projected, silent) },
+                        reset = { before -> for (chat in before.attention.keys) NotificationPosting.cancel(this, tag(host.deviceId, chat, ATTENTION), 2) })
                     notificationTrace("page_persisted count=${page.items.size}")
                     page.items.forEach { notificationEventTrace("persisted", it.eventId, it.sequence) }
-                    val result = applied!!
-                    if (result.reset) {
-                        for (chat in local.attention.keys) NotificationPosting.cancel(this, tag(host.deviceId, chat, ATTENTION), 2)
-                        // Current pending attention is restored silently after reset.
-                        for (pending in page.pending) show(host.deviceId, NotificationEvent(1, pending.attentionId, 0, 0, Long.MAX_VALUE, pending.workspaceId, pending.sessionId, "attention-needed", -1, attentionId = pending.attentionId), updated, true)
-                    }
-                    for (event in result.display) show(host.deviceId, event, updated, false)
                     for (chat in updated.attention.keys) {
                         if (updated.settings.chats.find { it.sessionId == chat }?.enabled == false)
                             NotificationPosting.cancel(this, tag(host.deviceId, chat, ATTENTION), 2)
@@ -193,7 +209,7 @@ class NotificationService : Service() {
         }
         stopSelf()
     }
-    private suspend fun show(device: String, event: NotificationEvent, @Suppress("UNUSED_PARAMETER") local: NotificationLocal, silent: Boolean) {
+    private suspend fun show(device: String, event: NotificationEvent, local: NotificationLocal, silent: Boolean) {
         val kind = if (event.kind == "answer-finished") ANSWERS else ATTENTION
         val tag = tag(device, event.sessionId, kind)
         synchronized(enrichments) { enrichments.remove(tag)?.cancel() }
@@ -202,7 +218,7 @@ class NotificationService : Service() {
         val ticket = NotificationPosting.ticket(tag, 2)
         var retained = false
         try {
-            if (!postAlert(device, event, silent, kind, tag, ticket, null)) return
+            if (!postAlert(device, event, silent, kind, tag, ticket, null, local)) return
             if (event.kind == "attention-needed") {
                 val transport = api ?: return
                 val job = synchronized(enrichments) {
@@ -230,17 +246,18 @@ class NotificationService : Service() {
                 if (job != null) { retained = true; job.start() }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (failure: Exception) { NotificationPosting.logFailure(failure) }
+        catch (failure: Exception) { NotificationPosting.logFailure(failure); throw failure }
         finally { if (!retained) NotificationPosting.release(ticket) }
     }
     private suspend fun postAlert(device: String, event: NotificationEvent, silent: Boolean, kind: String, tag: String,
-        ticket: NotificationPosting.Ticket, question: dev.dshmobile.app.model.PendingQuestion?): Boolean {
+        ticket: NotificationPosting.Ticket, question: dev.dshmobile.app.model.PendingQuestion?, projected: NotificationLocal? = null): Boolean {
         // Disk and network are outside the non-suspending posting lane.
         val store = NotificationStore(this)
         while (true) {
             currentCoroutineContext().ensureActive()
             val revision = store.changes.value
-            val latest = store.read()
+            val durable = store.read()
+            val latest = projected?.let { durable.copy(attention = it.attention) } ?: durable
             val host = EncryptedStateStore(this).read().host
             if (host?.deviceId != device || !latest.enabled || latest.deviceId != device ||
                 (event.kind == "attention-needed" && latest.attention[event.sessionId] != event.attentionId)) return false
@@ -269,7 +286,7 @@ class NotificationService : Service() {
             .setData(android.net.Uri.Builder().scheme("dshmobile").authority("chat").appendPath(device).appendPath(event.sessionId).build())
             .putExtra("notificationDevice", device).putExtra("notificationChat", event.sessionId).putExtra("notificationQuestion", question?.callId)
             .addFlags(NOTIFICATION_ACTIVITY_FLAGS)
-        val tap = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val tap = notificationChatIntent(this, device, event.sessionId, question?.callId)
         val dismissed = PendingIntent.getBroadcast(this, 0, Intent(this, NotificationDismissedReceiver::class.java)
             .setData(open.data?.buildUpon()?.appendPath(kind)?.build()).putExtra("removedTag", tag), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val knownChatName = sessions.find { it.id == event.sessionId }?.title?.trim()?.takeIf { it.isNotEmpty() }
@@ -293,6 +310,8 @@ class NotificationService : Service() {
         return posted
     }
     override fun onDestroy() {
+        NotificationStreamStatus.status.value = null
+        connectivity.unregisterNetworkCallback(networkCallback)
         running?.cancel(); api?.close(); scope.cancel(); super.onDestroy()
     }
     companion object {

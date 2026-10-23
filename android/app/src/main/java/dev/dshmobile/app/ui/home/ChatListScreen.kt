@@ -188,11 +188,11 @@ private fun HomeTitle(state: MobileState, onConnection: () -> Unit) {
         }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Text(stringResource(R.string.mobile_brand), style = MaterialTheme.typography.titleMedium)
         // Off-line the issue strip below writes the label; the header keeps only the dot (label stays for TalkBack).
-        val online = state.connection == ConnectionState.ONLINE
+        val online = dev.dshmobile.app.ui.components.displayedConnection(state.connection) == ConnectionState.ONLINE
         Row(Modifier.heightIn(min = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusDot(connectionColor(state.connection), if (online) Modifier else Modifier.semantics { contentDescription = label },
                 pulse = state.connection in listOf(ConnectionState.CONNECTING, ConnectionState.SYNCING))
-            if (online) Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (online || state.connection == ConnectionState.ONLINE) Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }

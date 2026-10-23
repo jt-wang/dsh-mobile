@@ -35,7 +35,10 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
         catch (failure: Exception) { relayProxy?.retire(); io.close { relayProxy?.closePhysical() }; throw failure }
     private val eventClient = client.newBuilder().callTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
         .addInterceptor(BoundedEventSource()).build()
+    // Notification-only hook: host comments every 15s (configured maximum 20s).
+    // Keep mutation and session-stream transport budgets unchanged.
     private val notificationClient = client.newBuilder().callTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+        .readTimeout(NOTIFICATION_IDLE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
         .addInterceptor(BoundedEventSource(128 * 1024L)).build()
     private val base = endpoint.baseUrl.toHttpUrl()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
