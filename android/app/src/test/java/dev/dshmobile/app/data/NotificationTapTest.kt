@@ -9,9 +9,13 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.ConscryptMode
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
+// These Intent tests need no Android TLS provider. SDK 35 otherwise inserts Conscrypt
+// process-wide after OkHttp has selected JDK ALPN, breaking subsequent real-socket tests.
+@ConscryptMode(ConscryptMode.Mode.OFF)
 class NotificationTapTest {
     private val context = ApplicationProvider.getApplicationContext<android.app.Application>()
 
