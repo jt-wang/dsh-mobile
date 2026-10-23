@@ -59,7 +59,7 @@ internal fun updateAlertSummary(context: Context, added: Pair<String, Notificati
         .setSmallIcon(R.drawable.ic_launcher_foreground).setGroup(ALERT_GROUP).setGroupSummary(true)
         .addExtras(Bundle().apply { putInt(SUMMARY_CHATS, model.chats); putInt(SUMMARY_ANSWERS, model.answers); putInt(SUMMARY_ATTENTION, model.attention) })
         .setContentTitle(summaryTitle(localized, model)).setContentText(summaryBody(localized, model))
-        .setNumber(model.chats).setContentIntent(if (model.chats == 1) live.values.first().contentIntent ?: notificationChatListIntent(context) else notificationChatListIntent(context))
+        .setNumber(model.chats).setContentIntent(notificationChatListIntent(context))
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setOnlyAlertOnce(true).setSilent(true).setAutoCancel(true).build()
     // Child + summary back-to-back doubled the package enqueue rate and Android could
     // silently shed the final count. Coalesce desired-state updates in the posting lane.
