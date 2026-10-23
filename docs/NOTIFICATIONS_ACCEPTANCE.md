@@ -39,7 +39,7 @@ The optional Cordis module is the inspected installed 4.0.4 module, read-only. I
 
 ## Permission audit
 
-Both APK variants contain existing INTERNET/CAMERA and AndroidX own-signature dynamic receiver permission. The only new platform permissions are POST_NOTIFICATIONS, FOREGROUND_SERVICE and FOREGROUND_SERVICE_SPECIAL_USE. No RECEIVE_BOOT_COMPLETED, wake lock or battery-exemption request permission. Manifest declares a non-exported specialUse service and rationale; target/min SDK remain unchanged.
+Both APK variants contain existing INTERNET/CAMERA and AndroidX own-signature dynamic receiver permission. The notification platform permissions are POST_NOTIFICATIONS, FOREGROUND_SERVICE and FOREGROUND_SERVICE_SPECIAL_USE. In 0.8.2, ACCESS_NETWORK_STATE is additionally approved for the default-network reconnect callback (normal install-time permission, no user prompt), bringing the complete permission surface to seven: INTERNET, CAMERA, POST_NOTIFICATIONS, FOREGROUND_SERVICE, FOREGROUND_SERVICE_SPECIAL_USE, ACCESS_NETWORK_STATE and dev.dshmobile.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION. No RECEIVE_BOOT_COMPLETED, wake lock or battery-exemption request permission. Manifest declares a non-exported specialUse service and rationale; target/min SDK remain unchanged.
 
 ## Self-review corrections
 

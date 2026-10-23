@@ -218,7 +218,8 @@ try {
     # CAMERA is optional and requested only for the local QR scan, never for pairing/import.
     # Notification and special-use FGS permissions serve only the opt-in background notifications.
     $allowedPermissions = @('android.permission.INTERNET', 'android.permission.CAMERA', 'android.permission.POST_NOTIFICATIONS',
-        'android.permission.FOREGROUND_SERVICE', 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE', "$package.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION")
+        'android.permission.FOREGROUND_SERVICE', 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
+        'android.permission.ACCESS_NETWORK_STATE', "$package.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION")
     if ($permissions.Count -ne $allowedPermissions.Count -or @($permissions | Where-Object { $_ -cnotin $allowedPermissions }).Count -ne 0) {
         throw 'Unexpected release permission surface; review before signing.'
     }
