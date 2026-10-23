@@ -22,9 +22,9 @@ The optional Cordis module is the inspected installed 4.0.4 module, read-only. I
 
 ## Final results
 
-- Host without optional Cordis: 121 tests, 117 pass, 4 intentional skips, 0 failures; build/check exit 0.
-- Host with installed Cordis: 121/121 pass, no skips/failures; build/check exit 0.
-- Android six wrapper tasks (previous remediation run; unchanged in host-only follow-up): BUILD SUCCESSFUL, exit 0; JVM XML totals 184 tests, zero failures/errors.
+- Host without optional Cordis (this Phase 1 acceptance run, not the test totals of later releases): 121 tests, 117 pass, 4 intentional skips, 0 failures; build/check exit 0.
+- Host with installed Cordis (same Phase 1 run): 121/121 pass, no skips/failures; build/check exit 0.
+- Android six wrapper tasks (previous remediation run of Phase 1, not the test totals of later releases; unchanged in host-only follow-up): BUILD SUCCESSFUL, exit 0; JVM XML totals 184 tests, zero failures/errors.
 - `lintDebug` and `lintRelease`: no errors; warnings remain (19 debug/21 release). These do not certify OS background delivery.
 - Both APK permission audits and `git diff --check`: pass.
 
@@ -67,7 +67,7 @@ The lazy idle probe budget is eight sessions per minute, with ten seconds per pa
 
 ## Idle recovery re-review follow-up
 
-Commits: `5b8794f` (fair retry/reactivation), `2892990` (authoritative idle evidence). Final host gates: 121 tests, 117 pass/4 intentional skips without Cordis; 121/121 pass with installed Cordis; both build/check exit 0. Focused self-review covered the full diff from `8ec5130`, including uncommitted tests; git diff --check passed. No delegation or push.
+Commits: `5b8794f` (fair retry/reactivation), `2892990` (authoritative idle evidence). Final host gates of this follow-up (not the test totals of later releases): 121 tests, 117 pass/4 intentional skips without Cordis; 121/121 pass with installed Cordis; both build/check exit 0. Focused self-review covered the full diff from `8ec5130`, including uncommitted tests; git diff --check passed. No delegation or push.
 
 Host-only changes after `8ec5130`; no Android/runtime/dependency changes. Tests were added before each finding's implementation: the retry/exclusion/invalid/unprobed/fairness/reactivation cases reproduced failures, and the corrected adapter→feed tests were additionally checked against the original running-gated predicate (both failed). A held-baseline disable/re-enable test exposed a stale-generation reset and now passes with post-await abort checks. A real AbortSignal timeout test proves unprobed IDs survive the ten-second pass budget.
 

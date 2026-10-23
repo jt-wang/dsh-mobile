@@ -58,10 +58,10 @@ Owner steps after reviewing the draft (commands are instructions, not a performe
 3. Use the helper's newly printed output directory, not an arbitrary older artifact. Verify its receipt and APK hash, keep its matching R8 mapping privately, and perform the approved native/physical-device acceptance before publishing. Create a checksum and upload **only** the signed APK and checksum to the existing draft:
 
    ```powershell
-   $tag = 'v0.4.0'
+   $tag = 'v0.8.1'
    $releaseDir = '<new output directory printed by android-release.ps1>'
    $receipt = Get-Content -LiteralPath (Join-Path $releaseDir 'release-receipt.json') -Raw | ConvertFrom-Json
-   if ($tag -cne ('v' + $receipt.versionName) -or $receipt.versionCode -ne 4) { throw 'Wrong release version' }
+   if ($tag -cne ('v' + $receipt.versionName) -or $receipt.versionCode -ne 14) { throw 'Wrong release version' }
    $apk = Join-Path $releaseDir $receipt.apkName
    $hash = (Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash.ToLowerInvariant()
    if ($hash -cne $receipt.apkSha256.ToLowerInvariant()) { throw 'APK hash mismatch' }
@@ -75,7 +75,7 @@ Owner steps after reviewing the draft (commands are instructions, not a performe
 
    GitHub CLI uses the owner's local authenticated account; this upload is deliberately manual. Do not use `--clobber` to replace a signed asset without investigating why it differs. Review the draft notes, host ZIP, unsigned verification label and signed-APK checksum, then publish explicitly in GitHub when acceptance is complete. Do not upload signing state or the private receipt/mapping by a directory wildcard. See official [GitHub CLI upload](https://cli.github.com/manual/gh_release_upload) and [draft creation](https://cli.github.com/manual/gh_release_create) guidance.
 
-The app's local QR scanner uses [CameraX 1.6.2](https://developer.android.com/jetpack/androidx/releases/camera#1.6.2) and [ZXing core 3.5.4](https://github.com/zxing/zxing/releases/tag/zxing-3.5.4) (Apache-2.0); it has no network/Google services/metrics dependency. `CAMERA` is declared optional and requested only for a scan after a rationale. The release signing guard permits exactly `INTERNET`, `CAMERA` and the existing app-signature receiver permission, never `ACCESS_NETWORK_STATE` or background camera services. CameraX's `camera-view` transitively brings `camera-video` → Media3, whose manifest requests network state for a network observer; that permission is explicitly removed because the app uses only `Preview`/`ImageAnalysis`, not video or a network observer. The release R8 usage report must keep showing the unused observer removed. Import/paste and subsequent HTTPS pairing do not need camera access. AGP defaults plus dependency consumer rules are used; no broad R8 keep rules are added. Real minified camera/permission/torch behavior is a native acceptance gate, not proven by a JVM test or successful shrinking.
+The app's local QR scanner uses [CameraX 1.6.2](https://developer.android.com/jetpack/androidx/releases/camera#1.6.2) and [ZXing core 3.5.4](https://github.com/zxing/zxing/releases/tag/zxing-3.5.4) (Apache-2.0); it has no network/Google services/metrics dependency. `CAMERA` is declared optional and requested only for a scan after a rationale. The release signing guard permits exactly six permissions: `INTERNET`, `CAMERA`, `POST_NOTIFICATIONS`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` and the app's own signature receiver permission `dev.dshmobile.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`, never `ACCESS_NETWORK_STATE` or background camera services. CameraX's `camera-view` transitively brings `camera-video` → Media3, whose manifest requests network state for a network observer; that permission is explicitly removed because the app uses only `Preview`/`ImageAnalysis`, not video or a network observer. The release R8 usage report must keep showing the unused observer removed. Import/paste and subsequent HTTPS pairing do not need camera access. AGP defaults plus dependency consumer rules are used; no broad R8 keep rules are added. Real minified camera/permission/torch behavior is a native acceptance gate, not proven by a JVM test or successful shrinking.
 
 ### Local regression checks and scanner rotation
 

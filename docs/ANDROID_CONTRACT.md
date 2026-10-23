@@ -63,7 +63,7 @@ Factory `fun createMobileRepository(context: Context, scope: CoroutineScope): Mo
 
 ## Optional remote transport v0.2
 
-Direct invitation v1 remains supported. Remote invitation v2 follows [RELAY_PROTOCOL.md](<RELAY_PROTOCOL.md>): trusted one-use import/host confirmation, then automatic foreground connection without a separate VPN/Tailscale app or manual host credentials. PC/DSH/connector and a reachable public relay must be running. Planned product version `0.2.0` / versionCode `2` is not yet a delivered release; local JVM evidence is not native/public/physical-phone acceptance.
+Direct invitation v1 remains supported. Remote invitation v2 follows [RELAY_PROTOCOL.md](<RELAY_PROTOCOL.md>): trusted one-use import/host confirmation, then automatic foreground connection without a separate VPN/Tailscale app or manual host credentials. PC/DSH/connector and a reachable public relay must be running. This contract was planned for product version `0.2.0` / versionCode `2`; the current release is `0.8.1` / versionCode `14`. Local JVM evidence is not native/public/physical-phone acceptance.
 
 - Inner HTTPS uses the exact `h-<32hex>.dsh.invalid:443` authority through an ephemeral IPv4 loopback CONNECT proxy with a private random credential and no arbitrary destination/ordinary HTTP forwarding. Preserve certificate trust/date/hostname validation plus SPKI pin; no DNS or global proxy changes.
 - Outer WSS has separate public trust and route access capabilities, no redirects, and bounded framing/queues/headers. Use the relay contract's guarded framing implementation; ordinary OkHttp WebSocket callbacks alone do not bound fragmented-message allocation.
