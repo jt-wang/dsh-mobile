@@ -138,7 +138,8 @@ class RelayTlsTest {
             val repo = NetworkMobileRepository(store, scope, true)
             try {
                 kotlinx.coroutines.runBlocking { repo.setForeground(true); repo.pair(invitation, "Synthetic phone") }
-                assertEquals(dev.dshmobile.app.model.ConnectionState.ONLINE, repo.state.value.connection)
+                assertEquals("Pair outcome error=${repo.state.value.error}, paired=${repo.state.value.paired}, requests=${host.requestCount}, streams=${bridge.headers.size}",
+                    dev.dshmobile.app.model.ConnectionState.ONLINE, repo.state.value.connection)
                 assertEquals(deviceToken, store.value.host!!.endpoint.relay!!.accessToken)
                 assertEquals("synthetic-device-bearer", store.value.host!!.deviceToken)
                 assertEquals("Bearer $bootstrapToken", bridge.headers.first().getFieldValue("Authorization"))

@@ -189,6 +189,43 @@ class RelayIdleReadTest {
         }
     }
 
+    @Test fun `POST after backend idle EOF uses a fresh connection exactly once`(): Unit = runBlocking {
+        withFixture { host, bridge, endpoint ->
+            val api = HostApi(endpoint, "synthetic-only-device-bearer")
+            try {
+                host.enqueue(json(capabilities).setSocketPolicy(SocketPolicy.DISCONNECT_AT_END))
+                val id = "f072cf3d-40e0-43e6-93c4-b27bdb3b8877"
+                host.enqueue(json("""{"requestId":"$id","status":"accepted","updatedAt":1}"""))
+                runBlocking { api.capabilities() }
+                assertTrue(bridge.backendEof.await(3, TimeUnit.SECONDS))
+                assertTrue(bridge.peerClosed.await(3, TimeUnit.SECONDS))
+                assertEquals("accepted", runBlocking { api.command(StoredCommand(id, "send", "synthetic-session", "Synthetic task")) }.status)
+                assertEquals(2, host.requestCount)
+                val requests = (1..2).map { host.takeRequest(2, TimeUnit.SECONDS)!! }
+                assertEquals(listOf("GET", "POST"), requests.map { it.method })
+                assertEquals(listOf(0, 0), requests.map { it.sequenceNumber })
+                assertEquals(2, bridge.opened.get())
+                assertEquals("Fresh before POST, never recovery after POST", 0, observedRetries!!.get())
+            } finally { runBlocking { api.closeAndAwait() } }
+        }
+    }
+
+    @Test fun `HTTP followup retry cannot replay a mutation body`(): Unit = runBlocking {
+        withFixture { host, _, endpoint ->
+            val api = HostApi(endpoint, "synthetic-only-device-bearer")
+            try {
+                val id = "f072cf3d-40e0-43e6-93c4-b27bdb3b8877"
+                host.enqueue(json("""{"error":{"code":"unavailable","message":"Synthetic","retryable":true}}""")
+                    .setResponseCode(503).setHeader("Retry-After", "0"))
+                host.enqueue(json("""{"requestId":"$id","status":"accepted","updatedAt":1}"""))
+                try { runBlocking { api.command(StoredCommand(id, "send", "synthetic-session", "Synthetic task")) }; fail("503 is not permission to rePOST") }
+                catch (_: MobileFailure) { }
+                assertEquals(1, host.requestCount)
+                assertEquals("POST", host.takeRequest(2, TimeUnit.SECONDS)!!.method)
+            } finally { runBlocking { api.closeAndAwait() } }
+        }
+    }
+
     private var observedRetries: AtomicInteger? = null
     private fun withFixture(block: (MockWebServer, EofBridge, HostEndpoint) -> Unit) {
         val retries = AtomicInteger()

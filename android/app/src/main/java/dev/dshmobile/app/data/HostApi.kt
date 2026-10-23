@@ -70,10 +70,26 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                 return@suspendCancellableCoroutine
             }
             if (retryOf != null) traceReadRetry()
-            val call = client.newCall(request)
-            continuation.invokeOnCancellation { cancelOnIo { call.cancel() } }
+            // A private pool per mutation cannot inherit an idle dead H1 tunnel, nor race a
+            // concurrent GET returning to the shared pool. Retire it only AFTER draining the
+            // response (zero-idle eviction can close an HTTP2 exchange before body consumption).
+            // GET/SSE reuse stays untouched. No recovery/replay is permitted for mutations.
+            val mutationPool = if (request.method == "GET") null else okhttp3.ConnectionPool()
+            val callClient = mutationPool?.let { client.newBuilder().connectionPool(it).build() } ?: client
+            val singleRequest = if (request.method == "GET" || request.body == null) request else {
+                val body = request.body!!
+                request.newBuilder().method(request.method, object : okhttp3.RequestBody() {
+                    override fun contentType() = body.contentType()
+                    override fun contentLength() = body.contentLength()
+                    override fun isOneShot() = true // Also prohibit HTTP follow-up replay (408/503).
+                    override fun writeTo(sink: okio.BufferedSink) = body.writeTo(sink)
+                }).build()
+            }
+            val call = callClient.newCall(singleRequest)
+            continuation.invokeOnCancellation { cancelOnIo { call.cancel(); mutationPool?.evictAll() } }
             call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                mutationPool?.evictAll()
                 val headerEof = e.javaClass == IOException::class.java && e.cause is java.io.EOFException
                 val socketClosed = e.javaClass == java.net.SocketException::class.java
                 if (request.method == "GET") traceReadFailure(headerEof, socketClosed, continuation.isActive, call.isCanceled(), retired.get())
@@ -103,7 +119,7 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                 } catch (failure: Exception) {
                     if (continuation.isActive) continuation.resumeWithException(
                         if (failure is MobileFailure) failure else MobileFailure(if (failure is IOException) "network_unavailable" else "invalid_response"))
-                }
+                } finally { mutationPool?.evictAll() }
             }
             })
         }
