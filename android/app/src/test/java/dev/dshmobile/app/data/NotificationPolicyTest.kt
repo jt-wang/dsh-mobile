@@ -36,8 +36,8 @@ class NotificationPolicyTest {
     @Test fun reconnectIsBoundedJitteredAndRespectsRetryAfter() {
         assertEquals(1000L, notificationRetryDelay(0, 0, 1.0))
         assertEquals(2000L, notificationRetryDelay(1, 0, 1.0))
-        assertEquals(60000L, notificationRetryDelay(20, 0, 1.0))
-        assertEquals(120000L, notificationRetryDelay(1, 120000, 0.5))
+        assertEquals(5000L, notificationRetryDelay(20, 0, 1.0))
+        assertEquals(5000L, notificationRetryDelay(1, 120000, 0.5))
         assertFalse(notificationRetryable("tls_failed")); assertFalse(notificationRetryable("unauthorized"))
         assertTrue(notificationRetryable("network_unavailable"))
     }

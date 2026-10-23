@@ -64,7 +64,7 @@ internal fun reconcileNotificationSettings(local: NotificationSettings, remote: 
     if (dirty) local.copy(revision = remote.revision) else remote
 internal fun notificationRetryable(key: String) = key !in setOf("tls_failed", "unauthorized", "revoked", "forbidden", "invalid_response", "incompatible_protocol", "unsupported", "not_paired", "storage_failed", "certificate_invalid")
 internal fun notificationRetryDelay(attempt: Int, retryAfterMs: Long, jitter: Double): Long =
-    maxOf(retryAfterMs, (minOf(60000L, 1000L shl attempt.coerceIn(0, 6)) * jitter.coerceIn(0.5, 1.0)).toLong())
+    minOf(5000L, maxOf(retryAfterMs, (minOf(5000L, 1000L shl attempt.coerceIn(0, 6)) * jitter.coerceIn(0.5, 1.0)).toLong()))
 internal fun notificationNames(event: NotificationEvent, workspaces: List<Workspace>, sessions: List<SessionSummary>): String? {
     val chat = sessions.find { it.id == event.sessionId && it.workspaceId == event.workspaceId } ?: return null
     val title = chat.title.trim().takeIf { it.isNotEmpty() } ?: return null
