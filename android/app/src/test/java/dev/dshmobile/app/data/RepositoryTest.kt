@@ -1308,6 +1308,76 @@ class RepositoryTest {
             assertTrue(body.contains("\"text\":\"\""))
         }
     }
+    @Test fun `normal pending send auto polls accepted without ever becoming uncertain`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            val statuses = CopyOnWriteArrayList<String>()
+            val collector = scope.launch(Dispatchers.Unconfined) { repo.state.collect { it.pending?.let { p -> statuses += p.status } } }
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"pending","updatedAt":20}""", 202) }
+            val polls = java.util.concurrent.atomic.AtomicInteger()
+            fixture.receipt = { id -> json("""{"requestId":"$id","status":"${if (polls.incrementAndGet() == 1) "pending" else "accepted"}","updatedAt":21}""") }
+            try {
+                repo.sendMessage("Synthetic auto-polled task")
+                withTimeout(5000) { repo.state.first { it.pending == null && it.acceptedPrompts.isNotEmpty() } }
+                assertEquals(2, polls.get())
+                assertEquals(1, fixture.mutations.size)
+                assertFalse(statuses.contains("uncertain"))
+                assertTrue(statuses.contains("pending"))
+            } finally { collector.cancel() }
+        }
+    }
+    @Test fun `post send transport failure is uncertain and never replayed even with pending receipt`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.message = { MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) }
+            fixture.receipt = { id -> json("""{"requestId":"$id","status":"pending","updatedAt":21}""") }
+            repo.sendMessage("Synthetic lost response")
+            assertEquals("uncertain", repo.state.value.pending?.status)
+            repo.resolvePending()
+            assertEquals("uncertain", repo.state.value.pending?.status)
+            assertEquals(1, fixture.mutations.size)
+        }
+    }
+    @Test fun `pending create publishes exact accepted identity through automatic receipt lookup`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.create = { json("""{"requestId":"${requestId(it)}","status":"pending","updatedAt":20}""", 202) }
+            fixture.receipt = { id -> json("""{"requestId":"$id","status":"accepted","updatedAt":21,"result":{"sessionId":"other"}}""") }
+            repo.createSession("workspace")
+            val accepted = withTimeout(5000) { repo.acceptedCreate.first { it != null } }!!
+            withTimeout(5000) { repo.state.first { it.pending == null && it.snapshot?.session?.id == "other" } }
+            assertEquals(requestId(fixture.mutations.single()), accepted.requestId)
+            assertEquals("other", accepted.sessionId)
+        }
+    }
+
+    @Test fun `bounded polling exhausts to uncertain and manual check never replays`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"pending","updatedAt":20}""", 202) }
+            val polls = java.util.concurrent.atomic.AtomicInteger()
+            fixture.receipt = { id -> polls.incrementAndGet(); json("""{"requestId":"$id","status":"pending","updatedAt":21}""") }
+            repo.sendMessage("Synthetic unresolved receipt")
+            withTimeout(15_000) { repo.state.first { it.pending?.status == "uncertain" } }
+            assertEquals(6, polls.get())
+            assertEquals("command_uncertain", repo.state.value.error)
+            repo.resolvePending()
+            assertEquals("uncertain", repo.state.value.pending?.status)
+            assertEquals(1, fixture.mutations.size)
+        }
+    }
+    @Test fun `abandoned pending create cannot publish a late auto polled acceptance`() = runBlocking {
+        withRepository { repo, _, fixture, _ ->
+            fixture.create = { json("""{"requestId":"${requestId(it)}","status":"pending","updatedAt":20}""", 202) }
+            fixture.receipt = { id -> json("""{"requestId":"$id","status":"accepted","updatedAt":21,"result":{"sessionId":"other"}}""") }
+            repo.createSession("workspace")
+            repo.abandonPending()
+            // A different command settling proves the abandoned request is not resurrected.
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":22}""") }
+            repo.sendMessage("Synthetic different intent")
+            repo.refresh()
+            assertNull(repo.acceptedCreate.value)
+            assertEquals("chat", repo.state.value.snapshot?.session?.id)
+            assertEquals(2, fixture.mutations.size)
+        }
+    }
+
     private suspend fun withRepository(now: () -> Long = System::currentTimeMillis, block: suspend (NetworkMobileRepository, MemoryStore, Fixture, CoroutineScope) -> Unit) {
         val scope = CoroutineScope(kotlin.coroutines.coroutineContext + SupervisorJob())
         val store = MemoryStore()

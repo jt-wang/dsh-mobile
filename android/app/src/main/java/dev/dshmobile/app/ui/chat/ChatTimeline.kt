@@ -209,7 +209,7 @@ internal fun ChatTimeline(snapshot: SessionSnapshot, pending: PendingCommand?, o
             }
             unconfirmed?.let { command -> item(key = LazyItemKeys.pending(command.requestId)) {
                 Column(Modifier.animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(stringResource(R.string.mobile_unconfirmed_message), style = MaterialTheme.typography.labelMedium)
+                    Text(stringResource(if (command.status in setOf("sending", "pending")) R.string.mobile_delivery_pending else R.string.mobile_unconfirmed_message), style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { dev.dshmobile.app.ui.components.PromptContent(command) }
                 }
             } }

@@ -16,8 +16,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-class MobileViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = createMobileRepository(application, viewModelScope)
+class MobileViewModel @JvmOverloads constructor(application: Application,
+    repositoryFactory: (kotlinx.coroutines.CoroutineScope) -> dev.dshmobile.app.data.MobileRepository = { createMobileRepository(application, it) },
+) : AndroidViewModel(application) {
+    private val repository = repositoryFactory(viewModelScope)
     val state = repository.state
     internal val phone = dev.dshmobile.app.ui.chat.PhoneEditor(application, repository, viewModelScope)
     var modelCatalog by mutableStateOf<dev.dshmobile.app.model.ModelCatalog?>(null); private set
@@ -84,6 +86,16 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     init {
         viewModelScope.launch { repository.restore() }
         viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(state, repository.acceptedCreate) { current, accepted -> current to accepted }.collect { (current, accepted) ->
+                if (current.error == "command_rejected" && current.pending == null) firstTaskContinuation = null
+                val continuation = firstTaskContinuation
+                if (continuation != null && accepted?.requestId == continuation.requestId && !current.busy && current.pending == null &&
+                    current.snapshot?.session?.id == accepted.sessionId && !current.snapshotStale) {
+                    editorActions.withLock { continueFirstTask(continuation, accepted.sessionId) }
+                }
+            }
+        }
+        viewModelScope.launch {
             state.collect {
                 if (it.paired) pairingInput.edit("")
                 phone.restore(it)
@@ -131,6 +143,7 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     fun refresh() { viewModelScope.launch { repository.refresh() } }
     fun selectSession(id: String) {
         if (interactionBlocked) return
+        firstTaskContinuation = null // Explicit navigation supersedes the pending first-task intent.
         interactionBlocked = true // Close the tap-to-repository-launch race immediately.
         viewModelScope.launch {
             try {
@@ -157,40 +170,44 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
     fun taskNotSentIn(sessionId: String, draft: String): Boolean = taskNotSent[sessionId]?.let { it.isNotBlank() && it == draft } == true
     /** Session (and exact text) whose first task send is still uncertain; never resent, only observed. */
     private var awaitingTaskIn: Pair<String, String>? = null
-    fun editNewTask(text: String) { newTaskText = text }
+    private data class FirstTaskContinuation(val requestId: String, val task: String)
+    // Memory-only intent, not an outbox. Process death never restarts a possibly delivered send.
+    private var firstTaskContinuation: FirstTaskContinuation? = null
+    fun editNewTask(text: String) { if (text != newTaskText) firstTaskContinuation = null; newTaskText = text }
 
-    /**
-     * Create, then (only if creation was accepted) place the task into the new chat's draft and send it once.
-     * Uncertain creation keeps the text in the sheet; a failed or uncertain send leaves it in the new chat's
-     * draft. Nothing is ever re-sent automatically.
-     */
+    /** Only the checked receipt identity can authorize this continuation, never a changed snapshot. */
     fun createSession(workspaceId: String, presetId: String?, task: String = "") {
-        if (interactionBlocked || state.value.busy) return
+        if (interactionBlocked || state.value.busy || state.value.pending != null) return
+        val requestId = java.util.UUID.randomUUID().toString()
+        firstTaskContinuation = task.takeIf { it.isNotBlank() }?.let { FirstTaskContinuation(requestId, it) }
         interactionBlocked = true
         viewModelScope.launch {
             try {
                 editorActions.withLock {
-                    val before = state.value.snapshot?.session?.id
-                    repository.createSession(workspaceId, presetId)
-                    val created = state.value.snapshot?.session?.id
-                    if (created == null || created == before || state.value.pending != null) return@withLock
-                    if (task.isBlank()) return@withLock
-                    newTaskText = ""
-                    repository.updateDraft(task)
-                    editorSessionId = created
-                    editorDraft = task
-                    val ready = state.value.snapshot?.session?.id == created && dev.dshmobile.app.model.MobileReducer.canSend(state.value, task)
-                    val previous = state.value
-                    if (ready) repository.sendMessage(task)
-                    // An uncertain send is already shown by PendingDelivery; claim "not sent" only when that is known.
-                    when {
-                        dev.dshmobile.app.ui.chat.sendWasAccepted(previous, state.value, task) -> Unit
-                        state.value.pending != null -> awaitingTaskIn = created to task // Shown by PendingDelivery until its receipt settles.
-                        else -> taskNotSent = taskNotSent + (created to task)
-                    }
+                    repository.createSession(workspaceId, presetId, requestId)
+                    if (state.value.pending == null && repository.acceptedCreate.value?.requestId != requestId) firstTaskContinuation = null
                 }
             } finally { interactionBlocked = false }
         }
+    }
+    private suspend fun continueFirstTask(continuation: FirstTaskContinuation, created: String) {
+        if (firstTaskContinuation != continuation || state.value.snapshot?.session?.id != created || state.value.pending != null) return
+        // Consume BEFORE the first suspension/POST. Receipt repeats and an uncertain send cannot re-enter.
+        firstTaskContinuation = null
+        interactionBlocked = true
+        try {
+            repository.updateDraft(continuation.task)
+            newTaskText = ""
+            editorSessionId = created
+            editorDraft = continuation.task
+            val previous = state.value
+            if (dev.dshmobile.app.model.MobileReducer.canSend(previous, continuation.task)) repository.sendMessage(continuation.task)
+            when {
+                dev.dshmobile.app.ui.chat.sendWasAccepted(previous, state.value, continuation.task) -> Unit
+                state.value.pending != null -> awaitingTaskIn = created to continuation.task
+                else -> taskNotSent = taskNotSent + (created to continuation.task)
+            }
+        } finally { interactionBlocked = false }
     }
     fun updateDraft(text: String) {
         if ((!state.value.snapshotStale && (interactionBlocked || state.value.busy)) || state.value.pending != null) return
@@ -240,8 +257,9 @@ class MobileViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     fun resolvePending() { viewModelScope.launch { repository.resolvePending() } }
-    fun abandonPending() { viewModelScope.launch { repository.abandonPending() } }
+    fun abandonPending() { firstTaskContinuation = null; viewModelScope.launch { repository.abandonPending() } }
     fun forget() {
+        firstTaskContinuation = null
         pairingInput.edit("")
         viewModelScope.launch {
             val context = getApplication<Application>()

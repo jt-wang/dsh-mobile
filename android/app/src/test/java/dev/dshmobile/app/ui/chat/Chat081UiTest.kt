@@ -42,6 +42,21 @@ class Chat081UiTest {
         compose.onNodeWithTag("prompt_attachments_p").assertTextEquals(app.getString(R.string.mobile_prompt_attachments, 2))
     }
 
+    @Test fun `sending and young pending are neutral but genuine uncertainty warns`() {
+        var status by mutableStateOf("sending")
+        compose.setContent { MaterialTheme {
+            ChatTimeline(SessionSnapshot(session, emptyList(), 1, false, "idle"),
+                PendingCommand("p", "send", "s", "Synthetic task", status), {})
+        } }
+        compose.onNodeWithText(app.getString(R.string.mobile_delivery_pending)).assertExists()
+        compose.onNodeWithText(app.getString(R.string.mobile_unconfirmed_message)).assertDoesNotExist()
+        compose.runOnIdle { status = "pending" }
+        compose.onNodeWithText(app.getString(R.string.mobile_delivery_pending)).assertExists()
+        compose.onNodeWithText(app.getString(R.string.mobile_unconfirmed_message)).assertDoesNotExist()
+        compose.runOnIdle { status = "uncertain" }
+        compose.onNodeWithText(app.getString(R.string.mobile_unconfirmed_message)).assertExists()
+    }
+
     @Test fun `accepted attachment content includes count even without text`() {
         compose.setContent { MaterialTheme { PromptContent(PendingCommand("p", "send", "s", null, "accepted", 3)) } }
         compose.onNodeWithTag("prompt_attachments_p").assertTextEquals(app.getString(R.string.mobile_prompt_attachments, 3))

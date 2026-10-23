@@ -88,6 +88,8 @@ internal class NetworkMobileRepository(
     )
     private val mutableState = MutableStateFlow(MobileState(localPromptActions = promptActions, observingSession = observingSession))
     override val state: StateFlow<MobileState> = mutableState.asStateFlow()
+    private val mutableAcceptedCreate = MutableStateFlow<CreateAcceptance?>(null)
+    override val acceptedCreate: StateFlow<CreateAcceptance?> = mutableAcceptedCreate.asStateFlow()
     private var stored = StoredState()
     private var restored = false
     @Volatile private var api: HostApi? = null
@@ -560,14 +562,15 @@ internal class NetworkMobileRepository(
             persist(stored.copy(drafts = drafts))
         }
     }
-    override suspend fun createSession(workspaceId: String, presetId: String?) = action {
+    override suspend fun createSession(workspaceId: String, presetId: String?, requestId: String) = action {
         restoreLocked(); online()
         observingSession = true
         mutableState.value = state.value.copy(observingSession = true)
         if (state.value.capabilities?.sessions != true) throw MobileFailure("unsupported")
         if (state.value.workspaces.none { it.id == workspaceId && it.canExecute } ||
             (presetId != null && state.value.presets.none { it.id == presetId })) throw MobileFailure("invalid_selection")
-        dispatch(StoredCommand(UUID.randomUUID().toString(), "create", workspaceId = workspaceId, presetId = presetId))
+        if (!validRequestId(requestId)) throw MobileFailure("invalid_selection")
+        dispatch(StoredCommand(requestId, "create", workspaceId = workspaceId, presetId = presetId))
     }
     override suspend fun sendMessage(text: String) = sendMessage(text, null, emptyList())
     override suspend fun sendMessage(text: String, delivery: String?, uploadIds: List<String>) {
@@ -784,10 +787,12 @@ internal class NetworkMobileRepository(
                 if (command.kind == "create") {
                     val created = receipt.result?.sessionId ?: throw MobileFailure("invalid_response")
                     persist(stored.copy(pending = null, selectedSessionId = created))
+                    mutableAcceptedCreate.value = CreateAcceptance(command.requestId, created)
                     val index = api().sessions()
                     val snapshot = api().snapshot(created)
                     val sessions = if (index.items.any { it.id == created }) index.items else listOf(snapshot.session) + index.items.take(999)
-                    mutableState.value = state.value.copy(sessions = sessions, sessionsTruncated = index.truncated, snapshot = snapshot, pending = null, draft = draftFor(created), error = null)
+                    mutableState.value = MobileReducer.replaceSnapshot(state.value, snapshot, now()).copy(sessions = sessions,
+                        sessionsTruncated = index.truncated, pending = null, draft = draftFor(created), error = null)
                 } else if (command.kind == "send") {
                     // Receipt proves admission, even if the DSH inbox has no canonical record yet.
                     val admitted = command.copy(status = if (command.queuedWhileRunning) "queued" else "accepted", acceptedAt = now(), idleSnapshots = 0)
@@ -812,8 +817,11 @@ internal class NetworkMobileRepository(
                 mutableState.value = state.value.copy(pending = null, error = "command_rejected")
             }
             else -> {
-                persist(stored.copy(pending = command.copy(status = receipt.status)))
-                mutableState.value = state.value.copy(pending = stored.pending?.presentation(), error = if (receipt.status == "uncertain") "command_uncertain" else null)
+                // A pending lookup cannot undo an earlier unknown-delivery warning.
+                val status = if (command.status == "uncertain" && receipt.status == "pending") "uncertain" else receipt.status
+                persist(stored.copy(pending = command.copy(status = status)))
+                mutableState.value = state.value.copy(pending = stored.pending?.presentation(), error = if (status == "uncertain") "command_uncertain" else null)
+                stored.pending?.let(::scheduleReceiptPoll)
             }
         }
     }
@@ -898,6 +906,38 @@ internal class NetworkMobileRepository(
         if (!foreground) throw MobileFailure("offline_no_send")
         resolveLocked(reloadSnapshot = true)
     }
+    private var receiptPoll: Job? = null
+    private var receiptPollId: String? = null
+    private fun scheduleReceiptPoll(command: StoredCommand) {
+        if (command.kind !in setOf("send", "create") || command.status != "pending" || !foreground || closed) return
+        if (receiptPollId == command.requestId && receiptPoll?.isActive == true) return
+        receiptPoll?.cancel()
+        receiptPollId = command.requestId
+        receiptPoll = scope.launch {
+            // Delay budget 10.75 s, total budget 12 s including slow GETs. Only read-only recovery.
+            kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                for (wait in listOf(250L, 500L, 1_000L, 2_000L, 3_000L, 4_000L)) {
+                    delay(wait)
+                    var settled = false
+                    action {
+                        val current = stored.pending
+                        if (!foreground || current?.requestId != command.requestId || current.status != "pending") settled = true
+                        else {
+                            resolveLocked(reloadSnapshot = true)
+                            settled = stored.pending?.requestId != command.requestId || stored.pending?.status != "pending"
+                        }
+                    }
+                    if (settled) return@withTimeoutOrNull
+                }
+            }
+            action {
+                if (stored.pending?.requestId == command.requestId && stored.pending?.status == "pending") {
+                    persist(stored.copy(pending = stored.pending?.copy(status = "uncertain")))
+                    mutableState.value = state.value.copy(error = "command_uncertain")
+                }
+            }
+        }
+    }
     private suspend fun resolveLocked(reloadSnapshot: Boolean) {
         val command = stored.pending ?: return
         val receipt = api().receipt(command.requestId)
@@ -905,7 +945,7 @@ internal class NetworkMobileRepository(
             if (stored.pending != null) persist(stored.copy(pending = stored.pending?.copy(status = "uncertain")))
             mutableState.value = state.value.copy(pending = stored.pending?.presentation(), error = "command_uncertain")
         } else applyReceipt(receipt)
-        if (reloadSnapshot && stored.pending != null) reloadCommandSnapshot(command)
+        if (reloadSnapshot) reloadCommandSnapshot(command)
     }
     private fun startObserver() {
         stopObserver()
@@ -943,6 +983,7 @@ internal class NetworkMobileRepository(
             foregroundRevision++
             if (!active) {
                 foreground = false
+                receiptPoll?.cancel(); receiptPoll = null; receiptPollId = null
                 stopObserver(); cancelReconnect(); prefetch.cancel()
                 api?.close(); api = null
                 pairingTransport?.close()
@@ -975,6 +1016,7 @@ internal class NetworkMobileRepository(
         abandonedDrafts.forEach { (session, sources) -> discardStaging(session, sources) }
         api?.close(); api = null
         historyEpoch = historyStore.authority.epoch
+        receiptPoll?.cancel(); receiptPoll = null; receiptPollId = null; mutableAcceptedCreate.value = null
         stored = StoredState(); restored = true; liveDrafts.clear(); history.clear(); observingSession = false
         mutableState.value = MobileState(localPromptActions = promptActions, draftsRestored = true)
     }

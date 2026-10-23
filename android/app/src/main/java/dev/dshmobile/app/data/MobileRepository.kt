@@ -3,8 +3,12 @@ package dev.dshmobile.app.data
 import dev.dshmobile.app.model.MobileState
 import kotlinx.coroutines.flow.StateFlow
 
+data class CreateAcceptance(val requestId: String, val sessionId: String)
+
 interface MobileRepository {
     val state: StateFlow<MobileState>
+    /** Only a checked accepted receipt publishes this identity; snapshots are never create proof. */
+    val acceptedCreate: StateFlow<CreateAcceptance?>
     suspend fun restore()
     suspend fun pair(invitationJson: String, deviceName: String)
     /** Pair only the immutable invitation which the user reviewed, not mutable input text. */
@@ -13,7 +17,7 @@ interface MobileRepository {
     suspend fun selectSession(sessionId: String)
     /** Leave local observation/loading only; never cancel desktop work. */
     suspend fun leaveSession() {}
-    suspend fun createSession(workspaceId: String, presetId: String? = null)
+    suspend fun createSession(workspaceId: String, presetId: String? = null, requestId: String = java.util.UUID.randomUUID().toString())
     suspend fun updateDraft(text: String)
     suspend fun sendMessage(text: String)
     suspend fun sendMessage(text: String, delivery: String?, uploadIds: List<String>) { sendMessage(text) }

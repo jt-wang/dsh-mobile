@@ -115,7 +115,9 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
 private fun PendingCard(pending: dev.dshmobile.app.model.PendingCommand, state: MobileState, model: MobileViewModel, modifier: Modifier) {
     val accents = LocalMobileColors.current
     var abandon by remember(pending.requestId) { mutableStateOf(false) }
-    Surface(color = accents.warningContainer, shape = MaterialTheme.shapes.medium, modifier = modifier) {
+    val normal = pending.status in listOf("sending", "pending", "accepted")
+    Surface(color = if (normal) MaterialTheme.colorScheme.surfaceContainer else accents.warningContainer,
+        shape = MaterialTheme.shapes.medium, modifier = modifier) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(stringResource(when {
                 pending.kind == "cancel" && pending.status == "accepted" -> R.string.mobile_cancel_accepted
@@ -124,7 +126,8 @@ private fun PendingCard(pending: dev.dshmobile.app.model.PendingCommand, state: 
                 pending.status == "uncertain" -> R.string.mobile_delivery_uncertain
                 pending.status in listOf("pending", "sending") -> R.string.mobile_delivery_pending
                 else -> R.string.mobile_delivery_unknown
-            }), color = accents.warning, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            }), color = if (normal) MaterialTheme.colorScheme.onSurfaceVariant else accents.warning,
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             if (pending.kind == "send") PromptContent(pending)
             TextButton(onClick = model::resolvePending, enabled = !state.busy, modifier = Modifier.testTag("resolve_pending")) { Text(stringResource(R.string.mobile_check_delivery)) }
             if (pending.status in listOf("uncertain", "accepted")) TextButton(onClick = { abandon = true }, enabled = !state.busy, modifier = Modifier.testTag("abandon_pending")) {

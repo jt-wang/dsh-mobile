@@ -67,7 +67,7 @@
     <string name="mobile_resend_prompt">Отправить снова</string>
     <string name="mobile_resend_warning">Компьютер уже принял это сообщение и ещё может его обработать. Повторная отправка создаст новую команду и может продублировать сообщение. Всё равно отправить снова?</string>
     <string name="mobile_offline_draft">Черновик остаётся на телефоне. При восстановлении связи он не отправится автоматически.</string>
-    <string name="mobile_delivery_pending">Ожидаем подтверждение отправки от компьютера.</string>
+    <string name="mobile_delivery_pending">Отправляем…</string>
     <string name="mobile_delivery_accepted">Компьютер принял сообщение. Обновляем переписку.</string>
     <string name="mobile_delivery_rejected">Компьютер отклонил команду. Проверьте результат отправки перед продолжением.</string>
     <string name="mobile_delivery_uncertain">Отправка не подтверждена. Не отправляйте повторно: задача уже могла начаться.</string>
