@@ -383,6 +383,50 @@ test('proved attention coalesces and authoritative resolution clears the same ep
   assert.equal(page.items[0].attentionId, page.items[1].attentionId);
 });
 
+test('reconcile cannot prune a new-session watermark committed during its older catalog read', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t); await f.feed.idle();
+  const source = f.source as typeof f.source & { lookup?: (id: string) => Promise<{ id: string; workspaceId: string }> };
+  source.lookup = async id => ({ id, workspaceId: 'alpha' });
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+  source.list = async () => { entered.resolve(); await gate.promise; return [{ id: 'chat', workspaceId: 'alpha' }]; };
+  t.mock.timers.tick(60000); await entered.promise;
+  f.proof.cursor = 0; f.proof.completed = [{ turn: 1, sourceSeq: 0 }]; f.source.evidence = async () => ({ ...f.proof, sessionId: 'new-chat' });
+  // event() waits for reconcile as well; observe the commit before releasing it.
+  const committed = Promise.withResolvers<void>(); f.feed.onChange(() => committed.resolve());
+  const live = f.event(0, 'turn/end', { turn: 1, completed: true }, 'new-chat'); await committed.promise;
+  gate.resolve(); await live;
+  assert.equal(f.state.readNotificationState<any>('producer')['new-chat'].seq, 0);
+});
+
+test('point page does not consume a new-session commit that races its authority cut', async t => {
+  const f = await fixture(t); await f.feed.idle();
+  const source = f.source as typeof f.source & { lookup?: (id: string) => Promise<{ id: string; workspaceId: string }> };
+  let held = false; const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+  source.lookup = async id => { if (held && id === 'chat') { entered.resolve(); await gate.promise; } return { id, workspaceId: 'alpha' }; };
+  f.proof.completed = [{ turn: 1, sourceSeq: 0 }]; await f.event(0, 'turn/end', { turn: 1, completed: true });
+  held = true; const page = f.feed.page(f.device.deviceId, f.head); await entered.promise;
+  f.source.evidence = async () => ({ ...f.proof, sessionId: 'new-chat' });
+  await f.event(0, 'turn/end', { turn: 1, completed: true }, 'new-chat'); gate.resolve();
+  const first = await page;
+  assert.deepEqual(first.items.map(e => e.sessionId), ['chat']); assert.equal(first.hasMore, true);
+  const second = await f.feed.page(f.device.deviceId, first.nextCursor);
+  assert.deepEqual(second.items.map(e => e.sessionId), ['new-chat']);
+});
+
+test('disable cancels a held live proof and persists a safe degraded reason across feed instances', async t => {
+  const f = await fixture(t); await f.feed.idle();
+  f.proof.valid = false; await f.event(0, 'tool/call');
+  assert.equal(f.state.readNotificationState<any>('diagnostics').lastReason, 'proof_invalid');
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+  f.source.evidence = async () => { entered.resolve(); await gate.promise; return { ...f.proof, valid: true, completed: [{ turn: 1, sourceSeq: 1 }] }; };
+  const live = f.event(1, 'turn/end', { turn: 1, completed: true }); await entered.promise;
+  f.feed.putSettings(f.device.deviceId, { expectedRevision: 1, enabled: false, projects: [], chats: [] }); gate.resolve(); await live;
+  assert.equal(f.state.readNotificationState<any>('producer').chat, undefined);
+  assert.equal(f.state.readNotificationState<any>('device:' + f.device.deviceId).items.length, 0);
+  assert.equal(f.state.readNotificationState<any>('diagnostics').lastReason, 'proof_invalid');
+});
+
 test('missing cursor has no completion backlog; narrowed grants hide retained entries; foreign/tampered cursor rejected', async t => {
   const f = await fixture(t); f.proof.completed = [{ turn: 1, sourceSeq: 0 }];
   await f.event(0, 'turn/end', { turn: 1, completed: true });

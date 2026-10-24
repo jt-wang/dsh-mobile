@@ -173,7 +173,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
         // This signal is host-owned, not tied to HTTP lifetime. Admission is already durable.
         await checkScope(deviceId, command.workspaceId, true, command.operation !== 'create');
         if (command.operation !== 'create') {
-          const snapshot = await sessionSnapshot(command.sessionId, deviceId, controller.signal);
+          const snapshot = await sessionSnapshot(command.sessionId, deviceId, controller.signal, command.operation !== 'prompt');
           if (snapshot.session.workspaceId !== command.workspaceId) throw new HostError('forbidden');
           if (command.operation === 'cancel' && (!snapshot.session.running || snapshot.cursor !== command.expectedCursor)) throw new HostError('conflict');
         }
@@ -337,8 +337,8 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     throw error;
   }
   async function sessionSnapshot(sessionId: string, deviceId: string, signal: AbortSignal, catalogPreflight = true): Promise<HostSnapshot> {
-    // Mutations retain their independent admission preflight. Point observation
-    // is authorized by the adapter's freshly resolved opening header, not a
+    // Non-prompt mutations retain their independent catalog preflight. Prompts
+    // and point observation use the adapter's fresh opening header, not a
     // complete corpus scan (rc.2 reads every persisted header on list()).
     const session = catalogPreflight ? await permittedSession(sessionId, deviceId, signal) : undefined;
     let snapshot: HostSnapshot;
@@ -491,14 +491,27 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
           notifications!.tracePage('sse_sent', page.items);
           dirty ||= page.hasMore;
         }
-        if (Date.now() - heartbeat >= (options.heartbeatMs ?? 15000)) { heartbeat = Date.now(); if (!res.write(': heartbeat\n\n')) stop(); }
       } catch (error) { stop(); if (first) throw error; }
       finally { working = false; if (dirty && !closed) queueMicrotask(() => { void send(); }); }
     }
     // Subscribe before the first read: a commit racing an in-flight page gets one
     // coalesced follow-up, never concurrent sends or a missed notification.
     unsubscribe = notifications.onChange(() => { void send(); });
-    try { await send(true); if (!closed) { timer = setInterval(() => { void send(); }, 1000); timer.unref(); } }
+    try {
+      await send(true);
+      if (!closed) {
+        timer = setInterval(() => {
+          // Liveness and revocation never wait behind membership/proof I/O.
+          if (closed) return;
+          if (!state.getDevice(deviceId)) { stop(); return; }
+          if (Date.now() - heartbeat >= (options.heartbeatMs ?? 15000)) {
+            heartbeat = Date.now();
+            if (res.writableLength > 128 * 1024 || !res.write(': heartbeat\n\n')) { stop(); return; }
+          }
+          void send();
+        }, Math.min(1000, options.heartbeatMs ?? 15000)); timer.unref();
+      }
+    }
     catch (error) { stop(); throw error; }
   }
 
@@ -769,7 +782,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
         if (typeof body.workspaceId !== 'string' || (body.presetId !== undefined && (typeof body.presetId !== 'string' || !body.presetId || body.presetId.length > 256 || /[\x00-\x1f\x7f]/.test(body.presetId)))) throw new HostError('invalid_request');
         command = { operation: 'create', requestId, workspaceId: body.workspaceId, ...(body.presetId !== undefined ? { presetId: body.presetId as string } : {}) };
       } else if (segments.length === 3) {
-        const snapshot = await sessionSnapshot(segments[1]!, device.deviceId, signal);
+        const snapshot = await sessionSnapshot(segments[1]!, device.deviceId, signal, operation !== 'prompt');
         await checkScope(device.deviceId, snapshot.session.workspaceId, true, true);
         if (state.getCommand(device.deviceId, requestId)) { await replay(); return; }
         const base = { requestId, sessionId: segments[1]!, workspaceId: snapshot.session.workspaceId };

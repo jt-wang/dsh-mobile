@@ -127,6 +127,50 @@ test('notification stream wakes on commit without waiting for its fallback tick'
   } finally { await reader.cancel(); }
 });
 
+test('notification heartbeat and revoke remain responsive while a page lookup is held', { timeout: 5000 }, async t => {
+  const adapter = new TestAdapter(), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  let hold = false;
+  adapter.notifications = () => ({ subscribe() { return () => {}; }, list: async () => { if (hold) { entered.resolve(); await gate.promise; } return adapter.listSessions(); },
+    evidence: async () => ({ sessionId: 's-alpha', workspaceId: 'alpha', cursor: 0, pending: false, completed: [] }) });
+  const { host, request, pair } = await setup(t, adapter), { deviceId, deviceToken } = await pair();
+  const response = await request('/notification-events/stream', deviceToken), reader = response.body!.getReader();
+  try {
+    await reader.read(); hold = true;
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    // Let the existing fallback enter its held read, then make heartbeat due.
+    await entered.promise;
+    t.mock.timers.tick(15000);
+    let timeout: ReturnType<typeof setTimeout>;
+    const part = await Promise.race([reader.read(), new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(Error('heartbeat starved by lookup')), 1500); })]).finally(() => clearTimeout(timeout));
+    const frame = new TextDecoder().decode(part.value);
+    assert.match(frame, /: heartbeat/, 'an awaited page must not starve liveness');
+    host.state.revokeDevice(deviceId);
+  } finally { gate.resolve(); await reader.cancel(); }
+});
+
+test('prompt admission bypasses a five-second catalog and retains point authorization', { timeout: 20000 }, async t => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'prompt-latency-'))), frame = structuredClone(opening);
+  frame.header.cwd = dir; let lists = 0, prompts = 0;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'alpha', name: 'Alpha', path: dir }],
+    sessionHeader: async () => frame.header, sessionStatus: () => ({ running: false, updatedAt: 0 }),
+    sessionController: {
+      async list() { lists++; await new Promise(r => setTimeout(r, 5000)); return { items: [{ sessionId: 'session-fixture', cwd: dir, running: false, updatedAt: 0, agentAvailable: false }] }; },
+      async *follow() { yield frame; }, async page() { throw Error('unexpected page'); }, async projections() { return frame.projections; },
+      async prompt() { prompts++; return { accepted: true }; }, async create() { throw Error('unexpected create'); }, cancel() {},
+    },
+  });
+  t.after(() => { adapter.dispose(); rmSync(dir, { recursive: true, force: true }); });
+  const { request, pair } = await setup(t, adapter), { deviceToken } = await pair();
+  const begin = performance.now();
+  const response = await request('/sessions/session-fixture/messages', deviceToken, 'POST', { requestId: randomUUID(), text: 'Synthetic admission only' });
+  const ms = performance.now() - begin;
+  assert.equal(response.status, 200); assert.equal(prompts, 1); assert.equal(lists, 0); assert.ok(ms < 1000, 'prompt must reach upstream under 1 second');
+  t.diagnostic(JSON.stringify({ admissionMs: ms, lists, prompts, slowListMs: 5000 }));
+  frame.header.cwd = join(dir, 'missing');
+  assert.equal((await request('/sessions/session-fixture/messages', deviceToken, 'POST', { requestId: randomUUID(), text: 'Must not execute' })).status, 404);
+  assert.equal(prompts, 1);
+});
+
 test('SSE admission validates and publishes the first watch snapshot without a separate reconstruction', async t => {
   const adapter = new TestAdapter(); let snapshots = 0, watches = 0;
   const get = adapter.snapshot.bind(adapter);

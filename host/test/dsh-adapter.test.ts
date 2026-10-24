@@ -225,6 +225,23 @@ test('failure scope uses fresh point headers, hides missing/child/archive and in
   assert.equal(h.cleanup().resumed, 0); assert.equal(h.cleanup().closed, 0);
 });
 
+test('notification point authority rejects child/archive/remap and proves completion without corpus IO', async t => {
+  const h = await harness(t); let header: unknown = h.frame.header;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }],
+    sessionController: { ...h.controller, async list() { throw Error('notification scanned corpus'); } },
+    sessionHeader: async () => header, sessionStatus: () => ({ running: false, updatedAt: 0 }),
+    events: { subscribe() { return () => {}; }, subscribeNotifications() { return () => {}; } },
+  });
+  t.after(() => adapter.dispose()); const source = adapter.notifications()!, signal = new AbortController().signal;
+  const listed = await source.lookup!('session-fixture', signal);
+  assert.equal(listed?.workspaceId, 'alpha');
+  assert.deepEqual((await source.evidence('session-fixture', signal, listed)).completed, [{ turn: 1, sourceSeq: 7 }]);
+  header = { ...h.frame.header, origin: 'subagent' }; assert.equal(await source.lookup!('session-fixture', signal), undefined);
+  header = { ...h.frame.header, cwd: h.dir }; assert.equal(await source.lookup!('session-fixture', signal), undefined);
+  header = undefined; assert.equal(await source.lookup!('session-fixture', signal), undefined);
+  assert.equal(h.cleanup().resumed, 0, 'point notification read must not promote the cold session');
+});
+
 test('notification evidence is cold-safe and demands authoritative completed turn and pending episode', async t => {
   const h = await harness(t); const signal = new AbortController().signal;
   const source = h.adapter.notifications()!;

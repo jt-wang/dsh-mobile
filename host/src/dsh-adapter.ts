@@ -521,7 +521,18 @@ export class DshAdapter implements HostAdapter {
   notifications(): NotificationSources | undefined {
     const subscribe = this.options.events?.subscribeNotifications;
     if (!subscribe) return undefined;
-    return { subscribe, list: signal => this.listSessions(signal), evidence: async (id, signal, listed) => {
+    const bindings = new WeakMap<object, readonly WorkspaceConfig[]>();
+    return { subscribe, list: signal => this.listSessions(signal),
+      ...(this.options.sessionHeader ? { lookup: async (id: string, signal: AbortSignal) => {
+        // Header stat is membership authority, not a cached catalog or phone index.
+        try {
+          const { workspaceId, view } = await this.pointScope(id, this.signal(signal));
+          const listed = { id, workspaceId }; bindings.set(listed, view); return listed;
+        } catch (error) { if (error instanceof HostError && error.code === 'not_found') return undefined; throw error; }
+      }, lookupCurrent: (listed: { id: string; workspaceId: string }) => {
+        const view = bindings.get(listed);
+        return !!view && !this.lifetime.signal.aborted && (!this.source.isCurrent || this.source.isCurrent(view)) && !this.source.archivedSessionIds().has(listed.id);
+      } } : {}), evidence: async (id, signal, listed) => {
       const { transcript, view } = await this.open(id, this.signal(signal), undefined, listed ? { ...listed, running: listed.running ?? false, title: '', updatedAt: 0 } : undefined);
       const proof = transcript.notificationEvidence(); this.evidenceScopes.set(proof, { view, revision: this.evidenceRevision }); return proof;
     }, evidenceCurrent: proof => {
@@ -616,11 +627,14 @@ export class DshAdapter implements HostAdapter {
     return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
   }
   async sessionScope(sessionId: string, signal: AbortSignal): Promise<string> {
-    const active = this.signal(signal); active.throwIfAborted();
+    return (await this.pointScope(sessionId, this.signal(signal))).workspaceId;
+  }
+  private async pointScope(sessionId: string, active: AbortSignal): Promise<{ workspaceId: string; view: readonly WorkspaceConfig[] }> {
+    active.throwIfAborted();
     if (this.source.archivedSessionIds().has(sessionId)) throw new HostError('not_found');
     // Legacy controller-only compositions retain their original list authority;
     // the installed plugin supplies a fresh point stat, never a catalog scan.
-    if (!this.options.sessionHeader) return (await this.permitted(sessionId, active)).session.workspaceId;
+    if (!this.options.sessionHeader) { const { session, view } = await this.permitted(sessionId, active); return { workspaceId: session.workspaceId, view }; }
     const header = object(await this.options.sessionHeader(sessionId, active));
     active.throwIfAborted();
     if (!header || header.id !== sessionId || header.origin === 'subagent') throw new HostError('not_found');
@@ -628,7 +642,7 @@ export class DshAdapter implements HostAdapter {
     const workspace = await this.workspace(header.cwd, workspaces);
     active.throwIfAborted(); this.checkCurrent(view, sessionId);
     if (!workspace) throw new HostError('not_found');
-    return workspace.id;
+    return { workspaceId: workspace.id, view };
   }
   async snapshot(sessionId: string, signal: AbortSignal): Promise<HostSnapshot> {
     const { transcript, view } = await this.open(sessionId, this.signal(signal));
@@ -1098,10 +1112,16 @@ export class DshAdapter implements HostAdapter {
     if (!isUuid(requestId) || typeof text !== 'string' || (!text.trim() && !options?.attachments?.length)) throw new HostError('invalid_request');
     if (Buffer.byteLength(text, 'utf8') > 32768) throw new HostError('payload_too_large');
     if (!expectedWorkspaceId) throw new HostError('not_found');
-    const { view, row } = await this.permitted(sessionId, active, expectedWorkspaceId);
+    // The installed composition has fresh stat + synchronous liveness seams.
+    // Legacy adapters keep their catalog admission; no authority is cached.
+    const point = this.options.sessionHeader && this.options.sessionStatus;
+    const authority = point ? await this.pointScope(sessionId, active) : undefined;
+    const legacy = authority ? undefined : await this.permitted(sessionId, active, expectedWorkspaceId);
+    const view = authority?.view ?? legacy!.view;
+    if (authority && authority.workspaceId !== expectedWorkspaceId) throw new HostError('not_found');
     active.throwIfAborted();
     this.checkCurrent(view, sessionId);
-    if (options?.delivery === 'steer' && !row.running) throw new HostError('conflict');
+    if (options?.delivery === 'steer' && !(point ? this.options.sessionStatus!(sessionId).running : legacy!.row.running)) throw new HostError('conflict');
     const content = [{ type: 'text' as const, text }, ...(options?.attachments ?? []).map(a => a.upstream)];
     try {
       await this.options.sessionController.prompt({ requestId, sessionId, mode: options?.delivery ?? 'queue', content }, active);

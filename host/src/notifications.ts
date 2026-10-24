@@ -8,6 +8,10 @@ export interface NotificationEvidence { sessionId: string; workspaceId: string; 
 export interface NotificationSources {
   subscribe(listener: (id: string, event: NotificationSource) => void): () => void;
   list(signal: AbortSignal): Promise<{ id: string; workspaceId: string; running?: boolean }[]>;
+  /** Fresh point authority, including origin/archive/canonical workspace checks. Absence is exclusion, not failure. */
+  lookup?(id: string, signal: AbortSignal): Promise<{ id: string; workspaceId: string; running?: boolean } | undefined>;
+  /** Synchronous final scope check after a page's parallel point reads yield. */
+  lookupCurrent?(listed: { id: string; workspaceId: string }): boolean;
   evidence(id: string, signal: AbortSignal, listed?: { id: string; workspaceId: string; running?: boolean }): Promise<NotificationEvidence>;
   /** Revalidate a coalesced proof against the currently active source scope. */
   evidenceCurrent?(proof: NotificationEvidence): boolean;
@@ -30,7 +34,7 @@ const RETENTION = 7 * 86400_000;
 const relevant = new Set(['turn/end', 'approval/asked', 'approval/decided', 'tool/call', 'tool/result', 'user/message']);
 const idValid = (s: unknown): s is string => typeof s === 'string' && Buffer.byteLength(s) <= 256 && !!s && !['__proto__', 'constructor', 'prototype'].includes(s) && !/[\/\\\x00-\x1f\x7f]/.test(s);
 
-/** One serialized producer; callback retains only minimal envelopes, never arguments or text. */
+/** Per-session ordered preparation; synchronous journal+watermark commits never interleave. */
 export class NotificationFeed {
   coverage: Coverage = 'initializing';
   private readonly state: HostState;
@@ -50,7 +54,7 @@ export class NotificationFeed {
   private readonly lazyRetry = new Map<string, { failures: number; after: number }>();
   private recoveryPass = 0;
   private activation: AbortController | undefined;
-  private scheduled = false;
+  private readonly lanes = new Map<string, Promise<void>>();
   private reconciling = false;
   private overflow = false;
   private coverageRevision = 0;
@@ -72,7 +76,10 @@ export class NotificationFeed {
     if (process.env.DSH_MOBILE_NOTIFICATION_TRACE !== '1') return;
     for (const event of items) notificationTrace(stage, { event: createHash('sha256').update(event.eventId).digest('hex').slice(0, 12), seq: event.sequence });
   }
-  private degrade(): void {
+  private degrade(reason: string): void {
+    const diagnostic = this.state.readNotificationState<{ counts: Record<string, number> }>('diagnostics') ?? { counts: {} };
+    diagnostic.counts[reason] = (diagnostic.counts[reason] ?? 0) + 1;
+    this.state.writeNotificationState('diagnostics', { ...diagnostic, lastReason: reason, lastAt: Date.now(), queueDepth: this.queue.length });
     const previous = this.coverage; this.coverage = 'degraded'; this.coverageRevision++; this.recoveryScan = true;
     if (previous !== this.coverage) this.changed();
   }
@@ -89,8 +96,8 @@ export class NotificationFeed {
   async start(): Promise<void> {
     this.dispose = this.source.subscribe((id, event) => {
       if (this.lifetime.signal.aborted || !this.activated || !this.enabledDevices()) return;
-      if (!idValid(id) || !Number.isSafeInteger(event.seq) || event.seq < 0 || !Number.isSafeInteger(event.time) || event.time < 0 || typeof event.type !== 'string' || event.type.length > 128) { this.degrade(); return; }
-      if (this.queue.length >= 4096) { this.degrade(); this.overflow = true; return; }
+      if (!idValid(id) || !Number.isSafeInteger(event.seq) || event.seq < 0 || !Number.isSafeInteger(event.time) || event.time < 0 || typeof event.type !== 'string' || event.type.length > 128) { this.degrade('invalid_envelope'); return; }
+      if (this.queue.length >= 4096) { this.degrade('queue_overflow'); this.overflow = true; return; }
       notificationTrace('source_received', { seq: event.seq, queue: this.queue.length });
       this.queue.push({ id, event });
       if (this.started) this.schedule();
@@ -100,7 +107,7 @@ export class NotificationFeed {
     this.activate();
     this.timer = setInterval(() => {
       if (this.reconciling || this.initializing || !this.activated || !this.enabledDevices() || this.lifetime.signal.aborted) return; this.reconciling = true;
-      this.work = this.work.then(() => this.reconcile()).catch(() => { this.degrade(); }).finally(() => { this.reconciling = false; });
+      this.work = this.work.then(() => this.reconcile()).catch(() => { this.degrade('reconcile_failed'); }).finally(() => { this.reconciling = false; });
     }, 60_000);
     this.timer.unref();
   }
@@ -130,37 +137,59 @@ export class NotificationFeed {
           if (!session.running && !this.watermarks[session.id]?.attentionId) { delete this.watermarks[session.id]; continue; }
           const evidence = await this.source.evidence(session.id, budget, session);
           budget.throwIfAborted();
-          if (evidence.valid === false) { this.degrade(); continue; }
+          if (evidence.valid === false) { this.degrade('baseline_proof_invalid'); continue; }
           const queued = this.queue.filter(e => e.id === session.id).map(e => e.event.seq);
           this.watermarks[session.id] = { seq: queued.length ? Math.min(...queued) - 1 : evidence.cursor, ...(evidence.pending ? { attentionId: this.watermarks[session.id]?.attentionId ?? randomUUID() } : {}) };
         }
         if (pendingBefore !== this.pendingCut()) this.resetJournals();
         this.state.writeNotificationState('producer', this.watermarks);
         this.coverage = this.coverage === 'degraded' ? 'degraded' : 'ready'; this.changed();
-      } catch { if (!activation.signal.aborted) { this.degrade(); this.resetJournals(); } }
+      } catch { if (!activation.signal.aborted) { this.degrade('baseline_failed'); this.resetJournals(); } }
       finally { if (this.activation === activation && !activation.signal.aborted) { this.baselineReady = true; this.initializing = false; this.schedule(); } }
     });
   }
   private pendingCut(): string { return JSON.stringify(Object.entries(this.watermarks).filter(([, s]) => s.attentionId).map(([id, s]) => [id, s.attentionId]).sort(([a], [b]) => a!.localeCompare(b!))); }
-  private signal(): AbortSignal { return AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(10_000)]); }
+  private signal(): AbortSignal { return AbortSignal.any([this.lifetime.signal, ...(this.activation ? [this.activation.signal] : []), AbortSignal.timeout(10_000)]); }
   private schedule(): void {
-    if (this.scheduled) return; this.scheduled = true;
-    this.work = this.work.then(async () => {
-    const proofs = new Map<string, NotificationEvidence>(); // Drain-local, bounded by the queued session set; no stale cross-drain authority.
-    while (this.queue.length && !this.lifetime.signal.aborted) {
-      const next = this.queue.shift()!;
-      const tracing = process.env.DSH_MOBILE_NOTIFICATION_TRACE === '1', started = tracing ? performance.now() : 0;
-      if (tracing) notificationTrace('producer_begin', { seq: next.event.seq, queue: this.queue.length });
-      try { await this.accept(next.id, next.event, proofs); } catch { this.degrade(); }
-      finally { if (tracing) notificationTrace('producer_end', { seq: next.event.seq, durationMs: Math.round(performance.now() - started) }); }
+    if (this.initializing || this.lifetime.signal.aborted || !this.activated) return;
+    // Only I/O overlaps. Each lane retains its envelope until settlement so a
+    // concurrent recovery cut cannot consume an uncommitted terminal event.
+    for (const id of new Set(this.queue.map(e => e.id))) {
+      if (this.lanes.has(id) || this.lanes.size >= 256) continue;
+      const activation = this.activation;
+      const lane = (async () => {
+        const proofs = new Map<string, NotificationEvidence>();
+        // Yield once so the lane is registered before any synchronous completion.
+        await Promise.resolve();
+        for (;;) {
+          if (this.lifetime.signal.aborted || activation !== this.activation || activation?.signal.aborted) return;
+          const next = this.queue.find(e => e.id === id); if (!next) return;
+          const begin = performance.now();
+          notificationTrace('producer_begin', { seq: next.event.seq, queue: this.queue.length });
+          try { await this.accept(next.id, next.event, proofs); }
+          catch { if (!activation?.signal.aborted && !this.lifetime.signal.aborted) this.degrade('accept_failed'); }
+          finally {
+            const index = this.queue.indexOf(next); if (index >= 0) this.queue.splice(index, 1);
+            notificationTrace('producer_end', { seq: next.event.seq, durationMs: Math.round(performance.now() - begin) });
+          }
+        }
+      })().finally(() => {
+        if (this.lanes.get(id) === lane) this.lanes.delete(id);
+        if (this.queue.length) this.schedule();
+        else if (!this.lanes.size && this.overflow && !this.lifetime.signal.aborted) {
+          this.overflow = false; this.resetJournals();
+          this.work = this.work.then(() => this.reconcile()).catch(() => this.degrade('overflow_recovery_failed'));
+        }
+      });
+      this.lanes.set(id, lane);
     }
-    if (!this.lifetime.signal.aborted) {
-      if (this.overflow) { this.resetJournals(); this.overflow = false; await this.reconcile(); }
-      this.state.writeNotificationState('producer', this.watermarks);
-    }
-  }).catch(() => { this.degrade(); }).finally(() => { this.scheduled = false; if (this.queue.length && !this.lifetime.signal.aborted) this.schedule(); }); }
+  }
   async idle(): Promise<void> {
-    do { await this.work; } while ((this.scheduled || this.queue.length) && !this.lifetime.signal.aborted);
+    do { await this.work; await Promise.all(this.lanes.values()); }
+    while ((this.initializing || this.lanes.size || this.queue.length) && !this.lifetime.signal.aborted);
+  }
+  private async lookup(id: string): Promise<{ id: string; workspaceId: string; running?: boolean } | undefined> {
+    return this.source.lookup ? this.source.lookup(id, this.signal()) : (await this.source.list(this.signal())).find(s => s.id === id);
   }
   private async accept(id: string, event: NotificationSource, proofs: Map<string, NotificationEvidence>): Promise<void> {
     if (event.time < this.baselineAt) return;
@@ -176,15 +205,16 @@ export class NotificationFeed {
     }
     // Only relevant events pay for fresh membership/permission authority. Excluded
     // sessions never introduce producer watermarks or gaps in the ordinary feed.
-    const sessions = await this.source.list(this.signal());
-    const listed = sessions.find(s => s.id === id);
+    const activation = this.activation;
+    const listed = await this.lookup(id);
+    if (activation !== this.activation || activation?.signal.aborted) return;
     if (!listed) { proofs.delete(id); this.skipped.delete(id); return; }
     const old = this.watermarks[id];
     if (event.time < this.baselineAt || (old && event.seq <= old.seq)) return;
     const skipped = this.skipped.get(id); this.skipped.delete(id);
     const gap = (this.skippedEvicted && !old) || !!skipped?.gap || (skipped ? (event.seq !== skipped.last + 1 || (!!old && skipped.first !== old.seq + 1)) : !!old && event.seq !== old.seq + 1);
-    if (gap) { this.degrade(); this.resetJournals(); }
-    if (!old && Object.keys(this.watermarks).length >= 10000) { this.degrade(); return; }
+    if (gap) { this.degrade('sequence_gap'); this.resetJournals(); }
+    if (!old && Object.keys(this.watermarks).length >= 10000) { this.degrade('watermark_limit'); return; }
     let proof = proofs.get(id);
     if (!proof || proof.workspaceId !== listed.workspaceId || proof.cursor < event.seq || (this.source.evidenceCurrent && !this.source.evidenceCurrent(proof))) {
       proof = await this.source.evidence(id, this.signal(), listed);
@@ -194,11 +224,12 @@ export class NotificationFeed {
       } else proofs.delete(id);
     }
     this.lifetime.signal.throwIfAborted();
-    if (proof.valid === false || proof.sessionId !== id || proof.workspaceId !== listed.workspaceId || proof.cursor < event.seq || (this.source.evidenceCurrent && !this.source.evidenceCurrent(proof))) { this.degrade(); return; }
+    if (activation !== this.activation || activation?.signal.aborted) return;
+    if (proof.valid === false || proof.sessionId !== id || proof.workspaceId !== listed.workspaceId || proof.cursor < event.seq || (this.source.evidenceCurrent && !this.source.evidenceCurrent(proof))) { this.degrade('proof_invalid'); return; }
     this.batch = new Map();
     try {
     // Unknown newly-created sessions are eligible by a fresh cold opening, not phone pagination.
-    const current = old ?? { seq: -1 };
+    const current = { ...(this.watermarks[id] ?? { seq: -1 }) };
     if (proof.pending && !current.attentionId) {
       current.attentionId = randomUUID(); this.emit(proof, event, 'attention-needed', current.attentionId);
     } else if (!proof.pending && current.attentionId) {
@@ -217,16 +248,17 @@ export class NotificationFeed {
   private async reconcile(): Promise<void> {
     const activation = this.activation;
     const revision = this.coverageRevision;
+    const beforeList = new Map(Object.entries(this.watermarks));
     const sessions = await this.source.list(this.signal());
     if (activation !== this.activation || activation?.signal.aborted || this.lifetime.signal.aborted) return;
-    if (sessions.length > 10000) { this.degrade(); return; }
+    if (sessions.length > 10000) { this.degrade('session_limit'); return; }
     const visible = new Set(sessions.map(s => s.id));
     // Capture a whole authoritative recovery set once per new failure, not just
     // the eight lazy sources probed in this bounded pass. Removed sources retire.
     if (this.recoveryScan) { for (const id of visible) this.recoveryPending.add(id); this.recoveryScan = false; }
     for (const id of this.recoveryPending) if (!visible.has(id)) this.recoveryPending.delete(id);
     for (const id of this.lazyRetry.keys()) if (!visible.has(id)) this.lazyRetry.delete(id);
-    for (const id of Object.keys(this.watermarks)) if (!visible.has(id)) delete this.watermarks[id];
+    for (const id of Object.keys(this.watermarks)) if (!visible.has(id) && beforeList.get(id) === this.watermarks[id] && !this.queue.some(e => e.id === id)) delete this.watermarks[id];
     // Rotate before I/O, retaining failures and unprobed entries. A bad first
     // session cannot restart every pass at the head or consume everyone else's retry.
     const pass = ++this.recoveryPass;
@@ -249,7 +281,7 @@ export class NotificationFeed {
     for (const id of ids) {
       const session = byId.get(id);
       if (!session) { this.lazyRetry.delete(id); continue; }
-      const old = this.watermarks[id];
+      const observedSeq = this.watermarks[id]?.seq;
       let proof: NotificationEvidence;
       try {
         budget.throwIfAborted();
@@ -258,10 +290,15 @@ export class NotificationFeed {
         if (proof.valid === false || proof.sessionId !== id || proof.workspaceId !== session.workspaceId || (this.source.evidenceCurrent && !this.source.evidenceCurrent(proof))) throw new HostError('unavailable');
       } catch {
         if (activation?.signal.aborted || this.lifetime.signal.aborted) return;
-        this.degrade(); this.retryLazy(id, pass);
+        this.degrade('reconcile_proof_failed'); this.retryLazy(id, pass);
         if (budget.aborted) break; // Unprobed IDs are still in the rotated queue.
         continue;
       }
+      if (activation !== this.activation || activation?.signal.aborted || this.lifetime.signal.aborted) return;
+      const old = this.watermarks[id];
+      // A live lane committed while this recovery read was in flight. Its newer
+      // pending episode owns the cut; do not replay stale attention over it.
+      if (old?.seq !== observedSeq || this.queue.some(e => e.id === id)) continue;
       this.lazyRetry.delete(id); this.recoveryPending.delete(id);
       const attentionId = proof.pending ? old?.attentionId ?? randomUUID() : undefined;
       if (proof.pending && !old?.attentionId) this.emit(proof, { seq: proof.cursor, time: Date.now(), type: 'tool/call' }, 'attention-needed', attentionId);
@@ -276,7 +313,7 @@ export class NotificationFeed {
       else if (skipped && skipped.first <= seq) skipped.first = seq + 1;
     }
     this.state.writeNotificationState('producer', this.watermarks);
-    if (!this.baselineReady) { this.baselineReady = true; this.degrade(); }
+    if (!this.baselineReady) { this.baselineReady = true; this.degrade('baseline_incomplete'); }
     if (this.coverage === 'degraded' && revision === this.coverageRevision && !this.recoveryScan && !this.recoveryPending.size && !this.lazyRetry.size && !this.overflow && !this.queue.length && !budget.aborted) { this.coverage = 'ready'; this.changed(); }
   }
   private retryLazy(id: string, pass: number): void {
@@ -328,13 +365,13 @@ export class NotificationFeed {
     this.emissions.set(key, entry); return ++entry.count <= limit;
   }
   private emit(proof: NotificationEvidence, source: NotificationSource, kind: NotificationEvent['kind'], attentionId?: string): void {
-    if (!this.emissionAllowed('host', 1000) || !this.emissionAllowed('session:' + proof.sessionId, 30)) { this.degrade(); this.resetJournals(); return; }
+    if (!this.emissionAllowed('host', 1000) || !this.emissionAllowed('session:' + proof.sessionId, 30)) { this.degrade('emission_rate_limit'); this.resetJournals(); return; }
     for (const device of this.state.listDevices()) {
       if (!this.state.getDevice(device.deviceId) || !allowsWorkspace(device.grants.readWorkspaceIds, proof.workspaceId)) continue;
       const j = this.journal(device.deviceId), s = j.settings;
       if (!s.enabled || !(s.chats.find(c => c.sessionId === proof.sessionId)?.enabled ?? s.projects.find(p => p.workspaceId === proof.workspaceId)?.enabled ?? true)) continue;
       if (j.items.some(e => e.sessionId === proof.sessionId && e.sourceSeq === source.seq && e.kind === kind)) continue;
-      if (!this.emissionAllowed('device:' + device.deviceId, 120)) { this.degrade(); j.epoch = randomUUID(); j.items = []; this.save(device.deviceId, j); continue; }
+      if (!this.emissionAllowed('device:' + device.deviceId, 120)) { this.degrade('device_rate_limit'); j.epoch = randomUUID(); j.items = []; this.save(device.deviceId, j); continue; }
       j.items = j.items.filter(e => e.occurredAt > Date.now() - RETENTION);
       j.items.push({ version: 1, eventId: randomUUID(), sequence: ++j.sequence, occurredAt: source.time, expiresAt: Date.now() + 86400_000, workspaceId: proof.workspaceId, sessionId: proof.sessionId, kind, sourceSeq: source.seq, ...(attentionId ? { attentionId } : {}), ...(kind === 'answer-finished' ? { turn: source.turn! } : {}) });
       j.items = j.items.slice(-2000); this.save(device.deviceId, j); if (!this.batch) this.changed();
@@ -365,9 +402,16 @@ export class NotificationFeed {
   async page(deviceId: string, after?: string, limit = 50) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HostError('invalid_request');
     const cut = after ? this.parseCursor(deviceId, after) : undefined;
-    const list = await this.source.list(this.signal());
+    // Only retained journal/pending IDs need current authority. Never scan the
+    // unrelated persisted corpus on a one-second SSE tick. Legacy sources keep
+    // the original catalog fallback. Do not retain a pre-await journal copy.
+    const initial = this.journal(deviceId);
+    const ceiling = initial.sequence;
+    const ids = new Set([...initial.items.map(e => e.sessionId), ...(initial.attentionSessions ?? []), ...Object.keys(this.watermarks).filter(id => this.watermarks[id]?.attentionId)]);
+    const list = this.source.lookup ? (await Promise.all([...ids].map(id => this.lookup(id)))).filter((s): s is NonNullable<typeof s> => !!s) : await this.source.list(this.signal());
     // Listing yields: never overwrite producer writes with a pre-await journal copy.
     this.lifetime.signal.throwIfAborted();
+    if (this.source.lookupCurrent && list.some(s => !this.source.lookupCurrent!(s))) throw new HostError('unavailable');
     const j = this.journal(deviceId);
     j.items = j.items.filter(e => e.occurredAt > Date.now() - RETENTION); this.save(deviceId, j);
     let resetRequired = !cut || cut[0] !== j.epoch || cut[1] > j.sequence || cut[1] < (j.items[0]?.sequence ?? j.sequence + 1) - 1;
@@ -378,8 +422,10 @@ export class NotificationFeed {
     if ((j.scope && j.scope !== scope) || j.attentionSessions?.some(id => !allowed.has(id) || !allowsWorkspace(device.grants.readWorkspaceIds, allowed.get(id)!))) { j.epoch = randomUUID(); resetRequired = true; }
     j.scope = scope; j.attentionSessions = currentAttention.slice(0,1000);
     j.items = j.items.filter(e => e.occurredAt > Date.now() - RETENTION); this.save(deviceId, j);
-    const candidates = resetRequired ? [] : j.items.filter(e => e.sequence > cut![1]);
-    let sequence = resetRequired ? j.sequence : cut![1], examined = 0;
+    // A commit during point lookups is left for the coalesced next page; never
+    // advance its cursor without having checked that session's authority.
+    const candidates = resetRequired ? [] : j.items.filter(e => e.sequence > cut![1] && e.sequence <= ceiling);
+    let sequence = resetRequired ? Math.min(ceiling, j.sequence) : cut![1], examined = 0;
     const items: NotificationEvent[] = [];
     for (const e of candidates) {
       if (examined++ >= 400 || items.length >= limit) break;
@@ -390,9 +436,9 @@ export class NotificationFeed {
     // Reset is a current-state cut, not history replay. Phone cancels its old attention alerts.
     const pending = resetRequired && j.settings.enabled ? Object.entries(this.watermarks).filter(([id, s]) => s.attentionId && allowed.has(id) && allowsWorkspace(device.grants.readWorkspaceIds, allowed.get(id)!) && (j.settings.chats.find(c => c.sessionId === id)?.enabled ?? j.settings.projects.find(p => p.workspaceId === allowed.get(id))?.enabled ?? true)).slice(0,1000).map(([sessionId, s]) => ({ sessionId, workspaceId: allowed.get(sessionId)!, attentionId: s.attentionId! })) : [];
     const page = { version: 1, epoch: j.epoch, items, pending, nextCursor: this.cursor(deviceId, j.epoch, sequence), hasMore: sequence < j.sequence, resetRequired, coverage: this.coverage };
-    if (currentAttention.length > 1000) { this.degrade(); page.coverage = 'degraded'; }
+    if (currentAttention.length > 1000) { this.degrade('attention_limit'); page.coverage = 'degraded'; }
     if (Buffer.byteLength(JSON.stringify(page)) > 128 * 1024 - 512) throw new HostError('payload_too_large');
     return page;
   }
-  async close(): Promise<void> { this.lifetime.abort(); this.listeners.clear(); this.dispose?.(); if (this.timer) clearInterval(this.timer); await this.work; }
+  async close(): Promise<void> { this.lifetime.abort(); this.listeners.clear(); this.dispose?.(); if (this.timer) clearInterval(this.timer); await this.work; await Promise.all(this.lanes.values()); }
 }
