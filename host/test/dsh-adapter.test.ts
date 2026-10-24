@@ -173,8 +173,11 @@ test('coalesced openings enforce sixty-four waiters and sixteen active-session s
   const many = new AbortController();
   const sessions = Array.from({ length: 16 }, (_, i) => adapter.snapshot(`held-${i}`, many.signal));
   const stopped = sessions.map(session => assert.rejects(session, { name: 'AbortError' }));
-  await assert.rejects(adapter.snapshot('overflow', many.signal), { code: 'unavailable' });
-  assert.equal(openings, 17); many.abort(); await Promise.all(stopped);
+  const overflow = adapter.snapshot('overflow', many.signal);
+  stopped.push(assert.rejects(overflow, { name: 'AbortError' }));
+  assert.equal(openings, 17, 'the seventeenth session waits without opening upstream');
+  many.abort(); await Promise.all(stopped);
+  assert.equal(openings, 17, 'an aborted capacity waiter never starts an opening');
 });
 
 test('coalescing never shares authorization bindings across a changed registry provider or retargeted cwd', async t => {
@@ -223,6 +226,23 @@ test('failure scope uses fresh point headers, hides missing/child/archive and in
   await assert.rejects(pending, { code: 'not_found' }, 'a new provider cannot authorize an old awaited view');
   assert.equal(await adapter.sessionScope('session-fixture', signal), 'alpha');
   assert.equal(h.cleanup().resumed, 0); assert.equal(h.cleanup().closed, 0);
+});
+
+test('notification point authority rejects child/archive/remap and proves completion without corpus IO', async t => {
+  const h = await harness(t); let header: unknown = h.frame.header;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }],
+    sessionController: { ...h.controller, async list() { throw Error('notification scanned corpus'); } },
+    sessionHeader: async () => header, sessionStatus: () => ({ running: false, updatedAt: 0 }),
+    events: { subscribe() { return () => {}; }, subscribeNotifications() { return () => {}; } },
+  });
+  t.after(() => adapter.dispose()); const source = adapter.notifications()!, signal = new AbortController().signal;
+  const listed = await source.lookup!('session-fixture', signal);
+  assert.equal(listed?.workspaceId, 'alpha');
+  assert.deepEqual((await source.evidence('session-fixture', signal, listed)).completed, [{ turn: 1, sourceSeq: 7 }]);
+  header = { ...h.frame.header, origin: 'subagent' }; assert.equal(await source.lookup!('session-fixture', signal), undefined);
+  header = { ...h.frame.header, cwd: h.dir }; assert.equal(await source.lookup!('session-fixture', signal), undefined);
+  header = undefined; assert.equal(await source.lookup!('session-fixture', signal), undefined);
+  assert.equal(h.cleanup().resumed, 0, 'point notification read must not promote the cold session');
 });
 
 test('notification evidence is cold-safe and demands authoritative completed turn and pending episode', async t => {

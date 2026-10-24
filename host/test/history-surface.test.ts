@@ -345,8 +345,9 @@ test('concurrent recovery is capped at sixteen sessions before additional backwa
   try {
     const openings = rows.slice(0, 16).map(row => adapter.snapshot(row.sessionId, new AbortController().signal));
     await allReading;
-    await assert.rejects(adapter.snapshot(rows[16]!.sessionId, new AbortController().signal), { code: 'unavailable' }); assert.equal(reads, 16);
-    release(); assert.equal((await Promise.all(openings)).length, 16);
+    const queued = adapter.snapshot(rows[16]!.sessionId, new AbortController().signal);
+    assert.equal(reads, 16, 'saturation waits instead of failing the read');
+    release(); assert.equal((await Promise.all([...openings, queued])).length, 17); assert.equal(reads, 17);
   } finally { release(); adapter.dispose(); }
 });
 
