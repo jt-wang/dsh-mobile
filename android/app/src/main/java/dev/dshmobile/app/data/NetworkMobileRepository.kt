@@ -56,6 +56,7 @@ internal class NetworkMobileRepository(
     private val observeRestoredSession: Boolean = true,
     private val historyStore: HistoryStore = MemoryHistoryStore(),
     private val prefetchEnabled: Boolean = false,
+    private val preHeaderRetryDelay: (Int) -> Long = { attempt -> if (attempt == 0) 500L else 1_500L },
     private val openAttachment: ((dev.dshmobile.app.model.DraftAttachment) -> java.io.InputStream)? = null,
 ) : MobileRepository {
     private val repositoryJob = SupervisorJob(ownerScope.coroutineContext[Job])
@@ -183,7 +184,7 @@ internal class NetworkMobileRepository(
         catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { safeDebugDiagnostic("state.persist", failure); throw MobileFailure("storage_failed") }
         stored = value
-        mutableState.value = state.value.copy(pending = value.pending?.presentation(), acceptedPrompts = value.acceptedPrompts.map { it.presentation() },
+        mutableState.value = state.value.copy(pending = value.pending?.presentation(), sendNotSent = value.selectedSessionId in value.notSentSessions, acceptedPrompts = value.acceptedPrompts.map { it.presentation() },
             attachmentDrafts = value.attachmentDrafts, answerDrafts = value.answerDrafts,
             retainedAttachmentSources = value.acceptedPrompts.flatMap { it.attachmentSources } + value.pending?.attachmentSources.orEmpty())
     }
@@ -256,7 +257,7 @@ internal class NetworkMobileRepository(
             connection = if (host == null) ConnectionState.DISCONNECTED else ConnectionState.OFFLINE,
             sessions = lastIndex?.sessions.orEmpty(), workspaces = lastIndex?.workspaces.orEmpty(),
             sessionsTruncated = lastIndex?.truncated ?: false,
-            draft = draftFor(stored.selectedSessionId), pending = stored.pending?.presentation(),
+            draft = draftFor(stored.selectedSessionId), pending = stored.pending?.presentation(), sendNotSent = stored.selectedSessionId in stored.notSentSessions,
             acceptedPrompts = stored.acceptedPrompts.map { it.presentation() }, localPromptActions = promptActions,
             error = if (stored.pending != null) "command_uncertain" else null, observingSession = observingSession,
             draftsRestored = true, attachmentDrafts = stored.attachmentDrafts, answerDrafts = stored.answerDrafts,
@@ -567,7 +568,7 @@ internal class NetworkMobileRepository(
                 if (text.isEmpty()) remove(sessionId) else put(sessionId, text)
             }
             if (drafts.size > 64) throw MobileFailure("storage_failed")
-            persist(stored.copy(drafts = drafts))
+            persist(stored.copy(drafts = drafts, notSentSessions = if (text.isEmpty()) stored.notSentSessions - sessionId else stored.notSentSessions))
         }
     }
     override suspend fun createSession(workspaceId: String, presetId: String?, requestId: String) = action {
@@ -580,25 +581,38 @@ internal class NetworkMobileRepository(
         if (!validRequestId(requestId)) throw MobileFailure("invalid_selection")
         dispatch(StoredCommand(requestId, "create", workspaceId = workspaceId, presetId = presetId))
     }
+    override suspend fun markSendNotSent(sessionId: String, text: String) = action {
+        restoreLocked()
+        if (stored.pending == null && validId(sessionId) && text.toByteArray().size <= 32768)
+            persist(stored.copy(drafts = stored.drafts + (sessionId to text), notSentSessions = stored.notSentSessions + sessionId))
+    }
     override suspend fun sendMessage(text: String) = sendMessage(text, null, emptyList())
     override suspend fun sendMessage(text: String, delivery: String?, uploadIds: List<String>) {
         val origin = state.value.snapshot?.session?.id
         val blocked = state.value.busy
         action {
-            restoreLocked(); online()
-            if (blocked || origin == null || stored.selectedSessionId != origin) throw MobileFailure("invalid_selection")
-            if (state.value.capabilities?.textPrompt != true) throw MobileFailure("unsupported")
-            if ((text.isBlank() && uploadIds.isEmpty()) || text.toByteArray().size > 32 * 1024 || '\u0000' in text) throw MobileFailure("invalid_text")
-            if (delivery !in setOf(null, "queue", "steer") || (delivery == "steer" && state.value.capabilities?.steer != true) ||
-                (uploadIds.isNotEmpty() && state.value.capabilities?.attachments != true) || uploadIds.size > 20 || uploadIds.distinct().size != uploadIds.size) throw MobileFailure("unsupported")
-            val snapshot = executableSnapshot()
-            if (MobileReducer.blockingPromptCount(state.value, snapshot.session.id) >= MobileReducer.MAX_ACCEPTED_PROMPTS) throw MobileFailure("command_unresolved")
-            val command = StoredCommand(UUID.randomUUID().toString(), "send", sessionId = snapshot.session.id, text = text,
-                queuedWhileRunning = snapshot.activity in setOf("running", "waiting"), delivery = delivery,
-                uploadIds = uploadIds.takeIf { it.isNotEmpty() },
-                attachmentSources = stored.attachmentDrafts[snapshot.session.id].orEmpty().filter { it.uploadId in uploadIds })
+            restoreLocked()
+            val command = try {
+                online()
+                if (blocked || origin == null || stored.selectedSessionId != origin) throw MobileFailure("invalid_selection")
+                if (state.value.capabilities?.textPrompt != true) throw MobileFailure("unsupported")
+                if ((text.isBlank() && uploadIds.isEmpty()) || text.toByteArray().size > 32 * 1024 || '\u0000' in text) throw MobileFailure("invalid_text")
+                if (delivery !in setOf(null, "queue", "steer") || (delivery == "steer" && state.value.capabilities?.steer != true) ||
+                    (uploadIds.isNotEmpty() && state.value.capabilities?.attachments != true) || uploadIds.size > 20 || uploadIds.distinct().size != uploadIds.size) throw MobileFailure("unsupported")
+                val snapshot = executableSnapshot()
+                if (MobileReducer.blockingPromptCount(state.value, snapshot.session.id) >= MobileReducer.MAX_ACCEPTED_PROMPTS) throw MobileFailure("command_unresolved")
+                StoredCommand(UUID.randomUUID().toString(), "send", sessionId = snapshot.session.id, text = text,
+                    queuedWhileRunning = snapshot.activity in setOf("running", "waiting"), delivery = delivery,
+                    uploadIds = uploadIds.takeIf { it.isNotEmpty() },
+                    attachmentSources = stored.attachmentDrafts[snapshot.session.id].orEmpty().filter { it.uploadId in uploadIds })
+            } catch (failure: MobileFailure) {
+                // A refused local admission made no transport call. Never let reconnect erase the outcome.
+                if (origin != null && stored.pending == null && text.toByteArray().size <= 32768 && failure.key !in setOf("revoked", "unauthorized", "forbidden", "not_paired"))
+                    persist(stored.copy(drafts = stored.drafts + (origin to text), notSentSessions = stored.notSentSessions + origin))
+                throw failure
+            }
             // Store draft and exact command in the SAME atomic encrypted write before dispatch.
-            dispatch(command, stored.drafts + (snapshot.session.id to text))
+            dispatch(command, stored.drafts + (requireNotNull(command.sessionId) to text))
         }
     }
     private fun discardStaging(session: String, sources: List<dev.dshmobile.app.model.DraftAttachment>) {
@@ -731,17 +745,35 @@ internal class NetworkMobileRepository(
             }
         }
     private suspend fun dispatch(command: StoredCommand, drafts: Map<String, String> = stored.drafts) {
-        // Capture a mutation-only transport BEFORE persistence can suspend. ON_STOP retires api
-        // (presentation GET/SSE), not this single bounded POST. No automatic replay on failure.
+        // Capture mutation transport before persistence can suspend. ON_STOP retires only reads.
+        // Only a fresh proof that no headers left permits bounded transport recovery.
         val host = stored.host ?: throw MobileFailure("not_paired")
         val mutation = HostApi(host.endpoint, host.deviceToken)
         try { dispatchOn(mutation, command, drafts) } finally { mutation.close() }
     }
+    private suspend fun commandWithPreHeaderRecovery(initial: HostApi, command: StoredCommand): CommandReceipt {
+        var transport = initial
+        try {
+            for (attempt in 0..2) {
+                try { return transport.command(command) }
+                catch (failure: MobileFailure) {
+                    // A fresh proof is required for EVERY attempt. Once any headers may have left,
+                    // receipt-only recovery applies; neither HTTP errors nor lost responses retry.
+                    if (command.kind != "send" || !failure.requestNotSent || failure.key != "network_unavailable" || attempt == 2) throw failure
+                    delay(preHeaderRetryDelay(attempt))
+                    if (transport !== initial) transport.close()
+                    val host = stored.host ?: throw failure
+                    transport = HostApi(host.endpoint, host.deviceToken) // New VPN route/tunnel, never stale pool.
+                }
+            }
+            error("unreachable")
+        } finally { if (transport !== initial) transport.close() }
+    }
     private suspend fun dispatchOn(mutation: HostApi, command: StoredCommand, drafts: Map<String, String>) {
-        persist(stored.copy(pending = command, drafts = drafts))
+        persist(stored.copy(pending = command, drafts = drafts, notSentSessions = stored.notSentSessions.filterNot { it == command.sessionId }.toSet()))
         mutableState.value = state.value.copy(pending = command.presentation(), draft = draftFor(stored.selectedSessionId), busy = true, error = null)
         try {
-            val receipt = try { mutation.command(command) } catch (missing: MobileFailure) {
+            val receipt = try { commandWithPreHeaderRecovery(mutation, command) } catch (missing: MobileFailure) {
                 if (missing.key != "upload_missing" || command.attachmentSources.size != command.uploadIds.orEmpty().size || command.attachmentSources.isEmpty()) throw missing
                 // Only an explicit pre-admission 404 authorizes this single automatic continuation.
                 // Keep the requestId; uncertain/lost responses never enter this branch.
@@ -756,7 +788,7 @@ internal class NetworkMobileRepository(
                 val mapping = sources.associateBy { it.localId }
                 val attachments = stored.attachmentDrafts[command.sessionId].orEmpty().map { mapping[it.localId] ?: it }
                 persist(stored.copy(pending = refreshed, attachmentDrafts = stored.attachmentDrafts + (command.sessionId to attachments)))
-                mutation.command(refreshed)
+                commandWithPreHeaderRecovery(mutation, refreshed)
             }
             applyReceipt(receipt)
             // A pending receipt has its own short read-only polling budget. A potentially
@@ -766,7 +798,7 @@ internal class NetworkMobileRepository(
             if (failure.requestNotSent) {
                 // Only transport evidence BEFORE requestHeadersStart permits this classification.
                 // Missing receipts, timeouts after headers, and lost responses remain uncertain.
-                persist(stored.copy(pending = null))
+                persist(stored.copy(pending = null, notSentSessions = if (command.kind == "send" && command.sessionId != null) stored.notSentSessions + command.sessionId else stored.notSentSessions))
                 fail(failure.key)
                 mutableState.value = state.value.copy(error = "offline_no_send", busy = false)
                 return

@@ -70,7 +70,14 @@ class SendLifecycleTest {
                 assertEquals("editor admission busy=${repo.state.value.busy} stale=${repo.state.value.snapshotStale} selected=${repo.state.value.snapshot?.session?.id} blocked=${vm.interactionBlocked}", "Synthetic survives clear", vm.editorDraft)
                 main.scheduler.runCurrent()
                 withTimeout(2000) { repo.state.first { it.draft == "Synthetic survives clear" } }
+                repo.setForeground(false) // A stale enabled button can race a connectivity/lifecycle change.
                 vm.sendMessage()
+                withTimeout(2000) { repo.state.first { it.sendNotSent } }
+                assertEquals(0, posts.get())
+                repo.setForeground(true)
+                main.scheduler.runCurrent()
+                vm.retryNotSent() // The visible retry action dispatches only on this explicit tap.
+                assertEquals("chat", vm.sendingSessionId)
                 withTimeout(2000) { entered.await() }
                 models.clear()
                 release.countDown()

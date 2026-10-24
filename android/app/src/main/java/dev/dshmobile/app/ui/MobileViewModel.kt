@@ -230,13 +230,37 @@ class MobileViewModel @JvmOverloads constructor(application: Application,
             } finally { pendingDraftWrites-- }
         }
     }
+    var sendingSessionId by mutableStateOf<String?>(null); private set
+    fun retryNotSent() {
+        if (interactionBlocked || !state.value.sendNotSent || state.value.pending != null) return
+        if (state.value.connection == dev.dshmobile.app.model.ConnectionState.ONLINE && !state.value.snapshotStale) sendMessage()
+        else {
+            val origin = state.value.snapshot?.session?.id ?: return
+            interactionBlocked = true
+            admittedSend = sendScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                try { repository.refresh() } finally { interactionBlocked = false }
+                if (!cleared && state.value.snapshot?.session?.id == origin && state.value.sendNotSent)
+                    sendMessage() // Explicit user retry, never a reconnect-triggered outbox.
+            }
+        }
+    }
     fun sendMessage(onAccepted: () -> Unit = {}) = sendMessageWithDelivery(null, onAccepted)
     fun sendMessageWithDelivery(delivery: String?, onAccepted: () -> Unit = {}) {
         val attachments = phone.inSession(state.value.snapshot?.session?.id)
-        if (interactionBlocked || !dev.dshmobile.app.model.MobileReducer.canSend(state.value, editorDraft, attachments.isNotEmpty())) return
+        if (interactionBlocked || state.value.pending != null) return
         val origin = state.value.snapshot?.session?.id ?: return
         if (origin != editorSessionId) return
+        if (!dev.dshmobile.app.model.MobileReducer.canSend(state.value, editorDraft, attachments.isNotEmpty())) {
+            val text = editorDraft
+            interactionBlocked = true
+            admittedSend = sendScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                try { editorActions.withLock { repository.markSendNotSent(origin, text) } }
+                finally { interactionBlocked = false }
+            }
+            return
+        }
         val text = editorDraft // Exact visible text, not a possibly delayed repository draft.
+        sendingSessionId = origin // Immediate local progress, even while draft persistence waits.
         interactionBlocked = true // Navigation cannot retarget an admitted send.
         admittedSend = sendScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             try {
@@ -249,9 +273,9 @@ class MobileViewModel @JvmOverloads constructor(application: Application,
                             phone.restore(state.value)
                             if (!cleared) onAccepted()
                         }
-                    }
+                    } else repository.markSendNotSent(origin, text)
                 }
-            } finally { interactionBlocked = false }
+            } finally { sendingSessionId = null; interactionBlocked = false }
         }
     }
     fun cancelRun(onAdmitted: () -> Unit = {}) {

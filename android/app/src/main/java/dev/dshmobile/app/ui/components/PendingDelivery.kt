@@ -49,6 +49,7 @@ internal fun PromptContent(command: dev.dshmobile.app.model.PendingCommand, maxL
 /** Also lives on Home: an uncertain create has no chat/composer yet, but must remain resolvable. */
 @Composable
 internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifier: Modifier = Modifier) {
+    NotSentDelivery(state.sendNotSent && state.pending == null, !state.busy && !model.interactionBlocked, model::retryNotSent)
     val accents = LocalMobileColors.current
     // Accepted inbox prompts are informational local bubbles, not delivery warnings.
     val snapshot = state.snapshot
@@ -108,6 +109,19 @@ internal fun PendingDelivery(state: MobileState, model: MobileViewModel, modifie
     if (state.pending != null) heldPending[0] = state.pending
     AnimatedVisibility(state.pending != null, enter = Motion.revealIn(motion), exit = Motion.revealOut(motion), label = "pending delivery") {
         heldPending[0]?.let { PendingCard(it, state, model, modifier) }
+    }
+}
+
+@Composable
+internal fun NotSentDelivery(visible: Boolean, enabled: Boolean, retry: () -> Unit) {
+    if (!visible) return
+    Surface(color = LocalMobileColors.current.warningContainer, shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().testTag("send_not_sent")) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(stringResource(R.string.mobile_send_not_sent), color = LocalMobileColors.current.warning,
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            TextButton(onClick = retry, enabled = enabled, modifier = Modifier.testTag("retry_not_sent")) { Text(stringResource(R.string.mobile_retry_generic)) }
+        }
     }
 }
 

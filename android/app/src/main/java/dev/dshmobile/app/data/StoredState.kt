@@ -21,6 +21,7 @@ internal data class StoredState(
     val selectedSessionId: String? = null,
     val drafts: Map<String, String> = emptyMap(),
     val pending: StoredCommand? = null,
+    val notSentSessions: Set<String> = emptySet(),
     val acceptedPrompts: List<StoredCommand> = emptyList(),
     val attachmentDrafts: Map<String, List<dev.dshmobile.app.model.DraftAttachment>> = emptyMap(),
     @kotlinx.serialization.SerialName("answerDraftsByQuestion")
@@ -110,7 +111,7 @@ internal fun decodeStoredState(text: String): StoredState {
         if (safe["skip"] == JsonNull) safe.remove("skip")
         return JsonObject(safe + ("attachmentSources" to mobileJson.encodeToJsonElement(sources)))
     }
-    val fields = root.filterKeys { it !in setOf("drafts", "attachmentDrafts", "answerDrafts", "answerDraftsByQuestion", "possiblyUsedUploads", "uploadProtectionUntil") }.toMutableMap()
+    val fields = root.filterKeys { it !in setOf("drafts", "attachmentDrafts", "answerDrafts", "answerDraftsByQuestion", "possiblyUsedUploads", "uploadProtectionUntil", "notSentSessions") }.toMutableMap()
     fields["pending"]?.let { fields["pending"] = commandSources(it) }
     (fields["acceptedPrompts"] as? JsonArray)?.let { fields["acceptedPrompts"] = JsonArray(it.map(::commandSources)) }
     val core = JsonObject(fields)
@@ -130,11 +131,14 @@ internal fun decodeStoredState(text: String): StoredState {
     }.toMap()
     val until = (root["uploadProtectionUntil"] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull?.takeIf { it >= 0 } ?: 0
     return mobileJson.decodeFromJsonElement<StoredState>(core).copy(drafts = drafts, attachmentDrafts = attachments, answerDrafts = answers,
-        possiblyUsedUploads = protection, uploadProtectionUntil = until).sanitizeDrafts()
+        notSentSessions = (root["notSentSessions"] as? JsonArray).orEmpty().takeLast(64).mapNotNull {
+            (it as? JsonPrimitive)?.takeIf { value -> value.isString && validId(value.content) }?.content
+        }.toSet(), possiblyUsedUploads = protection, uploadProtectionUntil = until).sanitizeDrafts()
 }
 
 /** Draft corruption is local to that draft, never to the paired host or pending command. */
 internal fun StoredState.sanitizeDrafts(now: Long = System.currentTimeMillis()): StoredState = copy(
+    notSentSessions = notSentSessions.filter { validId(it) && it in drafts }.takeLast(64).toSet(),
     possiblyUsedUploads = possiblyUsedUploads.filter { validId(it.key) && it.value > now }.entries.toList().takeLast(1280).associate { it.toPair() },
     uploadProtectionUntil = maxOf(uploadProtectionUntil.takeIf { it > now } ?: 0,
         if (possiblyUsedUploads.count { validId(it.key) && it.value > now } > 1280) now + 600_000 else 0),

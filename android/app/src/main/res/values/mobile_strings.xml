@@ -218,4 +218,5 @@
     <string name="mobile_task_not_sent">The chat was created, but the task was not sent. The text is still in the message field — review it and send it yourself.</string>
     <string name="mobile_more_actions">More actions</string>
     <string name="mobile_loading">Loading</string>
+    <string name="mobile_send_not_sent">Not sent. Your draft is saved — try sending again.</string>
 </resources>

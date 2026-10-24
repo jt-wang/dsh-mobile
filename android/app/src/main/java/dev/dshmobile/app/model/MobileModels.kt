@@ -74,6 +74,8 @@ data class MobileState(
     val observingSession: Boolean = false,
     val draft: String = "",
     val pending: PendingCommand? = null,
+    /** Durable known-not-sent outcome for this chat's retained draft, not an outbox. */
+    val sendNotSent: Boolean = false,
     /** Host-admitted prompts awaiting a canonical USER record; these are not unresolved mutations. */
     val acceptedPrompts: List<PendingCommand> = emptyList(),
     val localPromptActions: LocalPromptActions? = null,

@@ -126,7 +126,7 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
             scrolledContainerColor = MaterialTheme.colorScheme.background)) },
         bottomBar = {
             Column {
-                ChatActivity(visibleState)
+                ChatActivity(visibleState, model.sendingSessionId == visibleState.snapshot?.session?.id && model.sendingSessionId != null)
                 Composer(visibleState, model, onCancel = { cancel = true }, onModels = { imagesNeeded = true; models = true; model.loadModels() })
             }
         }) { padding ->
@@ -214,17 +214,20 @@ internal fun ChatViewerOverlay(refs: List<AttachmentRef>, index: Int, cache: Ima
     }
 }
 
-/** Presentation-only optimism: a checked accepted prompt, not sending/pending/unknown delivery.
- * Never fabricates canonical running, a turn start time, or cancellation permission. */
+/** Checked accepted prompts can be optimistic working. In-flight local/host-pending sends
+ * only show neutral sending. Neither fabricates canonical running, timestamps or cancel authority. */
 @Composable
-internal fun ChatActivity(state: MobileState) {
+internal fun ChatActivity(state: MobileState, preparing: Boolean = false) {
     val snapshot = state.snapshot
     val accepted = state.connection == ConnectionState.ONLINE && !state.snapshotStale &&
         state.acceptedPrompts.any { it.sessionId == snapshot?.session?.id && it.status == "accepted" }
+    // Local in-flight is progress, NOT evidence of host admission or an agent turn.
+    val sending = state.pending?.let { it.kind == "send" && it.sessionId == snapshot?.session?.id && it.status in setOf("sending", "pending") } == true
     val activity = snapshot?.let {
         when {
             it.activity in listOf("running", "waiting") || (it.activity == "idle" && it.session.runningSubagents > 0) -> it
             it.activity == "idle" && accepted -> it.copy(activity = "running", activityDetail = null, messages = emptyList())
+            sending || (preparing && state.pending?.status !in setOf("uncertain", "rejected")) -> it.copy(activity = "sending", activityDetail = null, messages = emptyList())
             else -> null
         }
     }
@@ -250,8 +253,9 @@ private fun ActivityRow(snapshot: SessionSnapshot, answerable: Boolean = false) 
     Row(Modifier.fillMaxWidth().heightIn(min = 36.dp).padding(horizontal = 24.dp).testTag("activity_row").semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
         run {
-            if (snapshot.activity == "running" || (snapshot.activity == "idle" && snapshot.session.runningSubagents > 0)) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else StatusDot(LocalMobileColors.current.warningIndicator)
+            if (snapshot.activity in setOf("running", "sending") || (snapshot.activity == "idle" && snapshot.session.runningSubagents > 0)) Spinner(size = ControlSize.StatusGlyph, strokeWidth = ControlSize.StatusStroke) else StatusDot(LocalMobileColors.current.warningIndicator)
             Text(when {
+                snapshot.activity == "sending" -> stringResource(R.string.mobile_delivery_pending)
                 snapshot.activity == "idle" && snapshot.session.runningSubagents > 0 -> stringResource(R.string.mobile_subagents_activity, snapshot.session.runningSubagents)
                 snapshot.activity == "waiting" -> stringResource(if (answerable) R.string.mobile_waiting_answer else R.string.mobile_waiting_desktop)
                 snapshot.activityDetail == null -> when (elapsed) {

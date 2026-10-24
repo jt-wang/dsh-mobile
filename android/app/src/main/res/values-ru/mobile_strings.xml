@@ -220,4 +220,5 @@
     <string name="mobile_task_not_sent">Чат создан, но задача не отправлена. Текст остался в поле ввода — проверьте и отправьте сами.</string>
     <string name="mobile_more_actions">Другие действия</string>
     <string name="mobile_loading">Загрузка</string>
+    <string name="mobile_send_not_sent">Не отправлено. Черновик сохранён — повторите отправку.</string>
 </resources>

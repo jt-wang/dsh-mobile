@@ -53,7 +53,7 @@ class RepositoryTest {
         val deletedUploads = java.util.concurrent.CopyOnWriteArrayList<String>()
         var uploadCount = 0
         var failIndex = false
-        var stopServer: () -> Unit = {}
+        var stopServer: () -> Int = { 0 }
         var metadataDelayMs = 0L
         var metadataGate: (() -> Unit)? = null
         var events = { MockResponse().setHeader("Content-Type", "text/event-stream").setBody("event: snapshot\ndata: ${snapshot()}\n\n") }
@@ -823,8 +823,37 @@ class RepositoryTest {
             } finally { recreated.close() }
         }
     }
+    @Test fun `not sent notice survives encrypted JSON roundtrip and damaged optional notice is isolated`() {
+        val original = StoredState(selectedSessionId = "chat", drafts = mapOf("chat" to "Synthetic retained"), notSentSessions = setOf("chat"))
+        val restored = decodeStoredState(mobileJson.encodeToString(StoredState.serializer(), original))
+        assertEquals(setOf("chat"), restored.notSentSessions)
+        val damaged = decodeStoredState("""{"selectedSessionId":"chat","drafts":{"chat":"Synthetic retained"},"notSentSessions":{"bad":true}}""")
+        assertEquals("Synthetic retained", damaged.drafts["chat"])
+        assertTrue(damaged.notSentSessions.isEmpty())
+    }
+    @Test fun `preheader connection recovery retries bounded while backgrounded and admits exactly one POST`() = runBlocking {
+        var recover: (() -> Unit)? = null
+        withRepository(preHeaderRetryDelay = { attempt -> assertEquals(0, attempt); recover!!.invoke(); 0L }) { repo, store, fixture, scope ->
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":20}""") }
+            repo.updateDraft("Synthetic recovery")
+            store.gate = CompletableDeferred()
+            val send = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.sendMessage("Synthetic recovery") }
+            val port = fixture.stopServer()
+            val replacement = MockWebServer()
+            recover = { replacement.dispatcher = fixture; replacement.start(port) }
+            val stop = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.setForeground(false) }
+            try {
+                store.gate!!.complete(Unit); send.await(); stop.await()
+                assertNull(store.value.pending)
+                assertFalse(repo.state.value.sendNotSent)
+                assertEquals("accepted", store.value.acceptedPrompts.single().status)
+                assertEquals(1, fixture.mutations.size)
+            } finally { replacement.shutdown() }
+        }
+    }
     @Test fun `connection refused before headers is not sent and retains draft without an uncertain record`() = runBlocking {
-        withRepository { repo, store, fixture, scope ->
+        val attempts = mutableListOf<Int>()
+        withRepository(preHeaderRetryDelay = { attempts += it; 0L }) { repo, store, fixture, scope ->
             repo.updateDraft("Synthetic not sent")
             store.gate = CompletableDeferred()
             val send = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.sendMessage("Synthetic not sent") }
@@ -835,7 +864,24 @@ class RepositoryTest {
             assertTrue(fixture.mutations.isEmpty())
             assertNull(store.value.pending)
             assertEquals("offline_no_send", repo.state.value.error)
+            assertEquals(listOf(0, 1), attempts)
+            assertTrue(repo.state.value.sendNotSent)
             assertEquals("Synthetic not sent", repo.state.value.draft)
+        }
+    }
+    @Test fun `send refused by background admission retains explicit not sent across reconnect and restart`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            repo.updateDraft("Synthetic not admitted")
+            repo.setForeground(false)
+            repo.sendMessage("Synthetic not admitted")
+            assertTrue(repo.state.value.sendNotSent)
+            assertEquals("Synthetic not admitted", repo.state.value.draft)
+            repo.setForeground(true)
+            assertTrue(repo.state.value.sendNotSent)
+            repo.close()
+            val restored = NetworkMobileRepository(store, scope, true)
+            try { restored.restore(); assertTrue(restored.state.value.sendNotSent) } finally { restored.close() }
+            assertTrue(fixture.mutations.isEmpty())
         }
     }
     @Test fun `send accepted after Home while response is in flight is not cancelled`() = runBlocking {
@@ -1384,10 +1430,11 @@ class RepositoryTest {
         }
     }
     @Test fun `post send transport failure is uncertain and never replayed even with pending receipt`() = runBlocking {
-        withRepository { repo, _, fixture, _ ->
+        withRepository(preHeaderRetryDelay = { error("Post-header failures must never enter recovery") }) { repo, _, fixture, _ ->
             fixture.message = { MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) }
             fixture.receipt = { id -> json("""{"requestId":"$id","status":"pending","updatedAt":21}""") }
             repo.sendMessage("Synthetic lost response")
+            assertFalse(repo.state.value.sendNotSent)
             assertEquals("uncertain", repo.state.value.pending?.status)
             repo.resolvePending()
             assertEquals("uncertain", repo.state.value.pending?.status)
@@ -1436,15 +1483,15 @@ class RepositoryTest {
         }
     }
 
-    private suspend fun withRepository(now: () -> Long = System::currentTimeMillis, block: suspend (NetworkMobileRepository, MemoryStore, Fixture, CoroutineScope) -> Unit) {
+    private suspend fun withRepository(now: () -> Long = System::currentTimeMillis, preHeaderRetryDelay: (Int) -> Long = { 0L }, block: suspend (NetworkMobileRepository, MemoryStore, Fixture, CoroutineScope) -> Unit) {
         val scope = CoroutineScope(kotlin.coroutines.coroutineContext + SupervisorJob())
         val store = MemoryStore()
         val fixture = Fixture()
         MockWebServer().use { server ->
             server.dispatcher = fixture
             server.start()
-            fixture.stopServer = { server.shutdown() }
-            val repo = NetworkMobileRepository(store, scope, debug = true, now = now, openAttachment = { "test".byteInputStream() })
+            fixture.stopServer = { val port = server.port; server.shutdown(); port }
+            val repo = NetworkMobileRepository(store, scope, debug = true, now = now, preHeaderRetryDelay = preHeaderRetryDelay, openAttachment = { "test".byteInputStream() })
             try {
                 repo.setForeground(true)
                 // Bind the URL to this fixture's IPv4 listener, not localhost's unrelated IPv6 route.

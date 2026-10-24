@@ -20,6 +20,8 @@ interface MobileRepository {
     suspend fun createSession(workspaceId: String, presetId: String? = null, requestId: String = java.util.UUID.randomUUID().toString())
     suspend fun updateDraft(text: String)
     suspend fun sendMessage(text: String)
+    /** Refused local tap/preparation only: no network dispatch has been admitted. */
+    suspend fun markSendNotSent(sessionId: String, text: String) {}
     suspend fun sendMessage(text: String, delivery: String?, uploadIds: List<String>) { sendMessage(text) }
     suspend fun queueAction(itemId: String, action: String) {}
     suspend fun rename(title: String) {}

@@ -55,6 +55,27 @@ class Chat081UiTest {
         compose.runOnIdle { state = state.copy(acceptedPrompts = emptyList(), pending = PendingCommand("u", "send", "s", "Synthetic", "uncertain")) }
         compose.onNodeWithTag("activity_row").assertDoesNotExist()
     }
+    @Test fun `local sending and host pending show neutral process immediately not agent running`() {
+        var status by mutableStateOf("sending")
+        compose.setContent { MaterialTheme { ChatActivity(MobileState(connection = ConnectionState.ONLINE,
+            snapshot = SessionSnapshot(session, emptyList(), 1, false, "idle"),
+            pending = PendingCommand("p", "send", "s", "Synthetic", status))) } }
+        compose.onNodeWithTag("activity_row").assertExists()
+        compose.onNodeWithText(app.getString(R.string.mobile_delivery_pending)).assertExists()
+        compose.onNodeWithText(app.getString(R.string.mobile_agent_working)).assertDoesNotExist()
+        compose.runOnIdle { status = "pending" }
+        compose.onNodeWithText(app.getString(R.string.mobile_delivery_pending)).assertExists()
+        compose.runOnIdle { status = "uncertain" }
+        compose.onNodeWithTag("activity_row").assertDoesNotExist()
+    }
+    @Test fun `not sent stays visible offline and retry is an explicit action`() {
+        var retries = 0
+        compose.setContent { MaterialTheme { dev.dshmobile.app.ui.components.NotSentDelivery(true, true) { retries++ } } }
+        compose.onNodeWithTag("send_not_sent").assertExists()
+        compose.onNodeWithText(app.getString(R.string.mobile_send_not_sent)).assertExists()
+        compose.onNodeWithTag("retry_not_sent").performClick()
+        assertEquals(1, retries)
+    }
     @Test fun `sending and young pending are neutral but genuine uncertainty warns`() {
         var status by mutableStateOf("sending")
         compose.setContent { MaterialTheme {
