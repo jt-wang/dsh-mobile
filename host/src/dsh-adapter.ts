@@ -498,9 +498,18 @@ export class DshAdapter implements HostAdapter {
   private readonly historyFlights = new Map<string, HistoryFlight>();
   private readonly openingFlights = new Map<string, OpeningFlight>();
   private readonly disposeHistory: (() => void) | undefined;
-  private readonly evidenceScopes = new WeakMap<NotificationEvidence, { view: readonly WorkspaceConfig[]; revision: number }>();
+  private readonly evidenceScopes = new WeakMap<NotificationEvidence, { view: readonly WorkspaceConfig[]; revision: number; lifecycle: object }>();
   private evidenceRevision = 0;
-  private lifecycleRevision = 0;
+  private readonly lifecycles = new Map<string, object>();
+  private lifecycleToken(id: string): object {
+    let token = this.lifecycles.get(id);
+    if (!token) {
+      // Bounded invalidation registry; rotation fails closed for old tokens.
+      if (this.lifecycles.size >= 10000) this.lifecycles.clear();
+      token = {}; this.lifecycles.set(id, token);
+    }
+    return token;
+  }
   private readonly openingCapacity = new Set<() => void>();
   private readonly historyCapacity = new Set<() => void>();
   // Saturation is backpressure, not a failed authoritative read. Waiters are
@@ -515,7 +524,7 @@ export class DshAdapter implements HostAdapter {
     });
   }
   private releaseCapacity(waiters: Set<() => void>): void { for (const wake of [...waiters]) wake(); }
-  private checkLifecycle(revision: number): void { if (revision !== this.lifecycleRevision) throw new HostError('not_found'); }
+  private checkLifecycle(id: string, revision: object): void { if (revision !== this.lifecycles.get(id)) throw new HostError('not_found'); }
   private evictHistory(id: string): void {
     const entry = this.history.get(id);
     if (entry) { this.historyBytes -= entry.bytes; this.history.delete(id); }
@@ -533,32 +542,32 @@ export class DshAdapter implements HostAdapter {
   }
   constructor(options: DshAdapterOptions, source: WorkspaceSource) {
     this.options = options; this.source = source; this.upstreamVersion = options.dshVersion;
-    this.disposeHistory = options.events?.subscribeDisposed?.(id => { this.lifecycleRevision++; this.evidenceRevision++; this.evictHistory(id); const flight = this.historyFlights.get(id); if (flight) this.detachHistory(id, flight); const opening = this.openingFlights.get(id); if (opening) this.detachOpening(id, opening); });
+    this.disposeHistory = options.events?.subscribeDisposed?.(id => { this.lifecycles.delete(id); this.evictHistory(id); const flight = this.historyFlights.get(id); if (flight) this.detachHistory(id, flight); const opening = this.openingFlights.get(id); if (opening) this.detachOpening(id, opening); });
   }
   notifications(): NotificationSources | undefined {
     const subscribe = this.options.events?.subscribeNotifications;
     if (!subscribe) return undefined;
-    const bindings = new WeakMap<object, { view: readonly WorkspaceConfig[]; revision: number }>();
+    const bindings = new WeakMap<object, { view: readonly WorkspaceConfig[]; revision: object }>();
     return { subscribe, list: signal => this.listSessions(signal),
       ...(this.options.sessionHeader ? { lookup: async (id: string, signal: AbortSignal) => {
         // Header stat is membership authority, not a cached catalog or phone index.
         try {
-          const revision = this.lifecycleRevision;
+          const revision = this.lifecycleToken(id);
           const { workspaceId, view } = await this.pointScope(id, this.signal(signal));
-          this.checkLifecycle(revision);
+          this.checkLifecycle(id, revision);
           const listed = { id, workspaceId }; bindings.set(listed, { view, revision }); return listed;
         } catch (error) { if (error instanceof HostError && error.code === 'not_found') return undefined; throw error; }
       }, lookupCurrent: (listed: { id: string; workspaceId: string }) => {
         const binding = bindings.get(listed);
-        return !!binding && binding.revision === this.lifecycleRevision && !this.lifetime.signal.aborted && (!this.source.isCurrent || this.source.isCurrent(binding.view)) && !this.source.archivedSessionIds().has(listed.id);
+        return !!binding && binding.revision === this.lifecycles.get(listed.id) && !this.lifetime.signal.aborted && (!this.source.isCurrent || this.source.isCurrent(binding.view)) && !this.source.archivedSessionIds().has(listed.id);
       } } : {}), evidence: async (id, signal, listed) => {
-      const lifecycle = this.lifecycleRevision;
+      const lifecycle = this.lifecycleToken(id);
       const { transcript, view } = await this.open(id, this.signal(signal), undefined, listed ? { ...listed, running: listed.running ?? false, title: '', updatedAt: 0 } : undefined);
-      this.checkLifecycle(lifecycle);
-      const proof = transcript.notificationEvidence(); this.evidenceScopes.set(proof, { view, revision: this.evidenceRevision }); return proof;
+      this.checkLifecycle(id, lifecycle);
+      const proof = transcript.notificationEvidence(); this.evidenceScopes.set(proof, { view, revision: this.evidenceRevision, lifecycle }); return proof;
     }, evidenceCurrent: proof => {
       const binding = this.evidenceScopes.get(proof);
-      return !!binding && !this.lifetime.signal.aborted && binding.revision === this.evidenceRevision && (!this.source.isCurrent || this.source.isCurrent(binding.view)) && JSON.stringify(binding.view) === this.historyScope && !this.source.archivedSessionIds().has(proof.sessionId);
+      return !!binding && !this.lifetime.signal.aborted && binding.revision === this.evidenceRevision && binding.lifecycle === this.lifecycles.get(proof.sessionId) && (!this.source.isCurrent || this.source.isCurrent(binding.view)) && JSON.stringify(binding.view) === this.historyScope && !this.source.archivedSessionIds().has(proof.sessionId);
     } };
   }
   dispose(): void {
@@ -606,7 +615,7 @@ export class DshAdapter implements HostAdapter {
     return { id: row.sessionId, title: typeof row.projections?.values.title === 'string' ? row.projections.values.title : '', workspaceId: workspace.id, updatedAt: row.updatedAt, running: row.running, ...(typeof row.blank === 'boolean' ? { blank: row.blank } : {}), waitingForAnswer: questionsOf(record(row.projections?.values.userQuestions)?.active).length > 0 || (this.options.questionBridge?.pending(row.sessionId).length ?? 0) > 0, ...(row.projections?.values.modelSelection !== undefined ? { model: sessionModel(record(row.projections.values.modelSelection)?.next) } : {}) };
   }
   private async permitted(sessionId: string, signal: AbortSignal, expectedWorkspaceId?: string): Promise<{ row: DshSessionSummary; session: HostSession; view: readonly WorkspaceConfig[] }> {
-    const revision = this.lifecycleRevision;
+    const revision = this.lifecycleToken(sessionId);
     signal.throwIfAborted();
     const rows = await this.options.sessionController.list({}, signal);
     const row = rows.items.find((item) => item.sessionId === sessionId && item.origin !== 'subagent');
@@ -615,7 +624,7 @@ export class DshAdapter implements HostAdapter {
     signal.throwIfAborted();
     this.checkCurrent(view, sessionId);
     if (!row || !workspace || (expectedWorkspaceId !== undefined && workspace.id !== expectedWorkspaceId)) { this.evictHistory(sessionId); throw new HostError('not_found'); }
-    this.checkLifecycle(revision);
+    this.checkLifecycle(sessionId, revision);
     return { row, session: this.toSession(row, workspace), view };
   }
   async listPresets(signal: AbortSignal): Promise<Preset[]> {
@@ -652,13 +661,13 @@ export class DshAdapter implements HostAdapter {
   async sessionScope(sessionId: string, signal: AbortSignal): Promise<string> {
     return (await this.pointScope(sessionId, this.signal(signal))).workspaceId;
   }
-  private async pointScope(sessionId: string, active: AbortSignal): Promise<{ workspaceId: string; view: readonly WorkspaceConfig[]; revision: number }> {
-    const revision = this.lifecycleRevision;
+  private async pointScope(sessionId: string, active: AbortSignal): Promise<{ workspaceId: string; view: readonly WorkspaceConfig[]; revision: object }> {
+    const revision = this.lifecycleToken(sessionId);
     active.throwIfAborted();
     if (this.source.archivedSessionIds().has(sessionId)) throw new HostError('not_found');
     // Legacy controller-only compositions retain their original list authority;
     // the installed plugin supplies a fresh point stat, never a catalog scan.
-    if (!this.options.sessionHeader) { const { session, view } = await this.permitted(sessionId, active); this.checkLifecycle(revision); return { workspaceId: session.workspaceId, view, revision }; }
+    if (!this.options.sessionHeader) { const { session, view } = await this.permitted(sessionId, active); this.checkLifecycle(sessionId, revision); return { workspaceId: session.workspaceId, view, revision }; }
     const header = object(await this.options.sessionHeader(sessionId, active));
     active.throwIfAborted();
     if (!header || header.id !== sessionId || header.origin === 'subagent') throw new HostError('not_found');
@@ -666,7 +675,7 @@ export class DshAdapter implements HostAdapter {
     const workspace = await this.workspace(header.cwd, workspaces);
     active.throwIfAborted(); this.checkCurrent(view, sessionId);
     if (!workspace) throw new HostError('not_found');
-    this.checkLifecycle(revision);
+    this.checkLifecycle(sessionId, revision);
     return { workspaceId: workspace.id, view, revision };
   }
   async snapshot(sessionId: string, signal: AbortSignal): Promise<HostSnapshot> {
@@ -735,7 +744,7 @@ export class DshAdapter implements HostAdapter {
     return waiting;
   }
   private async open(sessionId: string, active: AbortSignal, expectedWorkspaceId?: string, listed?: HostSession): Promise<{ transcript: Transcript; view: readonly WorkspaceConfig[] }> {
-    const revision = this.lifecycleRevision;
+    const revision = this.lifecycleToken(sessionId);
     let session = listed ?? (!this.options.sessionStatus || expectedWorkspaceId !== undefined ? (await this.permitted(sessionId, active, expectedWorkspaceId)).session : undefined);
     // Mutations and legacy controller-only compositions keep their original
     // admission/cleanup ordering. Coalesced openings carry no scope bindings.
@@ -774,7 +783,7 @@ export class DshAdapter implements HostAdapter {
     if (transcript.needsHistory && !retentionCut) transcript = await this.recoverShared(session, frame, view, active);
     active.throwIfAborted(); this.checkCurrent(view, sessionId);
     const phone = new PhoneProjection(); if (!retentionCut) phone.open(frame); phoneProjections.set(transcript, phone);
-    this.checkLifecycle(revision);
+    this.checkLifecycle(sessionId, revision);
     return { transcript, view };
   }
   private joinHistory(id: string, flight: HistoryFlight, active: AbortSignal): Promise<void> {
@@ -1152,7 +1161,7 @@ export class DshAdapter implements HostAdapter {
     const authority = point ? await this.pointScope(sessionId, active) : undefined;
     const legacy = authority ? undefined : await this.permitted(sessionId, active, expectedWorkspaceId);
     const view = authority?.view ?? legacy!.view;
-    if (authority) this.checkLifecycle(authority.revision);
+    if (authority) this.checkLifecycle(sessionId, authority.revision);
     if (authority && authority.workspaceId !== expectedWorkspaceId) throw new HostError('not_found');
     active.throwIfAborted();
     this.checkCurrent(view, sessionId);

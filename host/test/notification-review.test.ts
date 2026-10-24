@@ -83,6 +83,19 @@ test('point lookup rejects disposal during its own async header read', async t =
   disposed('deleted'); gate.resolve(); assert.equal(await pending, undefined);
 });
 
+test('disposing an unrelated child does not invalidate an ordinary point authority', async t => {
+  const { dir, state } = setup(); let disposed!: (id: string) => void;
+  const adapter = await createDshAdapter({ dshVersion: '0.2.0-rc.2', workspaces: [{ id: 'alpha', name: 'Alpha', path: dir }],
+    sessionHeader: async id => ({ ...opening.header, id, cwd: dir }),
+    events: { subscribe() { return () => {}; }, subscribeDisposed(fn) { disposed = fn; return () => {}; }, subscribeNotifications() { return () => {}; } },
+    sessionController: { async list() { return { items: [] }; }, async *follow() {}, async page() {}, async projections() {}, async prompt() {}, async create() {}, cancel() {} },
+  });
+  t.after(() => { adapter.dispose(); state.close(); rmSync(dir, { recursive: true, force: true }); });
+  const source = adapter.notifications()!, listed = await source.lookup!('ordinary', new AbortController().signal);
+  disposed('unrelated-child'); assert.equal(source.lookupCurrent!(listed!), true);
+  disposed('ordinary'); assert.equal(source.lookupCurrent!(listed!), false);
+});
+
 test('opening cleanup cannot publish evidence from a disposed lifecycle', async t => {
   const { dir, state } = setup(), entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
   let disposed!: (id: string) => void;
