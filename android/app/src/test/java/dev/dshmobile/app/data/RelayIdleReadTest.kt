@@ -210,6 +210,15 @@ class RelayIdleReadTest {
         }
     }
 
+    @Test fun `TLS failure before application headers proves not sent`() = runBlocking {
+        withFixture { _, _, endpoint ->
+            val api = HostApi(endpoint.copy(pinSha256 = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="), "synthetic-only-device-bearer")
+            try {
+                try { runBlocking { api.command(StoredCommand("f072cf3d-40e0-43e6-93c4-b27bdb3b8877", "send", "synthetic-session", "Synthetic")) }; fail("Pin must reject") }
+                catch (failure: MobileFailure) { assertTrue(failure.requestNotSent); assertEquals("tls_failed", failure.key) }
+            } finally { runBlocking { api.closeAndAwait() } }
+        }
+    }
     @Test fun `HTTP followup retry cannot replay a mutation body`(): Unit = runBlocking {
         withFixture { host, _, endpoint ->
             val api = HostApi(endpoint, "synthetic-only-device-bearer")

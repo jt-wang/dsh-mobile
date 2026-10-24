@@ -53,6 +53,7 @@ class RepositoryTest {
         val deletedUploads = java.util.concurrent.CopyOnWriteArrayList<String>()
         var uploadCount = 0
         var failIndex = false
+        var stopServer: () -> Unit = {}
         var metadataDelayMs = 0L
         var metadataGate: (() -> Unit)? = null
         var events = { MockResponse().setHeader("Content-Type", "text/event-stream").setBody("event: snapshot\ndata: ${snapshot()}\n\n") }
@@ -822,6 +823,49 @@ class RepositoryTest {
             } finally { recreated.close() }
         }
     }
+    @Test fun `connection refused before headers is not sent and retains draft without an uncertain record`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            repo.updateDraft("Synthetic not sent")
+            store.gate = CompletableDeferred()
+            val send = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.sendMessage("Synthetic not sent") }
+            fixture.stopServer()
+            val stop = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.setForeground(false) }
+            store.gate!!.complete(Unit)
+            send.await(); stop.await()
+            assertTrue(fixture.mutations.isEmpty())
+            assertNull(store.value.pending)
+            assertEquals("offline_no_send", repo.state.value.error)
+            assertEquals("Synthetic not sent", repo.state.value.draft)
+        }
+    }
+    @Test fun `send accepted after Home while response is in flight is not cancelled`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            val entered = CompletableDeferred<Unit>(); val release = java.util.concurrent.CountDownLatch(1)
+            fixture.message = { entered.complete(Unit); release.await(5, TimeUnit.SECONDS); json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":20}""") }
+            val send = scope.async { repo.sendMessage("Synthetic in flight") }
+            withTimeout(2000) { entered.await() }
+            val stop = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.setForeground(false) }
+            release.countDown(); send.await(); stop.await()
+            assertNull(store.value.pending)
+            assertEquals("accepted", store.value.acceptedPrompts.single().status)
+            assertEquals(1, fixture.mutations.size)
+        }
+    }
+    @Test fun `send admitted before Home drains one POST even when background arrives during persistence`() = runBlocking {
+        withRepository { repo, store, fixture, scope ->
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"accepted","updatedAt":20}""") }
+            repo.updateDraft("Synthetic Home send")
+            store.gate = CompletableDeferred()
+            val send = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.sendMessage("Synthetic Home send") }
+            val stop = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.setForeground(false) }
+            store.gate!!.complete(Unit)
+            send.await(); stop.await()
+            assertEquals("Home must not cancel a durable send before POST", 1, fixture.mutations.size)
+            assertNull(store.value.pending)
+            assertEquals("accepted", store.value.acceptedPrompts.single().status)
+            assertEquals("", repo.state.value.draft)
+        }
+    }
     @Test fun `latest background intent wins queued stop start stop while a cancelled mutation holds admission`() = runBlocking {
         withRepository { repo, store, fixture, scope ->
             val requested = CompletableDeferred<Unit>()
@@ -836,6 +880,7 @@ class RepositoryTest {
             val latestStopped = scope.async(start = CoroutineStart.UNDISPATCHED) { repo.setForeground(false) }
             store.gate!!.complete(Unit)
             try {
+                releaseResponse.countDown() // Background no longer aborts the in-flight exchange.
                 send.await(); stopped.await(); staleStarted.await(); latestStopped.await()
                 assertEquals(dev.dshmobile.app.model.ConnectionState.OFFLINE, repo.state.value.connection)
                 assertEquals("uncertain", store.value.pending!!.status)
@@ -1308,6 +1353,19 @@ class RepositoryTest {
             assertTrue(body.contains("\"text\":\"\""))
         }
     }
+    @Test fun `pending receipt accepted becomes working within two seconds without waiting for snapshot`() = runBlocking {
+        withRepository { repo, _, fixture, scope ->
+            val release = java.util.concurrent.CountDownLatch(1)
+            fixture.message = { json("""{"requestId":"${requestId(it)}","status":"pending","updatedAt":20}""", 202) }
+            fixture.receipt = { id -> json("""{"requestId":"$id","status":"accepted","updatedAt":21}""") }
+            fixture.chatSnapshot = { release.await(5, TimeUnit.SECONDS); json(snapshot()) }
+            val send = scope.async { repo.sendMessage("Synthetic quick progress") }
+            try {
+                withTimeout(2000) { repo.state.first { it.pending == null && it.acceptedPrompts.isNotEmpty() } }
+                assertEquals(1, fixture.mutations.size)
+            } finally { release.countDown(); send.await() }
+        }
+    }
     @Test fun `normal pending send auto polls accepted without ever becoming uncertain`() = runBlocking {
         withRepository { repo, _, fixture, scope ->
             val statuses = CopyOnWriteArrayList<String>()
@@ -1385,6 +1443,7 @@ class RepositoryTest {
         MockWebServer().use { server ->
             server.dispatcher = fixture
             server.start()
+            fixture.stopServer = { server.shutdown() }
             val repo = NetworkMobileRepository(store, scope, debug = true, now = now, openAttachment = { "test".byteInputStream() })
             try {
                 repo.setForeground(true)

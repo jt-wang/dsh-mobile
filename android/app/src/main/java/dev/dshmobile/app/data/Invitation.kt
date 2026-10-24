@@ -9,7 +9,10 @@ import java.net.URI
 import java.util.Base64
 
 /** Stable, non-sensitive UI key only. Never wrap raw server or TLS exception text. */
-class MobileFailure(val key: String, val retryAfterMs: Long = 0) : Exception(key)
+class MobileFailure(val key: String, val retryAfterMs: Long = 0,
+    /** Transport proof only: no application request headers were attempted on any connection. */
+    val requestNotSent: Boolean = false,
+) : Exception(key)
 
 @Serializable
 data class HostEndpoint(

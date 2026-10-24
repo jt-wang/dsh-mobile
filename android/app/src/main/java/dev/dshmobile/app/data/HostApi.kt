@@ -78,7 +78,11 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
             // response (zero-idle eviction can close an HTTP2 exchange before body consumption).
             // GET/SSE reuse stays untouched. No recovery/replay is permitted for mutations.
             val mutationPool = if (request.method == "GET") null else okhttp3.ConnectionPool()
-            val callClient = mutationPool?.let { client.newBuilder().connectionPool(it).build() } ?: client
+            val headersAttempted = java.util.concurrent.atomic.AtomicBoolean()
+            val callClient = mutationPool?.let { pool -> client.newBuilder().connectionPool(pool)
+                .eventListener(object : okhttp3.EventListener() {
+                    override fun requestHeadersStart(call: Call) { headersAttempted.set(true) }
+                }).build() } ?: client
             val singleRequest = if (request.method == "GET" || request.body == null) request else {
                 val body = request.body!!
                 request.newBuilder().method(request.method, object : okhttp3.RequestBody() {
@@ -98,7 +102,8 @@ internal class HostApi(val endpoint: HostEndpoint, private val token: String? = 
                 if (request.method == "GET") traceReadFailure(headerEof, socketClosed, continuation.isActive, call.isCanceled(), retired.get())
                 if (continuation.isActive) continuation.resumeWithException(
                     if (recoverClosedRead && (headerEof || socketClosed) && !call.isCanceled() && !retired.get()) ReadConnectionClosed(call)
-                    else MobileFailure(if (e is SSLException) "tls_failed" else "network_unavailable"))
+                    else MobileFailure(if (e is SSLException) "tls_failed" else "network_unavailable",
+                        requestNotSent = mutationPool != null && !headersAttempted.get()))
             }
             override fun onResponse(call: Call, response: Response) {
                 try {

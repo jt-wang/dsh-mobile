@@ -32,6 +32,14 @@ fun createMobileRepository(context: Context, scope: CoroutineScope): MobileRepos
         historyStore = EncryptedHistoryStore(context.applicationContext), prefetchEnabled = true,
         openAttachment = { source -> context.contentResolver.openInputStream(android.net.Uri.parse(source.uri)) ?: throw java.io.IOException("unavailable") })
 
+/** One process owner prevents Activity recreation from restoring an in-flight command as unknown
+ * or racing two encrypted-state writers. Process death still recovers by receipt, never replay. */
+internal object ApplicationMobileRepository {
+    private val scope = CoroutineScope(kotlinx.coroutines.Dispatchers.Main.immediate + SupervisorJob())
+    private var repository: MobileRepository? = null
+    @Synchronized fun get(context: Context): MobileRepository = repository ?: createMobileRepository(context.applicationContext, scope).also { repository = it }
+}
+
 /**
  * The single admission lock covers persistence, dispatch and receipt recovery. Lifecycle changes
  * close observation synchronously, independent of a slow mutation. They NEVER cancel a host turn.
@@ -723,10 +731,17 @@ internal class NetworkMobileRepository(
             }
         }
     private suspend fun dispatch(command: StoredCommand, drafts: Map<String, String> = stored.drafts) {
+        // Capture a mutation-only transport BEFORE persistence can suspend. ON_STOP retires api
+        // (presentation GET/SSE), not this single bounded POST. No automatic replay on failure.
+        val host = stored.host ?: throw MobileFailure("not_paired")
+        val mutation = HostApi(host.endpoint, host.deviceToken)
+        try { dispatchOn(mutation, command, drafts) } finally { mutation.close() }
+    }
+    private suspend fun dispatchOn(mutation: HostApi, command: StoredCommand, drafts: Map<String, String>) {
         persist(stored.copy(pending = command, drafts = drafts))
         mutableState.value = state.value.copy(pending = command.presentation(), draft = draftFor(stored.selectedSessionId), busy = true, error = null)
         try {
-            val receipt = try { api().command(command) } catch (missing: MobileFailure) {
+            val receipt = try { mutation.command(command) } catch (missing: MobileFailure) {
                 if (missing.key != "upload_missing" || command.attachmentSources.size != command.uploadIds.orEmpty().size || command.attachmentSources.isEmpty()) throw missing
                 // Only an explicit pre-admission 404 authorizes this single automatic continuation.
                 // Keep the requestId; uncertain/lost responses never enter this branch.
@@ -741,11 +756,21 @@ internal class NetworkMobileRepository(
                 val mapping = sources.associateBy { it.localId }
                 val attachments = stored.attachmentDrafts[command.sessionId].orEmpty().map { mapping[it.localId] ?: it }
                 persist(stored.copy(pending = refreshed, attachmentDrafts = stored.attachmentDrafts + (command.sessionId to attachments)))
-                api().command(refreshed)
+                mutation.command(refreshed)
             }
             applyReceipt(receipt)
-            reloadCommandSnapshot(command)
+            // A pending receipt has its own short read-only polling budget. A potentially
+            // 15-second transcript GET must not hold admission ahead of the first receipt GET.
+            if (stored.pending?.status != "pending") reloadCommandSnapshot(command)
         } catch (failure: MobileFailure) {
+            if (failure.requestNotSent) {
+                // Only transport evidence BEFORE requestHeadersStart permits this classification.
+                // Missing receipts, timeouts after headers, and lost responses remain uncertain.
+                persist(stored.copy(pending = null))
+                fail(failure.key)
+                mutableState.value = state.value.copy(error = "offline_no_send", busy = false)
+                return
+            }
             if (failure.key == "upload_missing") {
                 persist(stored.copy(pending = null))
                 mutableState.value = state.value.copy(error = "attachment_unavailable", busy = false)
@@ -772,6 +797,7 @@ internal class NetworkMobileRepository(
         if (foreground && state.value.connection == ConnectionState.ONLINE) startObserver()
     }
     private suspend fun reloadCommandSnapshot(command: StoredCommand) {
+        if (!foreground || !desiredForeground || closed) return
         val target = if (command.kind == "create") stored.selectedSessionId else command.sessionId
         if (target != null) {
             val snapshot = api().snapshot(target)
@@ -923,8 +949,9 @@ internal class NetworkMobileRepository(
                         val current = stored.pending
                         if (!foreground || current?.requestId != command.requestId || current.status != "pending") settled = true
                         else {
-                            resolveLocked(reloadSnapshot = true)
+                            resolveLocked(reloadSnapshot = false)
                             settled = stored.pending?.requestId != command.requestId || stored.pending?.status != "pending"
+                            if (settled) reloadCommandSnapshot(command)
                         }
                     }
                     if (settled) return@withTimeoutOrNull

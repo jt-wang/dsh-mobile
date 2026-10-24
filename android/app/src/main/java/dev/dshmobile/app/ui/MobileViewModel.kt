@@ -7,7 +7,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import dev.dshmobile.app.data.createMobileRepository
 import dev.dshmobile.app.ui.pairing.PairingInput
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
@@ -17,9 +16,15 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class MobileViewModel @JvmOverloads constructor(application: Application,
-    repositoryFactory: (kotlinx.coroutines.CoroutineScope) -> dev.dshmobile.app.data.MobileRepository = { createMobileRepository(application, it) },
+    repositoryFactory: ((kotlinx.coroutines.CoroutineScope) -> dev.dshmobile.app.data.MobileRepository)? = null,
 ) : AndroidViewModel(application) {
-    private val repository = repositoryFactory(viewModelScope)
+    // Explicitly admitted sends belong to the process, not Activity/ViewModel cancellation.
+    // This bounded owner is retired after its last send drains when the ViewModel is cleared.
+    private val sendScope = kotlinx.coroutines.CoroutineScope(viewModelScope.coroutineContext + kotlinx.coroutines.SupervisorJob())
+    private var admittedSend: kotlinx.coroutines.Job? = null
+    private var cleared = false
+    private val ownsRepository = repositoryFactory != null
+    private val repository = repositoryFactory?.invoke(sendScope) ?: dev.dshmobile.app.data.ApplicationMobileRepository.get(application)
     val state = repository.state
     internal val phone = dev.dshmobile.app.ui.chat.PhoneEditor(application, repository, viewModelScope)
     var modelCatalog by mutableStateOf<dev.dshmobile.app.model.ModelCatalog?>(null); private set
@@ -91,7 +96,9 @@ class MobileViewModel @JvmOverloads constructor(application: Application,
                 val continuation = firstTaskContinuation
                 if (continuation != null && accepted?.requestId == continuation.requestId && !current.busy && current.pending == null &&
                     current.snapshot?.session?.id == accepted.sessionId && !current.snapshotStale) {
-                    editorActions.withLock { continueFirstTask(continuation, accepted.sessionId) }
+                    admittedSend = sendScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                        editorActions.withLock { continueFirstTask(continuation, accepted.sessionId) }
+                    }
                 }
             }
         }
@@ -231,7 +238,7 @@ class MobileViewModel @JvmOverloads constructor(application: Application,
         if (origin != editorSessionId) return
         val text = editorDraft // Exact visible text, not a possibly delayed repository draft.
         interactionBlocked = true // Navigation cannot retarget an admitted send.
-        viewModelScope.launch {
+        admittedSend = sendScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             try {
                 editorActions.withLock {
                     if (state.value.snapshot?.session?.id == origin && phone.prepareSend(origin, attachments.map { it.attachment.localId })) {
@@ -240,7 +247,7 @@ class MobileViewModel @JvmOverloads constructor(application: Application,
                         repository.sendMessage(text, delivery, phone.inSession(origin).mapNotNull { it.attachment.uploadId })
                         if (dev.dshmobile.app.ui.chat.sendWasAccepted(before, state.value, text) || (state.value.pending == null && state.value.error == null && attachments.isNotEmpty())) {
                             phone.restore(state.value)
-                            onAccepted()
+                            if (!cleared) onAccepted()
                         }
                     }
                 }
@@ -336,7 +343,16 @@ class MobileViewModel @JvmOverloads constructor(application: Application,
         viewModelScope.launch { repository.setForeground(active) }
     }
     override fun onCleared() {
-        repository.close() // Observation only. Never cancels a host task.
+        cleared = true
+        sendScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            try {
+                repository.setForeground(false) // Retire presentation reads, never the admitted POST.
+                admittedSend?.join()
+            } finally {
+                if (ownsRepository) repository.close()
+                sendScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            }
+        }
         super.onCleared()
     }
 }
