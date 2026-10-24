@@ -210,7 +210,7 @@ After scanning, confirm a new device in `devices`; do not print its bearer token
 
 1. More than one registered project appears in the expected sidebar order; the current workspace/session is not replaced with a mock fixture.
 2. The phone can read an existing approved session. Add/rename a test project on the desktop: it appears without re-pairing/reloading. Archived sessions stay hidden; missing directories stay omitted.
-3. If execution was approved, create one synthetic conversation, send a harmless prompt, observe provisional output become the authoritative final text, and stop with the current observation. With host plugin 0.7.0 or later (current release: 0.7.1), agent questions can be answered or skipped from the phone; approvals still require the desktop, and the phone must not pretend a pending approval is idle.
+3. If execution was approved, create one synthetic conversation, send a harmless prompt, observe provisional output become the authoritative final text, and stop with the current observation. With host plugin 0.7.0 or later (current release: 0.7.2), agent questions can be answered or skipped from the phone; approvals still require the desktop, and the phone must not pretend a pending approval is idle.
 4. Disconnect/reconnect while work runs: desktop execution continues; reconnect replaces history with an authoritative snapshot. Do not automatically resend an uncertain command with a new request ID.
 5. For Tailscale, repeat on mobile data with the LAN disconnected. A local unit test or canary is **not** physical-phone/network acceptance.
 
