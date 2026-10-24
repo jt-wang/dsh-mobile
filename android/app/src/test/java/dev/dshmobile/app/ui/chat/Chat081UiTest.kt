@@ -42,6 +42,19 @@ class Chat081UiTest {
         compose.onNodeWithTag("prompt_attachments_p").assertTextEquals(app.getString(R.string.mobile_prompt_attachments, 2))
     }
 
+    @Test fun `accepted idle prompt shows working immediately without transcript but queued and uncertain do not`() {
+        var state by mutableStateOf(MobileState(connection = ConnectionState.ONLINE,
+            snapshot = SessionSnapshot(session, emptyList(), 1, false, "idle")))
+        compose.setContent { MaterialTheme { ChatActivity(state) } }
+        compose.onNodeWithTag("activity_row").assertDoesNotExist()
+        compose.runOnIdle { state = state.copy(acceptedPrompts = listOf(PendingCommand("p", "send", "s", "Synthetic", "accepted"))) }
+        compose.onNodeWithTag("activity_row").assertExists()
+        compose.onNodeWithText(app.getString(R.string.mobile_agent_working)).assertExists()
+        compose.runOnIdle { state = state.copy(acceptedPrompts = state.acceptedPrompts.map { it.copy(status = "queued") }) }
+        compose.onNodeWithTag("activity_row").assertDoesNotExist()
+        compose.runOnIdle { state = state.copy(acceptedPrompts = emptyList(), pending = PendingCommand("u", "send", "s", "Synthetic", "uncertain")) }
+        compose.onNodeWithTag("activity_row").assertDoesNotExist()
+    }
     @Test fun `sending and young pending are neutral but genuine uncertainty warns`() {
         var status by mutableStateOf("sending")
         compose.setContent { MaterialTheme {

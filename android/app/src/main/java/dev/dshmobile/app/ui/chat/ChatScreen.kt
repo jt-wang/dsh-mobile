@@ -126,13 +126,7 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
             scrolledContainerColor = MaterialTheme.colorScheme.background)) },
         bottomBar = {
             Column {
-                val activity = snapshot?.takeIf { it.activity in listOf("running", "waiting") || (it.activity == "idle" && it.session.runningSubagents > 0) }
-                // The row rises out of the composer and folds back into it; while leaving it keeps its last words.
-                val heldActivity = remember { arrayOfNulls<SessionSnapshot>(1) }
-                if (activity != null) heldActivity[0] = activity
-                AnimatedVisibility(activity != null, enter = Motion.riseIn(motion), exit = Motion.riseOut(motion), label = "activity row") {
-                    heldActivity[0]?.let { ActivityRow(it, state.capabilities?.questions == true && it.pendingQuestions.isNotEmpty()) }
-                }
+                ChatActivity(visibleState)
                 Composer(visibleState, model, onCancel = { cancel = true }, onModels = { imagesNeeded = true; models = true; model.loadModels() })
             }
         }) { padding ->
@@ -217,6 +211,28 @@ internal fun ChatScreen(state: MobileState, model: MobileViewModel, requestedSes
 internal fun ChatViewerOverlay(refs: List<AttachmentRef>, index: Int, cache: ImageMemoryCache, timestamp: Long? = null, onClose: () -> Unit) {
     androidx.compose.ui.window.Dialog(onDismissRequest = onClose, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         ImageViewer(refs, index, cache, timestamp, onClose)
+    }
+}
+
+/** Presentation-only optimism: a checked accepted prompt, not sending/pending/unknown delivery.
+ * Never fabricates canonical running, a turn start time, or cancellation permission. */
+@Composable
+internal fun ChatActivity(state: MobileState) {
+    val snapshot = state.snapshot
+    val accepted = state.connection == ConnectionState.ONLINE && !state.snapshotStale &&
+        state.acceptedPrompts.any { it.sessionId == snapshot?.session?.id && it.status == "accepted" }
+    val activity = snapshot?.let {
+        when {
+            it.activity in listOf("running", "waiting") || (it.activity == "idle" && it.session.runningSubagents > 0) -> it
+            it.activity == "idle" && accepted -> it.copy(activity = "running", activityDetail = null, messages = emptyList())
+            else -> null
+        }
+    }
+    val held = remember(snapshot?.session?.id) { arrayOfNulls<SessionSnapshot>(1) }
+    if (activity != null) held[0] = activity
+    val motion = motionEnabled
+    AnimatedVisibility(activity != null, enter = Motion.riseIn(motion), exit = Motion.riseOut(motion), label = "activity row") {
+        held[0]?.let { ActivityRow(it, state.capabilities?.questions == true && it.pendingQuestions.isNotEmpty()) }
     }
 }
 
