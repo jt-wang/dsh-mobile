@@ -481,7 +481,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       if (working) { dirty = true; return; }
       working = true; dirty = false;
       try {
-        const page = await notifications!.page(deviceId, cursor, 100);
+        const page = await notifications!.page(deviceId, cursor, 100, signal);
         signal.throwIfAborted(); if (closed) return;
         if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
         if (first || page.items.length || page.resetRequired || page.hasMore || page.coverage !== lastCoverage) {
@@ -592,7 +592,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       }
       const raw = url.searchParams.get('limit') ?? '50';
       if (!/^[1-9][0-9]{0,2}$/.test(raw) || Number(raw) > 100) throw new HostError('invalid_request');
-      sendJson(res, 200, await notifications.page(device.deviceId, after, Number(raw))); return;
+      sendJson(res, 200, await notifications.page(device.deviceId, after, Number(raw), signal)); return;
     }
     if (req.method === 'GET' && url.pathname === '/v1/workspaces') {
       const workspaces = await workspaceSource.list(); signal.throwIfAborted();

@@ -173,8 +173,11 @@ test('coalesced openings enforce sixty-four waiters and sixteen active-session s
   const many = new AbortController();
   const sessions = Array.from({ length: 16 }, (_, i) => adapter.snapshot(`held-${i}`, many.signal));
   const stopped = sessions.map(session => assert.rejects(session, { name: 'AbortError' }));
-  await assert.rejects(adapter.snapshot('overflow', many.signal), { code: 'unavailable' });
-  assert.equal(openings, 17); many.abort(); await Promise.all(stopped);
+  const overflow = adapter.snapshot('overflow', many.signal);
+  stopped.push(assert.rejects(overflow, { name: 'AbortError' }));
+  assert.equal(openings, 17, 'the seventeenth session waits without opening upstream');
+  many.abort(); await Promise.all(stopped);
+  assert.equal(openings, 17, 'an aborted capacity waiter never starts an opening');
 });
 
 test('coalescing never shares authorization bindings across a changed registry provider or retargeted cwd', async t => {

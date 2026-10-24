@@ -500,12 +500,29 @@ export class DshAdapter implements HostAdapter {
   private readonly disposeHistory: (() => void) | undefined;
   private readonly evidenceScopes = new WeakMap<NotificationEvidence, { view: readonly WorkspaceConfig[]; revision: number }>();
   private evidenceRevision = 0;
+  private lifecycleRevision = 0;
+  private readonly openingCapacity = new Set<() => void>();
+  private readonly historyCapacity = new Set<() => void>();
+  // Saturation is backpressure, not a failed authoritative read. Waiters are
+  // bounded, abortable and wake only when a flight releases capacity.
+  private waitCapacity(waiters: Set<() => void>, active: AbortSignal): Promise<void> {
+    active.throwIfAborted();
+    if (waiters.size >= 512) throw new HostError('unavailable');
+    return new Promise((resolve, reject) => {
+      const wake = () => { waiters.delete(wake); active.removeEventListener('abort', abort); resolve(); };
+      const abort = () => { waiters.delete(wake); active.removeEventListener('abort', abort); reject(active.reason); };
+      waiters.add(wake); active.addEventListener('abort', abort, { once: true });
+    });
+  }
+  private releaseCapacity(waiters: Set<() => void>): void { for (const wake of [...waiters]) wake(); }
+  private checkLifecycle(revision: number): void { if (revision !== this.lifecycleRevision) throw new HostError('not_found'); }
   private evictHistory(id: string): void {
     const entry = this.history.get(id);
     if (entry) { this.historyBytes -= entry.bytes; this.history.delete(id); }
   }
   private detachHistory(id: string, flight: HistoryFlight): void {
     if (this.historyFlights.get(id) === flight) this.historyFlights.delete(id);
+    this.releaseCapacity(this.historyCapacity);
     flight.controller.abort(); // Late upstream settlement cannot admit cache or remove a replacement flight.
     for (const waiter of [...flight.waiters]) waiter({ reason: flight.controller.signal.reason });
   }
@@ -516,24 +533,28 @@ export class DshAdapter implements HostAdapter {
   }
   constructor(options: DshAdapterOptions, source: WorkspaceSource) {
     this.options = options; this.source = source; this.upstreamVersion = options.dshVersion;
-    this.disposeHistory = options.events?.subscribeDisposed?.(id => { this.evidenceRevision++; this.evictHistory(id); const flight = this.historyFlights.get(id); if (flight) this.detachHistory(id, flight); const opening = this.openingFlights.get(id); if (opening) this.detachOpening(id, opening); });
+    this.disposeHistory = options.events?.subscribeDisposed?.(id => { this.lifecycleRevision++; this.evidenceRevision++; this.evictHistory(id); const flight = this.historyFlights.get(id); if (flight) this.detachHistory(id, flight); const opening = this.openingFlights.get(id); if (opening) this.detachOpening(id, opening); });
   }
   notifications(): NotificationSources | undefined {
     const subscribe = this.options.events?.subscribeNotifications;
     if (!subscribe) return undefined;
-    const bindings = new WeakMap<object, readonly WorkspaceConfig[]>();
+    const bindings = new WeakMap<object, { view: readonly WorkspaceConfig[]; revision: number }>();
     return { subscribe, list: signal => this.listSessions(signal),
       ...(this.options.sessionHeader ? { lookup: async (id: string, signal: AbortSignal) => {
         // Header stat is membership authority, not a cached catalog or phone index.
         try {
+          const revision = this.lifecycleRevision;
           const { workspaceId, view } = await this.pointScope(id, this.signal(signal));
-          const listed = { id, workspaceId }; bindings.set(listed, view); return listed;
+          this.checkLifecycle(revision);
+          const listed = { id, workspaceId }; bindings.set(listed, { view, revision }); return listed;
         } catch (error) { if (error instanceof HostError && error.code === 'not_found') return undefined; throw error; }
       }, lookupCurrent: (listed: { id: string; workspaceId: string }) => {
-        const view = bindings.get(listed);
-        return !!view && !this.lifetime.signal.aborted && (!this.source.isCurrent || this.source.isCurrent(view)) && !this.source.archivedSessionIds().has(listed.id);
+        const binding = bindings.get(listed);
+        return !!binding && binding.revision === this.lifecycleRevision && !this.lifetime.signal.aborted && (!this.source.isCurrent || this.source.isCurrent(binding.view)) && !this.source.archivedSessionIds().has(listed.id);
       } } : {}), evidence: async (id, signal, listed) => {
+      const lifecycle = this.lifecycleRevision;
       const { transcript, view } = await this.open(id, this.signal(signal), undefined, listed ? { ...listed, running: listed.running ?? false, title: '', updatedAt: 0 } : undefined);
+      this.checkLifecycle(lifecycle);
       const proof = transcript.notificationEvidence(); this.evidenceScopes.set(proof, { view, revision: this.evidenceRevision }); return proof;
     }, evidenceCurrent: proof => {
       const binding = this.evidenceScopes.get(proof);
@@ -585,6 +606,7 @@ export class DshAdapter implements HostAdapter {
     return { id: row.sessionId, title: typeof row.projections?.values.title === 'string' ? row.projections.values.title : '', workspaceId: workspace.id, updatedAt: row.updatedAt, running: row.running, ...(typeof row.blank === 'boolean' ? { blank: row.blank } : {}), waitingForAnswer: questionsOf(record(row.projections?.values.userQuestions)?.active).length > 0 || (this.options.questionBridge?.pending(row.sessionId).length ?? 0) > 0, ...(row.projections?.values.modelSelection !== undefined ? { model: sessionModel(record(row.projections.values.modelSelection)?.next) } : {}) };
   }
   private async permitted(sessionId: string, signal: AbortSignal, expectedWorkspaceId?: string): Promise<{ row: DshSessionSummary; session: HostSession; view: readonly WorkspaceConfig[] }> {
+    const revision = this.lifecycleRevision;
     signal.throwIfAborted();
     const rows = await this.options.sessionController.list({}, signal);
     const row = rows.items.find((item) => item.sessionId === sessionId && item.origin !== 'subagent');
@@ -593,6 +615,7 @@ export class DshAdapter implements HostAdapter {
     signal.throwIfAborted();
     this.checkCurrent(view, sessionId);
     if (!row || !workspace || (expectedWorkspaceId !== undefined && workspace.id !== expectedWorkspaceId)) { this.evictHistory(sessionId); throw new HostError('not_found'); }
+    this.checkLifecycle(revision);
     return { row, session: this.toSession(row, workspace), view };
   }
   async listPresets(signal: AbortSignal): Promise<Preset[]> {
@@ -629,12 +652,13 @@ export class DshAdapter implements HostAdapter {
   async sessionScope(sessionId: string, signal: AbortSignal): Promise<string> {
     return (await this.pointScope(sessionId, this.signal(signal))).workspaceId;
   }
-  private async pointScope(sessionId: string, active: AbortSignal): Promise<{ workspaceId: string; view: readonly WorkspaceConfig[] }> {
+  private async pointScope(sessionId: string, active: AbortSignal): Promise<{ workspaceId: string; view: readonly WorkspaceConfig[]; revision: number }> {
+    const revision = this.lifecycleRevision;
     active.throwIfAborted();
     if (this.source.archivedSessionIds().has(sessionId)) throw new HostError('not_found');
     // Legacy controller-only compositions retain their original list authority;
     // the installed plugin supplies a fresh point stat, never a catalog scan.
-    if (!this.options.sessionHeader) { const { session, view } = await this.permitted(sessionId, active); return { workspaceId: session.workspaceId, view }; }
+    if (!this.options.sessionHeader) { const { session, view } = await this.permitted(sessionId, active); this.checkLifecycle(revision); return { workspaceId: session.workspaceId, view, revision }; }
     const header = object(await this.options.sessionHeader(sessionId, active));
     active.throwIfAborted();
     if (!header || header.id !== sessionId || header.origin === 'subagent') throw new HostError('not_found');
@@ -642,7 +666,8 @@ export class DshAdapter implements HostAdapter {
     const workspace = await this.workspace(header.cwd, workspaces);
     active.throwIfAborted(); this.checkCurrent(view, sessionId);
     if (!workspace) throw new HostError('not_found');
-    return { workspaceId: workspace.id, view };
+    this.checkLifecycle(revision);
+    return { workspaceId: workspace.id, view, revision };
   }
   async snapshot(sessionId: string, signal: AbortSignal): Promise<HostSnapshot> {
     const { transcript, view } = await this.open(sessionId, this.signal(signal));
@@ -651,6 +676,7 @@ export class DshAdapter implements HostAdapter {
   }
   private detachOpening(id: string, flight: OpeningFlight): void {
     if (this.openingFlights.get(id) === flight) this.openingFlights.delete(id);
+    this.releaseCapacity(this.openingCapacity);
     flight.controller.abort();
     for (const waiter of [...flight.waiters]) waiter(undefined, { reason: flight.controller.signal.reason });
   }
@@ -674,12 +700,14 @@ export class DshAdapter implements HostAdapter {
       cleanup.abort(); await iterator.return?.();
     }
   }
-  private opening(sessionId: string, active: AbortSignal): Promise<Record<string, unknown>> {
+  private async opening(sessionId: string, active: AbortSignal): Promise<Record<string, unknown>> {
     active.throwIfAborted();
+    while (!this.openingFlights.has(sessionId) && this.openingFlights.size >= MAX_HISTORY_CACHE_ENTRIES) {
+      await this.waitCapacity(this.openingCapacity, active); active.throwIfAborted();
+    }
     let flight = this.openingFlights.get(sessionId);
     const fresh = !flight;
     if (!flight) {
-      if (this.openingFlights.size >= MAX_HISTORY_CACHE_ENTRIES) throw new HostError('unavailable');
       flight = { controller: new AbortController(), waiters: new Set() };
       this.openingFlights.set(sessionId, flight);
     }
@@ -699,6 +727,7 @@ export class DshAdapter implements HostAdapter {
       const finish = (frame?: Record<string, unknown>, error?: { reason: unknown }) => {
         if (this.openingFlights.get(sessionId) !== owned) return;
         this.openingFlights.delete(sessionId);
+        this.releaseCapacity(this.openingCapacity);
         for (const waiter of [...owned.waiters]) waiter(frame, error);
       };
       void this.readOpening(sessionId, this.signal(owned.controller.signal)).then(frame => finish(frame), reason => finish(undefined, { reason }));
@@ -706,6 +735,7 @@ export class DshAdapter implements HostAdapter {
     return waiting;
   }
   private async open(sessionId: string, active: AbortSignal, expectedWorkspaceId?: string, listed?: HostSession): Promise<{ transcript: Transcript; view: readonly WorkspaceConfig[] }> {
+    const revision = this.lifecycleRevision;
     let session = listed ?? (!this.options.sessionStatus || expectedWorkspaceId !== undefined ? (await this.permitted(sessionId, active, expectedWorkspaceId)).session : undefined);
     // Mutations and legacy controller-only compositions keep their original
     // admission/cleanup ordering. Coalesced openings carry no scope bindings.
@@ -744,6 +774,7 @@ export class DshAdapter implements HostAdapter {
     if (transcript.needsHistory && !retentionCut) transcript = await this.recoverShared(session, frame, view, active);
     active.throwIfAborted(); this.checkCurrent(view, sessionId);
     const phone = new PhoneProjection(); if (!retentionCut) phone.open(frame); phoneProjections.set(transcript, phone);
+    this.checkLifecycle(revision);
     return { transcript, view };
   }
   private joinHistory(id: string, flight: HistoryFlight, active: AbortSignal): Promise<void> {
@@ -766,12 +797,14 @@ export class DshAdapter implements HostAdapter {
     // Callers keep their own opening/projections. Only immutable ancestry work is shared.
     for (;;) {
       const current = this.historyFlights.get(session.id);
-      if (!current) break;
+      if (!current) {
+        if (this.historyFlights.size < MAX_HISTORY_CACHE_ENTRIES) break;
+        await this.waitCapacity(this.historyCapacity, active); active.throwIfAborted(); this.checkCurrent(view, session.id); continue;
+      }
       if (current.controller.signal.aborted) { this.detachHistory(session.id, current); continue; }
       await this.joinHistory(session.id, current, active); active.throwIfAborted(); this.checkCurrent(view, session.id);
     }
     active.throwIfAborted(); this.checkCurrent(view, session.id);
-    if (this.historyFlights.size >= MAX_HISTORY_CACHE_ENTRIES) throw new HostError('unavailable');
     const flight: HistoryFlight = { controller: new AbortController(), waiters: new Set(), view };
     this.historyFlights.set(session.id, flight);
     const waiting = this.joinHistory(session.id, flight, active);
@@ -779,6 +812,7 @@ export class DshAdapter implements HostAdapter {
     const finish = (error?: { reason: unknown }) => {
       if (this.historyFlights.get(session.id) !== flight) return;
       this.historyFlights.delete(session.id);
+      this.releaseCapacity(this.historyCapacity);
       for (const waiter of [...flight.waiters]) waiter(error);
     };
     // One completion handler per flight, not per waiter; aborted waiters release registrations immediately.
@@ -1118,6 +1152,7 @@ export class DshAdapter implements HostAdapter {
     const authority = point ? await this.pointScope(sessionId, active) : undefined;
     const legacy = authority ? undefined : await this.permitted(sessionId, active, expectedWorkspaceId);
     const view = authority?.view ?? legacy!.view;
+    if (authority) this.checkLifecycle(authority.revision);
     if (authority && authority.workspaceId !== expectedWorkspaceId) throw new HostError('not_found');
     active.throwIfAborted();
     this.checkCurrent(view, sessionId);

@@ -133,6 +133,7 @@ test('notification heartbeat and revoke remain responsive while a page lookup is
   adapter.notifications = () => ({ subscribe() { return () => {}; }, list: async () => { if (hold) { entered.resolve(); await gate.promise; } return adapter.listSessions(); },
     evidence: async () => ({ sessionId: 's-alpha', workspaceId: 'alpha', cursor: 0, pending: false, completed: [] }) });
   const { host, request, pair } = await setup(t, adapter), { deviceId, deviceToken } = await pair();
+  await request('/notification-settings', deviceToken, 'PUT', { expectedRevision: 0, enabled: true, projects: [], chats: [] });
   const response = await request('/notification-events/stream', deviceToken), reader = response.body!.getReader();
   try {
     await reader.read(); hold = true;
@@ -146,6 +147,32 @@ test('notification heartbeat and revoke remain responsive while a page lookup is
     assert.match(frame, /: heartbeat/, 'an awaited page must not starve liveness');
     host.state.revokeDevice(deviceId);
   } finally { gate.resolve(); await reader.cancel(); }
+});
+
+test('disable last notification device returns HTTP reset and sends reset on its existing SSE', { timeout: 10000 }, async t => {
+  const adapter = new TestAdapter(); let listener!: (id: string, event: import('../src/notifications.ts').NotificationSource) => void;
+  // Use a legacy signal-aware catalog: it reproduced the same poisoned signal.
+  const source = { subscribe(fn: any) { listener = fn; return () => {}; },
+    async list(signal: AbortSignal) { signal.throwIfAborted(); return adapter.listSessions(); },
+    async evidence(id: string) { return { sessionId: id, workspaceId: 'alpha', cursor: 0, pending: true, completed: [] }; },
+  };
+  adapter.notifications = () => source as any;
+  const { request, pair } = await setup(t, adapter), { deviceToken } = await pair();
+  await request('/notification-settings', deviceToken, 'PUT', { expectedRevision: 0, enabled: true, projects: [], chats: [] });
+  listener('s-alpha', { seq: 0, type: 'tool/call', time: Date.now() });
+  // Admit the pending proof before opening the stream.
+  let initial: any;
+  for (let i = 0; i < 20; i++) { initial = await (await request('/notification-events', deviceToken)).json(); if (initial.pending.length) break; await new Promise(resolve => setImmediate(resolve)); }
+  assert.equal(initial.pending.length, 1);
+  const stream = await request('/notification-events/stream', deviceToken), reader = stream.body!.getReader();
+  try {
+    assert.match(new TextDecoder().decode((await reader.read()).value), /notification-page/);
+    assert.equal((await request('/notification-settings', deviceToken, 'PUT', { expectedRevision: 1, enabled: false, projects: [], chats: [] })).status, 200);
+    const part = await reader.read(); assert.equal(part.done, false);
+    const frame = new TextDecoder().decode(part.value); assert.match(frame, /"resetRequired":true/); assert.match(frame, /"pending":\[\]/);
+    const response = await request('/notification-events?after=' + initial.nextCursor, deviceToken); assert.equal(response.status, 200);
+    const page = await response.json(); assert.equal(page.resetRequired, true); assert.deepEqual(page.pending, []);
+  } finally { await reader.cancel(); }
 });
 
 test('prompt admission bypasses a five-second catalog and retains point authorization', { timeout: 20000 }, async t => {

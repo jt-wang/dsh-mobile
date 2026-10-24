@@ -149,7 +149,7 @@ export class NotificationFeed {
     });
   }
   private pendingCut(): string { return JSON.stringify(Object.entries(this.watermarks).filter(([, s]) => s.attentionId).map(([id, s]) => [id, s.attentionId]).sort(([a], [b]) => a!.localeCompare(b!))); }
-  private signal(): AbortSignal { return AbortSignal.any([this.lifetime.signal, ...(this.activation ? [this.activation.signal] : []), AbortSignal.timeout(10_000)]); }
+  private signal(producer = true): AbortSignal { return AbortSignal.any([this.lifetime.signal, ...(producer && this.activation ? [this.activation.signal] : []), AbortSignal.timeout(10_000)]); }
   private schedule(): void {
     if (this.initializing || this.lifetime.signal.aborted || !this.activated) return;
     // Only I/O overlaps. Each lane retains its envelope until settlement so a
@@ -188,8 +188,8 @@ export class NotificationFeed {
     do { await this.work; await Promise.all(this.lanes.values()); }
     while ((this.initializing || this.lanes.size || this.queue.length) && !this.lifetime.signal.aborted);
   }
-  private async lookup(id: string): Promise<{ id: string; workspaceId: string; running?: boolean } | undefined> {
-    return this.source.lookup ? this.source.lookup(id, this.signal()) : (await this.source.list(this.signal())).find(s => s.id === id);
+  private async lookup(id: string, signal = this.signal()): Promise<{ id: string; workspaceId: string; running?: boolean } | undefined> {
+    return this.source.lookup ? this.source.lookup(id, signal) : (await this.source.list(signal)).find(s => s.id === id);
   }
   private async accept(id: string, event: NotificationSource, proofs: Map<string, NotificationEvidence>): Promise<void> {
     if (event.time < this.baselineAt) return;
@@ -226,6 +226,9 @@ export class NotificationFeed {
     this.lifetime.signal.throwIfAborted();
     if (activation !== this.activation || activation?.signal.aborted) return;
     if (proof.valid === false || proof.sessionId !== id || proof.workspaceId !== listed.workspaceId || proof.cursor < event.seq || (this.source.evidenceCurrent && !this.source.evidenceCurrent(proof))) { this.degrade('proof_invalid'); return; }
+    // Other lanes may have filled the bounded watermark set during evidence IO.
+    if (!this.watermarks[id] && Object.keys(this.watermarks).length >= 10000) { this.degrade('watermark_limit'); return; }
+    if (this.source.lookupCurrent && !this.source.lookupCurrent(listed)) { this.degrade('proof_invalid'); return; }
     this.batch = new Map();
     try {
     // Unknown newly-created sessions are eligible by a fresh cold opening, not phone pagination.
@@ -299,6 +302,7 @@ export class NotificationFeed {
       // A live lane committed while this recovery read was in flight. Its newer
       // pending episode owns the cut; do not replay stale attention over it.
       if (old?.seq !== observedSeq || this.queue.some(e => e.id === id)) continue;
+      if (!old && Object.keys(this.watermarks).length >= 10000) { this.degrade('watermark_limit'); this.retryLazy(id, pass); continue; }
       this.lazyRetry.delete(id); this.recoveryPending.delete(id);
       const attentionId = proof.pending ? old?.attentionId ?? randomUUID() : undefined;
       if (proof.pending && !old?.attentionId) this.emit(proof, { seq: proof.cursor, time: Date.now(), type: 'tool/call' }, 'attention-needed', attentionId);
@@ -352,7 +356,7 @@ export class NotificationFeed {
     }
     this.save(deviceId, j);
     if (!this.enabledDevices() || !hadEnabled) {
-      this.activation?.abort(); this.activated = false; this.initializing = false; this.baselineReady = false;
+      this.activation?.abort(); this.activation = undefined; this.activated = false; this.initializing = false; this.baselineReady = false;
       this.queue = []; this.skipped.clear(); this.skippedEvicted = false; this.lazyIdle = []; this.lazyRetry.clear();
     }
     this.activate(); if (!same) this.changed(); return j.settings;
@@ -399,7 +403,7 @@ export class NotificationFeed {
       return [a[0], a[1]];
     } catch { throw new HostError('invalid_request'); }
   }
-  async page(deviceId: string, after?: string, limit = 50) {
+  async page(deviceId: string, after?: string, limit = 50, signal?: AbortSignal) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new HostError('invalid_request');
     const cut = after ? this.parseCursor(deviceId, after) : undefined;
     // Only retained journal/pending IDs need current authority. Never scan the
@@ -407,10 +411,18 @@ export class NotificationFeed {
     // the original catalog fallback. Do not retain a pre-await journal copy.
     const initial = this.journal(deviceId);
     const ceiling = initial.sequence;
-    const ids = new Set([...initial.items.map(e => e.sessionId), ...(initial.attentionSessions ?? []), ...Object.keys(this.watermarks).filter(id => this.watermarks[id]?.attentionId)]);
-    const list = this.source.lookup ? (await Promise.all([...ids].map(id => this.lookup(id)))).filter((s): s is NonNullable<typeof s> => !!s) : await this.source.list(this.signal());
+    // Read lifetime is independent of producer activation. Disable must still
+    // deliver its v1 reset, including for legacy sources that honor cancellation.
+    const readSignal = AbortSignal.any([this.signal(false), ...(signal ? [signal] : [])]);
+    readSignal.throwIfAborted();
+    const ids = initial.settings.enabled ? [...new Set([...initial.items.map(e => e.sessionId), ...(initial.attentionSessions ?? []), ...Object.keys(this.watermarks).filter(id => this.watermarks[id]?.attentionId)])] : [];
+    const found: { id: string; workspaceId: string; running?: boolean }[] = [];
+    let index = 0;
+    const list = !initial.settings.enabled ? found : this.source.lookup ? (await Promise.all(Array.from({ length: Math.min(16, ids.length) }, async () => {
+      while (index < ids.length) { readSignal.throwIfAborted(); const listed = await this.lookup(ids[index++]!, readSignal); if (listed) found.push(listed); }
+    })), found) : await this.source.list(readSignal);
     // Listing yields: never overwrite producer writes with a pre-await journal copy.
-    this.lifetime.signal.throwIfAborted();
+    readSignal.throwIfAborted();
     if (this.source.lookupCurrent && list.some(s => !this.source.lookupCurrent!(s))) throw new HostError('unavailable');
     const j = this.journal(deviceId);
     j.items = j.items.filter(e => e.occurredAt > Date.now() - RETENTION); this.save(deviceId, j);
